@@ -79,16 +79,6 @@ record($sftp, 'list /', listing($sftp->rawlist('/')));
 
 $sftp->disconnect();
 
-// attempt returns what $operation returns, or the exception it throws.
-function attempt(callable $operation): mixed
-{
-    try {
-        return $operation();
-    } catch (Throwable $e) {
-        return ['exception' => get_class($e), 'message' => $e->getMessage()];
-    }
-}
-
 // describe keeps the attributes that are the same on every run: times only
 // when the workload set them.
 function describe(array|false $stat, bool $withTimes = false): array|false

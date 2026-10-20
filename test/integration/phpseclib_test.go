@@ -115,6 +115,29 @@ func results(t *testing.T, transcript []line) map[string]any {
 	return byOp
 }
 
+// failures maps each operation in a transcript that failed to its error: the
+// SFTP error for a false result, or the exception it threw.
+func failures(t *testing.T, transcript []line) map[string]string {
+	t.Helper()
+	byOp := make(map[string]string)
+	for _, l := range transcript {
+		var entry struct {
+			Op     string `json:"op"`
+			Result any    `json:"result"`
+			Error  string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(l), &entry); err != nil {
+			t.Fatalf("transcript line %q: %v", l, err)
+		}
+		if entry.Result == false {
+			byOp[entry.Op] = entry.Error
+		} else if thrown, ok := entry.Result.(map[string]any); ok && thrown["exception"] != nil {
+			byOp[entry.Op] = fmt.Sprintf("%v: %v", thrown["exception"], thrown["message"])
+		}
+	}
+	return byOp
+}
+
 // result is how the workload reports a download: its length and SHA-256.
 func result(n int, data []byte) string {
 	return fmt.Sprintf("%d %s", n, digest(data))

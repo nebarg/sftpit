@@ -42,8 +42,9 @@ func (w When) String() string {
 	return "before"
 }
 
-// Action is a fault for one request: a Delay, Stall, Fail, Drop or Freeze.
-// What else an action holds back depends on the session's ReplyOrder.
+// Action is a fault for one request: a Delay, Stall, Fail, Drop or Freeze,
+// or for an OPEN, a PartialUpload. What else an action holds back depends on
+// the session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -92,8 +93,30 @@ type Freeze struct {
 	Limit   time.Duration
 }
 
+// PartialUpload, chosen for an OPEN, cuts off uploads through the handle it
+// opens at Cutoff, so that no write on the handle changes a byte at or beyond
+// it. Each write is decided by its offset and length alone. A write below
+// Cutoff goes through. A write that crosses Cutoff is trimmed to the bytes
+// below it and gets Result once the backend has stored them. A write at or
+// beyond Cutoff gets Result without reaching the backend. Result is a Fail,
+// Drop or Freeze, and its When is ignored.
+//
+// With a Fail, writes below Cutoff still succeed once the cutoff is reached,
+// so a client that sends the whole file stores exactly its first Cutoff
+// bytes, whatever order its writes arrive in. A Drop or Freeze takes effect
+// at the first write that reaches Cutoff, so the same holds for a client that
+// sends its writes in offset order.
+type PartialUpload struct {
+	Cutoff uint64
+	Result Action
+}
+
 func (a Delay) when() When  { return a.When }
 func (a Stall) when() When  { return a.When }
 func (a Fail) when() When   { return a.When }
 func (a Drop) when() When   { return a.When }
 func (a Freeze) when() When { return a.When }
+
+// A session takes a PartialUpload off its OPEN before acting on either, so
+// its when is never asked.
+func (a PartialUpload) when() When { return Before }

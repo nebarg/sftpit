@@ -350,25 +350,72 @@ func TestFaultWaitsEndWithTheSession(t *testing.T) {
 	}
 }
 
-func TestDropNeedsTheConnection(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		fb, backend := startFakeBackend(t, openSSHVersion, "/")
-		clientEnd, proxyEnd := net.Pipe()
-		t.Cleanup(func() { clientEnd.Close() })
-		result := serveInBackground(t.Context(), proxyEnd, backend, sftpproxy.Options{
-			Faults: onPath("/a", sftpproxy.Drop{When: sftpproxy.Before}),
-			Logger: slog.New(slog.DiscardHandler),
-		})
-		client := newRawClient(clientEnd)
-		client.init(t, 3)
+// TestUnusableFaultsEndTheSession checks that a fault the session cannot
+// apply ends it with an error before the request reaches the backend. The
+// session has no Options.Conn.
+func TestUnusableFaultsEndTheSession(t *testing.T) {
+	open := &sftpwire.Open{Path: "/a", Flags: sftpwire.OpenWrite}
+	fail := sftpproxy.Fail{Status: sftpwire.StatusFailure}
+	tests := []struct {
+		name    string
+		request sftpwire.Packet
+		action  sftpproxy.Action
+		err     string
+	}{
+		{
+			name:    "drop without the connection",
+			request: &sftpwire.Stat{Path: "/a"},
+			action:  sftpproxy.Drop{When: sftpproxy.Before},
+			err:     "a sftpproxy.Drop fault needs Options.Conn",
+		},
+		{
+			name:    "partial upload on a request other than OPEN",
+			request: &sftpwire.Stat{Path: "/a"},
+			action:  sftpproxy.PartialUpload{Cutoff: 100, Result: fail},
+			err:     "a PartialUpload fault is for OPEN, not SSH_FXP_STAT",
+		},
+		{
+			name:    "partial upload without a result",
+			request: open,
+			action:  sftpproxy.PartialUpload{Cutoff: 100},
+			err:     "a PartialUpload result must be a Fail, Drop or Freeze, not <nil>",
+		},
+		{
+			name:    "partial upload ending in a delay",
+			request: open,
+			action:  sftpproxy.PartialUpload{Cutoff: 100, Result: sftpproxy.Delay{Duration: time.Second}},
+			err:     "a PartialUpload result must be a Fail, Drop or Freeze, not sftpproxy.Delay",
+		},
+		{
+			name:    "partial upload ending in a drop without the connection",
+			request: open,
+			action:  sftpproxy.PartialUpload{Cutoff: 100, Result: sftpproxy.Drop{}},
+			err:     "a sftpproxy.Drop fault needs Options.Conn",
+		},
+	}
 
-		client.send(t, 1, &sftpwire.Stat{Path: "/a"})
-		client.assertClosed(t)
-		if err := result.wait(t); err == nil || !strings.Contains(err.Error(), "needs Options.Conn") {
-			t.Errorf("Serve = %v, want an error about Options.Conn", err)
-		}
-		if req, ok := receive(t, fb.requests); ok {
-			t.Errorf("backend received %#v", req.packet)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fb, backend := startFakeBackend(t, openSSHVersion, "/")
+				clientEnd, proxyEnd := net.Pipe()
+				t.Cleanup(func() { clientEnd.Close() })
+				result := serveInBackground(t.Context(), proxyEnd, backend, sftpproxy.Options{
+					Faults: onPath("/a", tt.action),
+					Logger: slog.New(slog.DiscardHandler),
+				})
+				client := newRawClient(clientEnd)
+				client.init(t, 3)
+
+				client.send(t, 1, tt.request)
+				client.assertClosed(t)
+				if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
+				}
+				if req, ok := receive(t, fb.requests); ok {
+					t.Errorf("backend received %#v", req.packet)
+				}
+			})
+		})
+	}
 }

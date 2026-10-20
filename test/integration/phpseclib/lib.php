@@ -48,6 +48,16 @@ function record(SFTP $sftp, string $op, mixed $result): void
     echo json_encode($line, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR), "\n";
 }
 
+// attempt returns what $operation returns, or the exception it throws.
+function attempt(callable $operation): mixed
+{
+    try {
+        return $operation();
+    } catch (Throwable $e) {
+        return ['exception' => get_class($e), 'message' => $e->getMessage()];
+    }
+}
+
 function digest(string|false $data): string|false
 {
     return $data === false ? false : strlen($data) . ' ' . hash('sha256', $data);

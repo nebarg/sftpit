@@ -219,7 +219,7 @@ func (s *Server) Close() error {
 		}
 	}
 	for g := range s.conns {
-		g.Close()
+		g.abort()
 	}
 	s.mu.Unlock()
 
@@ -295,7 +295,6 @@ func (s *Server) serveConn(g *gate) {
 		user:           user.Name,
 		home:           user.Home,
 		keyFingerprint: sc.Permissions.Extensions[extKeyFingerprint],
-		ssh:            sc,
 		gate:           g,
 	}
 

@@ -5,7 +5,7 @@
 // each open handle refers to, so every request can be attributed to a file.
 // It can inject a fault into any request it forwards: delay, stall or fail
 // the request, or drop or freeze the connection, before or after the backend
-// acts.
+// acts. It can also cut off an upload at a byte offset.
 package sftpproxy
 
 import (
@@ -53,6 +53,8 @@ type Options struct {
 	// Faults chooses the fault, if any, for each request the proxy would
 	// forward. It is called once per request, in request order, and must not
 	// block. A nil Faults, or a nil Action, lets requests through unchanged.
+	// It is not called for a write that reaches a PartialUpload's cutoff,
+	// which decides that write itself.
 	Faults func(Request) Action
 
 	// Conn is the client's connection, which Drop and Freeze act on. It is
@@ -320,14 +322,8 @@ func (s *session) handleRequest(b []byte) error {
 		s.logRequest(req, rejection)
 		return s.replyNow(sftpwire.AppendPacket(nil, clientID, rejection))
 	}
-	if s.faults != nil {
-		req.action = s.faults(Request{Packet: p, Path: req.path, Target: req.target})
-	}
-	switch req.action.(type) {
-	case Drop, Freeze:
-		if s.conn == nil {
-			return fmt.Errorf("sftpproxy: a %T fault needs Options.Conn", req.action)
-		}
+	if err := s.decide(req); err != nil {
+		return err
 	}
 	req.reply = make(slot, 1)
 	if s.order == CompletionOrder {
@@ -337,6 +333,42 @@ func (s *session) handleRequest(b []byte) error {
 		return err
 	}
 	return s.process(req)
+}
+
+// decide chooses req's fault: the cutoff's, if req is a write that reaches
+// the cutoff on its handle, or else whatever Faults chooses.
+func (s *session) decide(req *request) error {
+	if s.faults == nil || s.cut(req) {
+		return nil
+	}
+	req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
+	if err := s.checkFault(req.packet, req.action); err != nil {
+		return err
+	}
+	if u, ok := req.action.(PartialUpload); ok {
+		req.action, req.upload = nil, &upload{PartialUpload: u}
+	}
+	return nil
+}
+
+// checkFault reports an action that the session cannot apply to p.
+func (s *session) checkFault(p sftpwire.Packet, a Action) error {
+	switch a := a.(type) {
+	case Drop, Freeze:
+		if s.conn == nil {
+			return fmt.Errorf("sftpproxy: a %T fault needs Options.Conn", a)
+		}
+	case PartialUpload:
+		if _, ok := p.(*sftpwire.Open); !ok {
+			return fmt.Errorf("sftpproxy: a PartialUpload fault is for OPEN, not %v", operation(p))
+		}
+		switch a.Result.(type) {
+		case Fail, Drop, Freeze:
+			return s.checkFault(p, a.Result)
+		}
+		return fmt.Errorf("sftpproxy: a PartialUpload result must be a Fail, Drop or Freeze, not %T", a.Result)
+	}
+	return nil
 }
 
 // process applies req's fault if that acts before the backend, then
@@ -604,6 +636,10 @@ func (s *session) drop(req *request) error {
 }
 
 func (s *session) logFault(req *request) {
+	if req.cut {
+		// cut logged it when it decided the request.
+		return
+	}
 	s.logger.Info("injected fault", s.faultAttrs(req)...)
 }
 
@@ -627,6 +663,9 @@ func (s *session) faultAttrs(req *request) []any {
 		attrs = append(attrs, "fault", "drop", "when", a.When, "mode", mode)
 	case Freeze:
 		attrs = append(attrs, "fault", "freeze", "when", a.When, "limit", a.Limit)
+	}
+	if req.cut {
+		attrs = append(attrs, "cutoff", req.upload.Cutoff, "offset", req.packet.(*sftpwire.Write).Offset)
 	}
 	return attrs
 }

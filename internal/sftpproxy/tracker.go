@@ -35,6 +35,13 @@ type request struct {
 	// target is a rename's canonical destination.
 	target string
 
+	// upload is the cutoff on a WRITE's handle or, for an OPEN, the cutoff
+	// the handle it opens will have.
+	upload *upload
+
+	// cut is set when the cutoff decided the request, rather than Faults.
+	cut bool
+
 	reply slot
 
 	// turn is closed, in completion order, once the request has reached the
@@ -51,7 +58,13 @@ type tracker struct {
 	mu      sync.Mutex
 	nextID  uint32
 	pending map[uint32]*request
-	handles map[string]string
+	handles map[string]handle
+}
+
+// handle is an open handle as the tracker knows it.
+type handle struct {
+	path   string
+	upload *upload
 }
 
 // newTracker returns a tracker for a session whose backend default directory
@@ -61,7 +74,7 @@ func newTracker(dir string, exts []sftpwire.Extension) *tracker {
 		dir:        dir,
 		extensions: make(map[string]bool, len(exts)),
 		pending:    make(map[uint32]*request),
-		handles:    make(map[string]string),
+		handles:    make(map[string]handle),
 	}
 	for _, ext := range exts {
 		t.extensions[ext.Name] = true
@@ -135,17 +148,18 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 		p.Path, ok = t.resolve(p.Path)
 		req.path = p.Path
 	case *sftpwire.Close:
-		req.path = t.handles[p.Handle]
+		req.path = t.handles[p.Handle].path
 	case *sftpwire.Read:
-		req.path = t.handles[p.Handle]
+		req.path = t.handles[p.Handle].path
 	case *sftpwire.Write:
-		req.path = t.handles[p.Handle]
+		h := t.handles[p.Handle]
+		req.path, req.upload = h.path, h.upload
 	case *sftpwire.FStat:
-		req.path = t.handles[p.Handle]
+		req.path = t.handles[p.Handle].path
 	case *sftpwire.FSetStat:
-		req.path = t.handles[p.Handle]
+		req.path = t.handles[p.Handle].path
 	case *sftpwire.ReadDir:
-		req.path = t.handles[p.Handle]
+		req.path = t.handles[p.Handle].path
 	default:
 		panic(fmt.Sprintf("sftpproxy: no tracking for %T", p))
 	}
@@ -213,7 +227,7 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 		if _, open := t.handles[h.Handle]; open {
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
-		t.handles[h.Handle] = req.path
+		t.handles[h.Handle] = handle{path: req.path, upload: req.upload}
 	}
 	return req, nil
 }

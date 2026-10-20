@@ -15,8 +15,8 @@ use phpseclib3\Net\SFTP;
 
 $sftp = connect($host, $port, $user, $password, $hostKeysFile);
 if ($direction === 'put') {
-    record($sftp, 'put', $sftp->put('/orders.csv', "$workDir/orders.csv", SFTP::SOURCE_LOCAL_FILE));
+    record($sftp, 'put', attempt(fn () => $sftp->put('/orders.csv', "$workDir/orders.csv", SFTP::SOURCE_LOCAL_FILE)));
 } else {
-    record($sftp, 'get', $sftp->get('/orders.csv', "$workDir/orders.csv"));
+    record($sftp, 'get', attempt(fn () => $sftp->get('/orders.csv', "$workDir/orders.csv")));
 }
 $sftp->disconnect();

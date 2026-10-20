@@ -3,10 +3,10 @@ package sshfront
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
-
-	"golang.org/x/crypto/ssh"
+	"time"
 )
 
 // Conn is an authenticated client connection. Its methods are safe for
@@ -16,7 +16,6 @@ type Conn struct {
 	user           string
 	home           string
 	keyFingerprint string
-	ssh            *ssh.ServerConn
 	gate           *gate
 }
 
@@ -33,8 +32,12 @@ func (c *Conn) Home() string { return c.home }
 // authenticated with, or "" if it logged in with a password.
 func (c *Conn) KeyFingerprint() string { return c.keyFingerprint }
 
-// Close closes the connection normally, so the client sees a TCP FIN.
-func (c *Conn) Close() error { return c.ssh.Close() }
+// Close closes the connection normally, so the client sees a TCP FIN. The
+// server stops reading and writing at once, but discards whatever the client
+// still sends until it closes its end, for up to a second: closing with data
+// unread, as there may be during an upload, makes the kernel reset the
+// connection instead.
+func (c *Conn) Close() error { return c.gate.closeNormally() }
 
 // Reset aborts the connection so the client sees a TCP reset rather than a
 // normal close.
@@ -50,11 +53,19 @@ func (c *Conn) Freeze() { c.gate.freeze() }
 // delivered in order.
 func (c *Conn) Thaw() { c.gate.thaw() }
 
+// drainTimeout bounds how long a normal close waits for the client to close
+// its end, which a client that has seen the FIN does at once.
+const drainTimeout = time.Second
+
 type gate struct {
 	net.Conn
 
-	mu        sync.Mutex
-	flowing   chan struct{}
+	mu      sync.Mutex
+	flowing chan struct{}
+	// draining is set by a normal close, which leaves the connection open
+	// for Close to drain.
+	draining bool
+
 	closed    chan struct{}
 	closeOnce sync.Once
 }
@@ -85,9 +96,56 @@ func (g *gate) Write(p []byte) (int, error) {
 	return g.Conn.Write(p)
 }
 
+// Close closes the connection, after draining it if a normal close has begun.
 func (g *gate) Close() error {
 	g.closeOnce.Do(func() { close(g.closed) })
+	if g.isDraining() {
+		// The client closing its end, or the read deadline that
+		// closeNormally set, ends the drain.
+		io.Copy(io.Discard, g.Conn)
+	}
 	return g.Conn.Close()
+}
+
+// abort closes the connection at once, cutting any drain short.
+func (g *gate) abort() error {
+	g.closeOnce.Do(func() { close(g.closed) })
+	return g.Conn.Close()
+}
+
+// closeNormally stops the SSH layer reading and writing and sends the client
+// a FIN, leaving the connection to be drained and closed once the SSH layer
+// has ended. A connection other than TCP is closed at once.
+func (g *gate) closeNormally() error {
+	tcp, ok := g.Conn.(*net.TCPConn)
+	if !ok {
+		return g.Close()
+	}
+	g.mu.Lock()
+	again := g.draining
+	g.draining = true
+	g.mu.Unlock()
+	if again {
+		return nil
+	}
+	if err := tcp.SetReadDeadline(time.Now().Add(drainTimeout)); err != nil {
+		return fmt.Errorf("sshfront: close: %w", err)
+	}
+	if err := tcp.CloseWrite(); err != nil {
+		// The connection is already closed or reset, so there is nothing to
+		// drain.
+		return g.abort()
+	}
+	// Once stopped, the SSH layer closes the connection as it ends, so it
+	// must not stop before the FIN has gone.
+	g.closeOnce.Do(func() { close(g.closed) })
+	return nil
+}
+
+func (g *gate) isDraining() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.draining
 }
 
 func (g *gate) freeze() {
