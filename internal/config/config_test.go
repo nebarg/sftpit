@@ -81,6 +81,50 @@ func TestLoadAppliesTheFlagOverride(t *testing.T) {
 	}
 }
 
+func TestLoadResolvesTheSeedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "fixtures", "seed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nstorage:\n  seed_dir: fixtures/seed\n", 0o600)
+
+	cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join(dir, "fixtures", "seed"); cfg.SeedDir != want {
+		t.Errorf("SeedDir = %q, want %q", cfg.SeedDir, want)
+	}
+
+	override := t.TempDir()
+	cfg, err = Load(Options{ConfigFile: config, SeedDir: override, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load with --seed-dir: %v", err)
+	}
+	if cfg.SeedDir != override {
+		t.Errorf("SeedDir = %q, want the flag's %q", cfg.SeedDir, override)
+	}
+}
+
+func TestLoadRejectsUnsuitableSeedDirectories(t *testing.T) {
+	file := writeTestFile(t, filepath.Join(t.TempDir(), "orders.csv"), "data", 0o600)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory: %v", err)
+	}
+	tests := map[string]string{
+		filepath.Join(t.TempDir(), "missing"): "no such file",
+		file:                                  "is not a directory",
+		home:                                  "would copy the whole tree",
+		string(filepath.Separator):            "would copy the whole tree",
+	}
+	for seed, want := range tests {
+		if _, err := Load(Options{SeedDir: seed, LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error = %v, want %q", seed, err, want)
+		}
+	}
+}
+
 func TestLoadAcceptsOnlyLoopbackAddresses(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:2122", "127.0.0.2:22", "[::1]:0", "localhost:2122"} {
 		if _, err := Load(Options{SFTPListen: addr, LookupEnv: noEnv}); err != nil {

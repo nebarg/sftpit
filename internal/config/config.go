@@ -54,6 +54,10 @@ type Config struct {
 	// workspace's own.
 	HostKeyDir string
 
+	// SeedDir is the absolute path of the directory copied into the
+	// workspace at startup, or "" for an empty workspace.
+	SeedDir string
+
 	Users []sshfront.User
 
 	// DefaultCredentials reports whether Users is the built-in test user,
@@ -73,6 +77,9 @@ type Options struct {
 	// SFTPListen overrides the configured listen address when non-empty.
 	SFTPListen string
 
+	// SeedDir overrides the configured seed directory when non-empty.
+	SeedDir string
+
 	// EnvFiles are read after the configuration's env files, so their
 	// values override those.
 	EnvFiles []string
@@ -82,10 +89,15 @@ type Options struct {
 }
 
 type fileConfig struct {
-	SchemaVersion int          `yaml:"schema_version"`
-	EnvFile       stringList   `yaml:"env_file"`
-	Server        serverConfig `yaml:"server"`
-	Users         []userConfig `yaml:"users"`
+	SchemaVersion int           `yaml:"schema_version"`
+	EnvFile       stringList    `yaml:"env_file"`
+	Server        serverConfig  `yaml:"server"`
+	Storage       storageConfig `yaml:"storage"`
+	Users         []userConfig  `yaml:"users"`
+}
+
+type storageConfig struct {
+	SeedDir string `yaml:"seed_dir"`
 }
 
 type serverConfig struct {
@@ -155,6 +167,17 @@ func Load(opts Options) (*Config, error) {
 	}
 	if hostKey := f.Server.HostKey; hostKey != "" && hostKey != hostKeyWorkspace {
 		cfg.HostKeyDir = resolvePath(dir, hostKey)
+	}
+	seedDir := opts.SeedDir
+	if seedDir == "" && f.Storage.SeedDir != "" {
+		seedDir = resolvePath(dir, f.Storage.SeedDir)
+	}
+	if seedDir != "" {
+		resolved, err := checkSeedDir(seedDir)
+		if err != nil {
+			return nil, err
+		}
+		cfg.SeedDir = resolved
 	}
 
 	if err := validateUsers(f.Users); err != nil {
@@ -239,6 +262,33 @@ func checkLoopback(addr string) error {
 		return nil
 	}
 	return fmt.Errorf("sftp_listen %q is not a loopback address; sftpit listens only on loopback, such as 127.0.0.1:2122 or [::1]:2122", addr)
+}
+
+// checkSeedDir requires the seed directory to exist and refuses the
+// filesystem root and the home directory, whose whole trees would be copied.
+func checkSeedDir(name string) (string, error) {
+	abs, err := filepath.Abs(name)
+	if err != nil {
+		return "", fmt.Errorf("seed_dir: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("seed_dir: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("seed_dir %s is not a directory", abs)
+	}
+	home, err := os.UserHomeDir()
+	if filepath.Dir(abs) == abs || (err == nil && sameFile(abs, home)) {
+		return "", fmt.Errorf("seed_dir %s would copy the whole tree under it; use a directory of test fixtures", abs)
+	}
+	return abs, nil
+}
+
+func sameFile(a, b string) bool {
+	ai, errA := os.Stat(a)
+	bi, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(ai, bi)
 }
 
 func validateUsers(users []userConfig) error {

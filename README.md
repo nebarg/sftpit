@@ -14,6 +14,14 @@ sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password
 
 `--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces.
 
+To have files ready to download, point sftpit at a directory of fixtures:
+
+```bash
+go run ./cmd/sftpit serve --seed-dir ./tests/sftpit/seed
+```
+
+The directory is copied into the workspace at every start, keeping permissions and modification times, so each run begins with the same files and nothing a client does changes the originals. It may contain only directories and regular files. An empty directory has to hold something, such as a `.gitkeep`, before git will commit it, and SFTP clients see that file too.
+
 ## Configuration
 
 ```bash
@@ -28,6 +36,9 @@ env_file: ".env" # optional; a path or a list of paths
 server:
   sftp_listen: "127.0.0.1:2122"
   host_key: "./hostkeys" # or "workspace" (the default) for keys that change every run
+
+storage:
+  seed_dir: "./seed" # copied into the workspace at every start
 
 users:
   - name: "test"

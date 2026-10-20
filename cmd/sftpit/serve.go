@@ -29,6 +29,7 @@ Flags:
   --config FILE        read settings and users from FILE
   --sftp-listen ADDR   listen on ADDR instead of the configured address
                        (default 127.0.0.1:2122; port 0 picks a free port)
+  --seed-dir DIR       copy the files under DIR into the workspace at startup
   --env-file FILE      also read secrets from FILE; may be repeated, and
                        later files override earlier ones
 `
@@ -39,6 +40,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts := config.Options{}
 	flags.StringVar(&opts.ConfigFile, "config", "", "")
 	flags.StringVar(&opts.SFTPListen, "sftp-listen", "", "")
+	flags.StringVar(&opts.SeedDir, "seed-dir", "", "")
 	flags.Func("env-file", "", func(name string) error {
 		opts.EnvFiles = append(opts.EnvFiles, name)
 		return nil
@@ -66,10 +68,15 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if err := runServer(ctx, cfg, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n", err)
+		if errors.Is(err, backend.ErrUnsupportedFile) || errors.Is(err, errSeedHoldsWorkspace) {
+			return exitUsage
+		}
 		return exitFailure
 	}
 	return exitOK
 }
+
+var errSeedHoldsWorkspace = errors.New("the seed directory contains the workspace, so it would be copied into itself")
 
 // runServer serves SFTP from a new temporary workspace until ctx is
 // cancelled, then shuts down and deletes the workspace.
@@ -105,6 +112,14 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	}
 	defer root.Close()
 	embedded := backend.New(root)
+	if cfg.SeedDir != "" {
+		if within(workspace, cfg.SeedDir) {
+			return errSeedHoldsWorkspace
+		}
+		if err := embedded.Seed(cfg.SeedDir); err != nil {
+			return err
+		}
+	}
 	for _, u := range cfg.Users {
 		if err := embedded.MkdirAll(u.Home); err != nil {
 			return fmt.Errorf("create home %s for %s: %w", u.Home, u.Name, err)
@@ -143,6 +158,21 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	}
 }
 
+// within reports whether name is dir or lies under it, once symlinks in
+// both are resolved.
+func within(name, dir string) bool {
+	name, err := filepath.EvalSymlinks(name)
+	if err != nil {
+		return false
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(dir, name)
+	return err == nil && filepath.IsLocal(rel)
+}
+
 // listenLoopback listens on addr and refuses an address that turns out not
 // to be loopback, as a host name could.
 func listenLoopback(addr string) (net.Listener, error) {
@@ -160,6 +190,9 @@ func listenLoopback(addr string) (net.Listener, error) {
 func printBanner(w io.Writer, addr, workspace string, hostKeys []ssh.Signer, cfg *config.Config) {
 	fmt.Fprintf(w, "sftpit is serving SFTP on %s\n", addr)
 	fmt.Fprintf(w, "  workspace: %s (deleted when sftpit stops)\n", workspace)
+	if cfg.SeedDir != "" {
+		fmt.Fprintf(w, "  seeded from: %s\n", cfg.SeedDir)
+	}
 	fmt.Fprintln(w, "  host keys:")
 	for _, key := range hostKeys {
 		fmt.Fprintf(w, "    %s %s\n", key.PublicKey().Type(), ssh.FingerprintSHA256(key.PublicKey()))

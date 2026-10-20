@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +86,78 @@ users:
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hostkeys", "ssh_host_ed25519_key")); err != nil {
 		t.Errorf("host key not kept in the configured directory: %v", err)
+	}
+}
+
+func TestServeStartsEveryRunFromTheSeed(t *testing.T) {
+	seed := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(seed, "outgoing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(seed, "outgoing", "orders.csv"), "id,total\n1,9.99\n")
+
+	for run := 1; run <= 2; run++ {
+		s := startServe(t, "--sftp-listen", "127.0.0.1:0", "--seed-dir", seed)
+		if !strings.Contains(s.stdout.String(), "seeded from: "+seed) {
+			t.Errorf("run %d: banner does not name the seed:\n%s", run, s.stdout.String())
+		}
+		c := s.dial(t, "test", "test")
+		f, err := c.Open("/outgoing/orders.csv")
+		if err != nil {
+			t.Fatalf("run %d: Open a seeded file: %v", run, err)
+		}
+		var got bytes.Buffer
+		if _, err := f.WriteTo(&got); err != nil || got.String() != "id,total\n1,9.99\n" {
+			t.Fatalf("run %d: downloaded %q, %v", run, got.String(), err)
+		}
+		f.Close()
+		if _, err := c.Stat("/outgoing/uploaded.csv"); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("run %d: a file uploaded in an earlier run is still there (%v)", run, err)
+		}
+
+		if err := c.Remove("/outgoing/orders.csv"); err != nil {
+			t.Fatalf("run %d: Remove: %v", run, err)
+		}
+		up, err := c.Create("/outgoing/uploaded.csv")
+		if err != nil {
+			t.Fatalf("run %d: Create: %v", run, err)
+		}
+		up.Close()
+		s.stop(t)
+	}
+	if _, err := os.Stat(filepath.Join(seed, "outgoing", "orders.csv")); err != nil {
+		t.Errorf("seed file changed by a client: %v", err)
+	}
+}
+
+func TestServeRejectsUnusableSeeds(t *testing.T) {
+	withLink := t.TempDir()
+	writeTestFile(t, filepath.Join(withLink, "orders.csv"), "data")
+	if err := os.Symlink("orders.csv", filepath.Join(withLink, "link.csv")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	var stdout, stderr syncBuffer
+	code := run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--seed-dir", withLink}, &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "link.csv: only regular files and directories") {
+		t.Errorf("seed with a symlink: exit %d, stderr %q", code, stderr.String())
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	holdsWorkspace := t.TempDir()
+	tmp := filepath.Join(holdsWorkspace, "tmp")
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmp)
+	stderr = syncBuffer{}
+	code = run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--seed-dir", holdsWorkspace}, &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "contains the workspace") {
+		t.Errorf("seed holding the workspace: exit %d, stderr %q", code, stderr.String())
+	}
+	if entries, _ := os.ReadDir(tmp); len(entries) != 0 {
+		t.Errorf("workspace left behind in %s: %v", tmp, entries)
 	}
 }
 
