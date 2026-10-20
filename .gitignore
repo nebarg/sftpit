@@ -1,0 +1,14 @@
+/bin/
+/dist/
+/sandbox-data/
+/work/
+
+.env
+.env.*
+!.env.example
+
+*.out
+*.test
+*.prof
+
+.DS_Store
