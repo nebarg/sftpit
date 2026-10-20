@@ -41,7 +41,7 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-func TestTrackResolvesPathsInPlace(t *testing.T) {
+func TestDescribeResolvesPathsInPlace(t *testing.T) {
 	tr := newTracker("/home/p", allExtensions)
 
 	tests := []struct {
@@ -64,13 +64,13 @@ func TestTrackResolvesPathsInPlace(t *testing.T) {
 		{packet: &sftpwire.PosixRename{OldPath: "/x/../a", NewPath: "b"}, wantPath: "/a", wantTarget: "/home/p/b"},
 	}
 	for _, tt := range tests {
-		req, rejection := tr.track(1, tt.packet, nil)
+		req, rejection := tr.describe(1, tt.packet)
 		if rejection != nil {
-			t.Errorf("track(%#v) rejected with %v", tt.packet, rejection.Code)
+			t.Errorf("describe(%#v) rejected with %v", tt.packet, rejection.Code)
 			continue
 		}
 		if req.path != tt.wantPath || req.target != tt.wantTarget {
-			t.Errorf("track(%T) path %q target %q, want %q and %q", tt.packet, req.path, req.target, tt.wantPath, tt.wantTarget)
+			t.Errorf("describe(%T) path %q target %q, want %q and %q", tt.packet, req.path, req.target, tt.wantPath, tt.wantTarget)
 		}
 		forwarded := string(sftpwire.AppendPacket(nil, 0, tt.packet))
 		for _, p := range []string{tt.wantPath, tt.wantTarget} {
@@ -81,7 +81,7 @@ func TestTrackResolvesPathsInPlace(t *testing.T) {
 	}
 }
 
-func TestTrackAnswersWithoutForwarding(t *testing.T) {
+func TestDescribeAnswersWithoutForwarding(t *testing.T) {
 	tests := []struct {
 		name   string
 		exts   []sftpwire.Extension
@@ -100,15 +100,12 @@ func TestTrackAnswersWithoutForwarding(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tr := newTracker("/", tt.exts)
-			_, rejection := tr.track(1, tt.packet, nil)
+			_, rejection := tr.describe(1, tt.packet)
 			if rejection == nil {
-				t.Fatal("track forwarded the request")
+				t.Fatal("describe accepted the request for forwarding")
 			}
 			if rejection.Code != tt.want || rejection.Message == "" {
-				t.Errorf("track answered %v %q, want %v with OpenSSH's message", rejection.Code, rejection.Message, tt.want)
-			}
-			if len(tr.pending) != 0 {
-				t.Errorf("track left %d pending requests", len(tr.pending))
+				t.Errorf("describe answered %v %q, want %v with OpenSSH's message", rejection.Code, rejection.Message, tt.want)
 			}
 		})
 	}
@@ -117,11 +114,11 @@ func TestTrackAnswersWithoutForwarding(t *testing.T) {
 func TestHandleAttribution(t *testing.T) {
 	tr := newTracker("/", nil)
 
-	open, _ := tr.track(1, &sftpwire.Open{Path: "/in/orders.csv", Flags: sftpwire.OpenWrite}, nil)
+	open := forward(t, tr, 1, &sftpwire.Open{Path: "/in/orders.csv", Flags: sftpwire.OpenWrite})
 	if _, err := tr.complete(open.proxyID, &sftpwire.HandleReply{Handle: "h1"}); err != nil {
 		t.Fatalf("complete OPEN: %v", err)
 	}
-	dir, _ := tr.track(2, &sftpwire.OpenDir{Path: "/in"}, nil)
+	dir := forward(t, tr, 2, &sftpwire.OpenDir{Path: "/in"})
 	if _, err := tr.complete(dir.proxyID, &sftpwire.HandleReply{Handle: "h2"}); err != nil {
 		t.Fatalf("complete OPENDIR: %v", err)
 	}
@@ -140,20 +137,16 @@ func TestHandleAttribution(t *testing.T) {
 		{packet: &sftpwire.Read{Handle: "unknown"}, wantPath: ""},
 	}
 	for _, tt := range onHandle {
-		req, rejection := tr.track(3, tt.packet, nil)
-		if rejection != nil {
-			t.Fatalf("track(%#v) rejected with %v, want it forwarded", tt.packet, rejection.Code)
-		}
-		if req.path != tt.wantPath {
-			t.Errorf("track(%#v) path = %q, want %q", tt.packet, req.path, tt.wantPath)
+		if req := forward(t, tr, 3, tt.packet); req.path != tt.wantPath {
+			t.Errorf("forward(%#v) path = %q, want %q", tt.packet, req.path, tt.wantPath)
 		}
 	}
 
-	reopen, _ := tr.track(4, &sftpwire.Open{Path: "/in/next.csv"}, nil)
+	reopen := forward(t, tr, 4, &sftpwire.Open{Path: "/in/next.csv"})
 	if _, err := tr.complete(reopen.proxyID, &sftpwire.HandleReply{Handle: "h1"}); err != nil {
 		t.Fatalf("a closed handle could not be reused: %v", err)
 	}
-	if req, _ := tr.track(5, &sftpwire.Read{Handle: "h1"}, nil); req.path != "/in/next.csv" {
+	if req := forward(t, tr, 5, &sftpwire.Read{Handle: "h1"}); req.path != "/in/next.csv" {
 		t.Errorf("reused handle path = %q, want /in/next.csv", req.path)
 	}
 }
@@ -177,7 +170,7 @@ func TestCompleteRejectsReplyThatDoesNotFit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tr := newTracker("/", allExtensions)
-			req, _ := tr.track(1, tt.request, nil)
+			req := forward(t, tr, 1, tt.request)
 			_, err := tr.complete(req.proxyID, tt.reply)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("complete error = %v, want it to contain %q", err, tt.wantErr)
@@ -202,7 +195,7 @@ func TestCompleteAcceptsFittingReplies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		tr := newTracker("/", allExtensions)
-		req, _ := tr.track(1, tt.request, nil)
+		req := forward(t, tr, 1, tt.request)
 		if _, err := tr.complete(req.proxyID, tt.reply); err != nil {
 			t.Errorf("complete(%T after %T): %v", tt.reply, tt.request, err)
 		}
@@ -215,11 +208,11 @@ func TestCompleteRejectsUnknownRequestAndOpenHandle(t *testing.T) {
 		t.Errorf("complete for an unknown request: error = %v", err)
 	}
 
-	first, _ := tr.track(1, &sftpwire.Open{Path: "/a"}, nil)
+	first := forward(t, tr, 1, &sftpwire.Open{Path: "/a"})
 	if _, err := tr.complete(first.proxyID, &sftpwire.HandleReply{Handle: "h"}); err != nil {
 		t.Fatalf("complete first OPEN: %v", err)
 	}
-	second, _ := tr.track(2, &sftpwire.Open{Path: "/b"}, nil)
+	second := forward(t, tr, 2, &sftpwire.Open{Path: "/b"})
 	if _, err := tr.complete(second.proxyID, &sftpwire.HandleReply{Handle: "h"}); err == nil || !strings.Contains(err.Error(), "already open") {
 		t.Errorf("complete with a handle that is still open: error = %v", err)
 	}
@@ -236,10 +229,41 @@ func TestProxyIDsSkipPendingRequests(t *testing.T) {
 
 	var got []uint32
 	for range 2 {
-		req, _ := tr.track(7, &sftpwire.Stat{Path: "/a"}, nil)
+		req := forward(t, tr, 7, &sftpwire.Stat{Path: "/a"})
 		got = append(got, req.proxyID)
 	}
 	if got[0] != 0xffffffff || got[1] != 1 {
 		t.Errorf("proxy IDs = %v, want [4294967295 1]: wrap around and skip the pending 0", got)
 	}
+}
+
+func TestCloseInvalidatesItsHandleOnlyWhenForwarded(t *testing.T) {
+	tr := newTracker("/", nil)
+	open := forward(t, tr, 1, &sftpwire.Open{Path: "/in/orders.csv"})
+	if _, err := tr.complete(open.proxyID, &sftpwire.HandleReply{Handle: "h"}); err != nil {
+		t.Fatalf("complete OPEN: %v", err)
+	}
+
+	if req, _ := tr.describe(2, &sftpwire.Close{Handle: "h"}); req.path != "/in/orders.csv" {
+		t.Fatalf("describe(CLOSE) path = %q, want /in/orders.csv", req.path)
+	}
+	if req, _ := tr.describe(3, &sftpwire.Read{Handle: "h"}); req.path != "/in/orders.csv" {
+		t.Errorf("after describing a CLOSE, READ path = %q, want the handle still known", req.path)
+	}
+	forward(t, tr, 4, &sftpwire.Close{Handle: "h"})
+	if req, _ := tr.describe(5, &sftpwire.Read{Handle: "h"}); req.path != "" {
+		t.Errorf("after forwarding a CLOSE, READ path = %q, want the handle unknown", req.path)
+	}
+}
+
+// forward describes and registers p, as the session does for a request it
+// forwards to the backend.
+func forward(t *testing.T, tr *tracker, clientID uint32, p sftpwire.Packet) *request {
+	t.Helper()
+	req, rejection := tr.describe(clientID, p)
+	if rejection != nil {
+		t.Fatalf("describe(%#v) rejected with %v", p, rejection.Code)
+	}
+	tr.register(req)
+	return req
 }

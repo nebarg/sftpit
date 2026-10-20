@@ -68,7 +68,7 @@ func TestOpenSSHTransparency(t *testing.T) {
 	transcripts := make(map[route][]line)
 	trees := make(map[route][]treeEntry)
 	for _, via := range routes {
-		srv := startServer(t, via)
+		srv := startServer(t, via, nil)
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "upload.bin"), upload)
 		writeFile(t, filepath.Join(work, "small.txt"), small)
@@ -106,6 +106,17 @@ func TestOpenSSHTransparency(t *testing.T) {
 
 func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line {
 	t.Helper()
+	out, err := openSSH(t, sftpPath, srv, work, openSSHBatch)
+	if err != nil {
+		t.Fatalf("sftp failed: %v\n%s", err, out)
+	}
+	return splitLines(out)
+}
+
+// openSSH runs batch with the OpenSSH sftp client in work, adding options to
+// its command line, and returns everything it printed.
+func openSSH(t *testing.T, sftpPath string, srv *server, work, batch string, options ...string) ([]byte, error) {
+	t.Helper()
 	dir := t.TempDir()
 	keyFile := writeClientKey(t, dir)
 	var known []string
@@ -114,13 +125,13 @@ func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line 
 	}
 	knownHosts := filepath.Join(dir, "known_hosts")
 	writeFile(t, knownHosts, []byte(strings.Join(known, "\n")+"\n"))
-	batch := filepath.Join(dir, "batch")
-	writeFile(t, batch, []byte(openSSHBatch))
+	batchFile := filepath.Join(dir, "batch")
+	writeFile(t, batchFile, []byte(batch))
 
 	ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, sftpPath,
-		"-b", batch,
+	args := []string{
+		"-b", batchFile,
 		"-P", srv.port,
 		"-F", os.DevNull,
 		"-i", keyFile,
@@ -128,14 +139,13 @@ func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line 
 		"-o", "IdentityAgent=none",
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile="+knownHosts,
-		"-o", "GlobalKnownHostsFile="+os.DevNull,
-		testUser+"@127.0.0.1",
-	)
-	cmd.Dir = work
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("sftp failed: %v\n%s", err, out)
+		"-o", "UserKnownHostsFile=" + knownHosts,
+		"-o", "GlobalKnownHostsFile=" + os.DevNull,
 	}
-	return splitLines(out)
+	for _, o := range options {
+		args = append(args, "-o", o)
+	}
+	cmd := exec.CommandContext(ctx, sftpPath, append(args, testUser+"@127.0.0.1")...)
+	cmd.Dir = work
+	return cmd.CombinedOutput()
 }

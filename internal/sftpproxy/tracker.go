@@ -8,16 +8,24 @@ import (
 	"sftpit/internal/sftpwire"
 )
 
-// slot holds the reply to one client request until every earlier reply has
-// been written.
-type slot chan []byte
+// slot holds the outcome of one client request until every earlier reply
+// has been written.
+type slot chan outcome
 
-// request is a client request that has been forwarded to the backend, or
-// answered by the proxy itself.
+// outcome is what the client gets for a request: a reply packet, or a
+// connection drop in its place.
+type outcome struct {
+	packet []byte
+	drop   *request
+}
+
+// request is a client request on its way to the backend, or answered by the
+// proxy itself.
 type request struct {
 	clientID uint32
 	proxyID  uint32
 	packet   sftpwire.Packet
+	action   Action
 
 	// path is the canonical path the request acts on. For a request on a
 	// handle, it is the path the handle was opened with, or empty if the
@@ -57,18 +65,17 @@ func newTracker(dir string, exts []sftpwire.Extension) *tracker {
 	return t
 }
 
-// track resolves the paths in p in place and registers p as pending under a
-// new proxy request ID, with reply as the slot for its answer. If the proxy
-// must answer p itself instead, track registers nothing and returns the
-// status to send.
+// describe resolves the paths in p in place and returns the request to
+// register when it is forwarded. If the proxy must answer p itself instead,
+// describe returns the status to send.
 //
 // Requests on unknown handles are forwarded: the backend knows no more
 // handles than the proxy does, and its own error is the faithful answer.
-func (t *tracker) track(clientID uint32, p sftpwire.Packet, reply slot) (*request, *sftpwire.StatusReply) {
+func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpwire.StatusReply) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	req := &request{clientID: clientID, packet: p, reply: reply}
+	req := &request{clientID: clientID, packet: p}
 	ok := true
 	switch p := p.(type) {
 	case *sftpwire.Open:
@@ -124,10 +131,7 @@ func (t *tracker) track(clientID uint32, p sftpwire.Packet, reply slot) (*reques
 		p.Path, ok = t.resolve(p.Path)
 		req.path = p.Path
 	case *sftpwire.Close:
-		// The draft makes a handle invalid as soon as CLOSE is sent, even if
-		// the close then fails.
 		req.path = t.handles[p.Handle]
-		delete(t.handles, p.Handle)
 	case *sftpwire.Read:
 		req.path = t.handles[p.Handle]
 	case *sftpwire.Write:
@@ -144,10 +148,24 @@ func (t *tracker) track(clientID uint32, p sftpwire.Packet, reply slot) (*reques
 	if !ok {
 		return req, status(sftpwire.StatusNoSuchFile)
 	}
+	return req, nil
+}
+
+// register records req as pending under a new proxy request ID, just before
+// it is forwarded. A request the proxy answers itself is never registered,
+// so it leaves no trace: a CLOSE that fails before the backend sees it keeps
+// its handle known, as the backend still has it open.
+func (t *tracker) register(req *request) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
 	req.proxyID = t.newID()
 	t.pending[req.proxyID] = req
-	return req, nil
+	if c, ok := req.packet.(*sftpwire.Close); ok {
+		// The draft makes a handle invalid as soon as CLOSE is sent, even if
+		// the close then fails.
+		delete(t.handles, c.Handle)
+	}
 }
 
 // resolve makes p absolute against the backend's default directory and

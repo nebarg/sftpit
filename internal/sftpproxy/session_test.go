@@ -444,7 +444,7 @@ func startProxyWithLogger(t *testing.T, ctx context.Context, backend net.Conn, l
 	result := &proxyResult{done: make(chan struct{})}
 	go func() {
 		defer close(result.done)
-		result.err = sftpproxy.Serve(ctx, proxyEnd, backend, logger)
+		result.err = sftpproxy.Serve(ctx, proxyEnd, backend, sftpproxy.Options{Logger: logger})
 	}()
 	t.Cleanup(func() {
 		clientEnd.Close()

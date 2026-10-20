@@ -33,7 +33,7 @@ func TestPhpseclibTransparency(t *testing.T) {
 	transcripts := make(map[route][]line)
 	trees := make(map[route][]treeEntry)
 	for _, via := range routes {
-		srv := startServer(t, via)
+		srv := startServer(t, via, nil)
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "orders.csv"), upload)
 		transcripts[via] = runPhpseclib(t, php, srv, work)

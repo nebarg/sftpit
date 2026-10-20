@@ -130,7 +130,7 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 		HostKeys: hostKeys,
 		Users:    cfg.Users,
 		Handler: func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
-			return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), logger)
+			return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), sftpproxy.Options{Logger: logger})
 		},
 		Logger: logger,
 	})
