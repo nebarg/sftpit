@@ -36,6 +36,10 @@ type request struct {
 	target string
 
 	reply slot
+
+	// turn is closed, in completion order, once the request has reached the
+	// backend or been answered, so later requests on its files can go.
+	turn chan struct{}
 }
 
 // tracker maps the proxy's backend request IDs to client requests, records

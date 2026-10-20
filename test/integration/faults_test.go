@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,13 +22,7 @@ ls -1 in
 // TestOpenSSHRenameFaults injects each response fault into OpenSSH's rename
 // and checks what the client reports and which name the file ends up under.
 func TestOpenSSHRenameFaults(t *testing.T) {
-	if testing.Short() {
-		t.Skip("runs the OpenSSH sftp client")
-	}
-	sftpPath, err := exec.LookPath("sftp")
-	if err != nil {
-		t.Skip("OpenSSH sftp client not installed")
-	}
+	sftpPath := openSSHOrSkip(t)
 
 	const (
 		closed  = "Connection to 127.0.0.1 closed by remote host."
@@ -61,12 +54,12 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 	data := []byte("id,total\n1,9.99\n")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := startServer(t, proxied, func(r sftpproxy.Request) sftpproxy.Action {
+			srv := startServer(t, proxied, sftpproxy.Options{Faults: func(r sftpproxy.Request) sftpproxy.Action {
 				if r.Target == "/in/orders.csv" {
 					return tt.action
 				}
 				return nil
-			})
+			}})
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 

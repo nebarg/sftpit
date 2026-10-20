@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"sftpit/internal/sftpproxy"
 )
 
 // openSSHBatch is run with sftp -b. A leading "-" lets the batch continue
@@ -51,13 +53,7 @@ ls -1 in
 `
 
 func TestOpenSSHTransparency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("runs the OpenSSH sftp client")
-	}
-	sftpPath, err := exec.LookPath("sftp")
-	if err != nil {
-		t.Skip("OpenSSH sftp client not installed")
-	}
+	sftpPath := openSSHOrSkip(t)
 
 	upload := randomBytes(4<<20 + 321)
 	small := []byte("small file\n")
@@ -68,7 +64,7 @@ func TestOpenSSHTransparency(t *testing.T) {
 	transcripts := make(map[route][]line)
 	trees := make(map[route][]treeEntry)
 	for _, via := range routes {
-		srv := startServer(t, via, nil)
+		srv := startServer(t, via, sftpproxy.Options{})
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "upload.bin"), upload)
 		writeFile(t, filepath.Join(work, "small.txt"), small)
@@ -102,6 +98,20 @@ func TestOpenSSHTransparency(t *testing.T) {
 			t.Errorf("in/stamped.txt: mode %v mtime %s, want -rw-r----- and %s", e.mode, e.mtime, stamp.Format(time.RFC3339))
 		}
 	}
+}
+
+// openSSHOrSkip returns the path of OpenSSH's sftp client, or skips the test
+// if it cannot run.
+func openSSHOrSkip(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("runs the OpenSSH sftp client")
+	}
+	sftpPath, err := exec.LookPath("sftp")
+	if err != nil {
+		t.Skip("OpenSSH sftp client not installed")
+	}
+	return sftpPath
 }
 
 func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line {

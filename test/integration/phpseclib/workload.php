@@ -10,7 +10,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/vendor/autoload.php';
+require __DIR__ . '/lib.php';
 
 use phpseclib3\Net\SFTP;
 
@@ -18,15 +18,7 @@ use phpseclib3\Net\SFTP;
 
 const STAMP = 1772600767;
 
-$sftp = new SFTP($host, (int) $port, 10);
-if (!trusted($sftp->getServerPublicHostKey(), $hostKeysFile)) {
-    fwrite(STDERR, "untrusted host key\n");
-    exit(1);
-}
-if (!$sftp->login($user, $password)) {
-    fwrite(STDERR, "login failed\n");
-    exit(1);
-}
+$sftp = connect($host, $port, $user, $password, $hostKeysFile);
 
 record($sftp, 'pwd', $sftp->pwd());
 record($sftp, 'mkdir /incoming', $sftp->mkdir('/incoming'));
@@ -87,28 +79,6 @@ record($sftp, 'list /', listing($sftp->rawlist('/')));
 
 $sftp->disconnect();
 
-function trusted(string $hostKey, string $hostKeysFile): bool
-{
-    // phpseclib names an RSA key by its signature algorithm, so compare the
-    // key blobs only.
-    $blob = explode(' ', $hostKey)[1] ?? '';
-    foreach (file($hostKeysFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-        if ((explode(' ', $line)[1] ?? null) === $blob) {
-            return true;
-        }
-    }
-    return false;
-}
-
-function record(SFTP $sftp, string $op, mixed $result): void
-{
-    $line = ['op' => $op, 'result' => $result];
-    if ($result === false) {
-        $line['error'] = $sftp->getLastSFTPError();
-    }
-    echo json_encode($line, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR), "\n";
-}
-
 // attempt returns what $operation returns, or the exception it throws.
 function attempt(callable $operation): mixed
 {
@@ -117,11 +87,6 @@ function attempt(callable $operation): mixed
     } catch (Throwable $e) {
         return ['exception' => get_class($e), 'message' => $e->getMessage()];
     }
-}
-
-function digest(string|false $data): string|false
-{
-    return $data === false ? false : strlen($data) . ' ' . hash('sha256', $data);
 }
 
 // describe keeps the attributes that are the same on every run: times only

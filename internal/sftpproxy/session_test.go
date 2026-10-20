@@ -394,7 +394,7 @@ func TestDebugLogAttributesHandleRequests(t *testing.T) {
 	var logs syncBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	fb, backend := startFakeBackend(t, openSSHVersion, "/home/partner-b")
-	client, _ := startProxyWithLogger(t, context.Background(), backend, logger)
+	client, _ := startProxyWith(t, context.Background(), backend, sftpproxy.Options{Logger: logger})
 	client.init(t, 3)
 
 	client.send(t, 1, &sftpwire.Open{Path: "orders.csv", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate})
@@ -433,18 +433,18 @@ func (r *proxyResult) wait(t *testing.T) error {
 
 func startProxy(t *testing.T, ctx context.Context, backend net.Conn) (*rawClient, *proxyResult) {
 	t.Helper()
-	return startProxyWithLogger(t, ctx, backend, slog.New(slog.DiscardHandler))
+	return startProxyWith(t, ctx, backend, sftpproxy.Options{Logger: slog.New(slog.DiscardHandler)})
 }
 
-// startProxyWithLogger runs Serve between a pipe to a raw test client and
-// backend.
-func startProxyWithLogger(t *testing.T, ctx context.Context, backend net.Conn, logger *slog.Logger) (*rawClient, *proxyResult) {
+// startProxyWith runs Serve with opts between a pipe to a raw test client
+// and backend.
+func startProxyWith(t *testing.T, ctx context.Context, backend net.Conn, opts sftpproxy.Options) (*rawClient, *proxyResult) {
 	t.Helper()
 	clientEnd, proxyEnd := net.Pipe()
 	result := &proxyResult{done: make(chan struct{})}
 	go func() {
 		defer close(result.done)
-		result.err = sftpproxy.Serve(ctx, proxyEnd, backend, sftpproxy.Options{Logger: logger})
+		result.err = sftpproxy.Serve(ctx, proxyEnd, backend, opts)
 	}()
 	t.Cleanup(func() {
 		clientEnd.Close()

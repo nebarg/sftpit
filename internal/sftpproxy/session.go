@@ -59,6 +59,10 @@ type Options struct {
 	// required if Faults can return either.
 	Conn Conn
 
+	// ReplyOrder is the order in which replies reach the client. The zero
+	// value is RequestOrder.
+	ReplyOrder ReplyOrder
+
 	// Logger receives injected faults and, at debug level, every request.
 	// Nil means slog.Default().
 	Logger *slog.Logger
@@ -83,9 +87,9 @@ type Conn interface {
 // first. Every fault wait has ended by the time Serve returns, so no request
 // reaches the backend afterwards.
 //
-// Replies reach the client in the order of its requests. A malformed client
-// request ends the session, as it does in OpenSSH's sftp-server, and so does
-// a backend reply that does not fit its request.
+// Replies reach the client in the order opts.ReplyOrder sets. A malformed
+// client request ends the session, as it does in OpenSSH's sftp-server, and
+// so does a backend reply that does not fit its request.
 func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options) error {
 	s := &session{
 		client:    client,
@@ -94,12 +98,17 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		backendIn: bufio.NewReader(backend),
 		faults:    opts.Faults,
 		conn:      opts.Conn,
+		order:     opts.ReplyOrder,
 		logger:    opts.Logger,
 		replies:   make(chan slot, maxQueuedReplies),
+		waiting:   make(map[string]*request),
 		done:      make(chan struct{}),
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
+	}
+	if s.order == CompletionOrder {
+		s.inFlight = make(chan struct{}, maxQueuedReplies)
 	}
 	stopWhenCancelled := context.AfterFunc(ctx, func() { s.stop(ctx.Err()) })
 	defer stopWhenCancelled()
@@ -122,12 +131,37 @@ type session struct {
 	backendIn *bufio.Reader
 	faults    func(Request) Action
 	conn      Conn
+	order     ReplyOrder
 	logger    *slog.Logger
 	tracker   *tracker
 
 	// wg tracks every goroutine of the session, including those holding
-	// replies for a fault.
+	// requests and replies for a fault.
 	wg sync.WaitGroup
+
+	// inFlight bounds the requests a session handles at once in completion
+	// order, as the reply queue does in request order.
+	inFlight chan struct{}
+
+	// sendMu keeps requests to the backend whole and in the order they pass
+	// the halted check, when several goroutines forward them.
+	sendMu sync.Mutex
+
+	mu sync.Mutex
+	// halted stops requests reaching the backend once a drop is under way.
+	halted bool
+	// unanswered counts the requests the backend has yet to answer.
+	unanswered int
+	// dropping is set, in completion order, once a drop has its place in the
+	// reply stream or is waiting for one, so that a second drop that reaches
+	// its turn changes nothing.
+	dropping bool
+	// pendingDrop waits, in completion order, for the backend to answer
+	// every request it has.
+	pendingDrop *request
+	// waiting maps each file, in completion order, to its latest request
+	// that has yet to have its turn.
+	waiting map[string]*request
 
 	// version is the VERSION packet sent to the client, sent again if the
 	// client repeats INIT, as OpenSSH and pkg/sftp both do.
@@ -248,20 +282,33 @@ func (s *session) readBackend() ([]byte, error) {
 }
 
 // relayRequests forwards client requests to the backend until the client
-// ends the session.
+// ends the session or a drop stops forwarding.
 func (s *session) relayRequests() error {
-	for {
+	for !s.isHalted() {
 		b, err := sftpwire.ReadPacket(s.clientIn, maxPacketLength)
 		if err != nil {
+			if s.isHalted() {
+				// The drop closed the connection under the read.
+				break
+			}
 			return err
 		}
 		if err := s.handleRequest(b); err != nil {
 			return err
 		}
 	}
+	<-s.done
+	return errStopped
 }
 
 func (s *session) handleRequest(b []byte) error {
+	if s.order == CompletionOrder {
+		select {
+		case s.inFlight <- struct{}{}:
+		case <-s.done:
+			return errStopped
+		}
+	}
 	if sftpwire.PacketType(b[0]) == sftpwire.TypeInit {
 		if _, err := sftpwire.DecodeInit(b); err != nil {
 			return err
@@ -293,16 +340,23 @@ func (s *session) handleRequest(b []byte) error {
 		}
 	}
 	req.reply = make(slot, 1)
+	if s.order == CompletionOrder {
+		return s.schedule(req)
+	}
 	if err := s.enqueue(req.reply); err != nil {
 		return err
 	}
-	return s.forward(req)
+	return s.process(req)
 }
 
-// forward passes req to the backend, first applying its fault if that acts
-// before the backend. It returns only once req has been forwarded or
-// answered, so no later request overtakes it.
-func (s *session) forward(req *request) error {
+// process applies req's fault if that acts before the backend, then
+// forwards req unless the fault answered it or a drop has stopped
+// forwarding. In request order it runs on the request goroutine, so a held
+// request holds back every later one.
+func (s *session) process(req *request) error {
+	if s.isHalted() {
+		return nil
+	}
 	if req.action != nil && req.action.when() == Before {
 		s.logFault(req)
 		switch a := req.action.(type) {
@@ -315,30 +369,93 @@ func (s *session) forward(req *request) error {
 				return err
 			}
 		case Fail:
-			req.reply <- outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))}
+			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
 			return nil
 		case Drop, Freeze:
-			req.reply <- outcome{drop: req}
-			return s.halt()
+			s.stopForwarding()
+			s.placeDrop(req)
+			return nil
 		}
 	}
+	return s.send(req)
+}
+
+// send forwards req to the backend unless a drop has stopped forwarding.
+// Nothing reaches the backend after a request whose drop comes after it.
+func (s *session) send(req *request) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
+	s.mu.Lock()
+	if s.halted {
+		s.mu.Unlock()
+		return nil
+	}
+	s.unanswered++
+	switch req.action.(type) {
+	case Drop, Freeze:
+		s.halted = true
+	}
+	s.mu.Unlock()
 
 	s.tracker.register(req)
 	if _, err := s.backend.Write(sftpwire.AppendPacket(nil, req.proxyID, req.packet)); err != nil {
 		return fmt.Errorf("sftpproxy: write backend request: %w", err)
 	}
-	switch req.action.(type) {
-	case Drop, Freeze:
-		return s.halt()
-	}
 	return nil
 }
 
-// halt forwards no more requests and waits for the session to end, which a
-// Drop or Freeze does once every earlier reply has been written.
-func (s *session) halt() error {
-	<-s.done
-	return errStopped
+func (s *session) stopForwarding() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.halted = true
+}
+
+func (s *session) isHalted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.halted
+}
+
+// placeDrop puts req's drop in the reply stream. In request order its slot
+// already has its place, behind every earlier reply. In completion order it
+// goes in once the backend has answered every request it has, behind the
+// replies ready by then; replies still held by a fault are lost with the
+// connection.
+func (s *session) placeDrop(req *request) {
+	if s.order == RequestOrder {
+		s.answer(req.reply, outcome{drop: req})
+		return
+	}
+	s.mu.Lock()
+	if s.dropping {
+		s.mu.Unlock()
+		return
+	}
+	s.dropping = true
+	if s.unanswered > 0 {
+		s.pendingDrop = req
+		req = nil
+	}
+	s.mu.Unlock()
+	if req != nil {
+		s.answer(req.reply, outcome{drop: req})
+	}
+}
+
+// answered records that the backend's reply to a request has been
+// delivered, and places a drop that was waiting for the backend to finish.
+func (s *session) answered() {
+	s.mu.Lock()
+	s.unanswered--
+	var drop *request
+	if s.unanswered == 0 {
+		drop, s.pendingDrop = s.pendingDrop, nil
+	}
+	s.mu.Unlock()
+	if drop != nil {
+		s.answer(drop.reply, outcome{drop: drop})
+	}
 }
 
 // hold waits until limit passes or release is closed. It returns errStopped
@@ -370,11 +487,27 @@ func (s *session) enqueue(reply slot) error {
 	}
 }
 
-// replyNow queues a reply the proxy already has, behind any earlier ones.
+// replyNow answers a request with a reply the proxy already has.
 func (s *session) replyNow(packet []byte) error {
 	reply := make(slot, 1)
-	reply <- outcome{packet: packet}
-	return s.enqueue(reply)
+	if s.order == RequestOrder {
+		if err := s.enqueue(reply); err != nil {
+			return err
+		}
+	}
+	s.answer(reply, outcome{packet: packet})
+	return nil
+}
+
+// answer settles the outcome in a request's slot. In request order the slot
+// already has its place in the queue; in completion order it joins the
+// queue now, which never blocks, because inFlight bounds the slots that can
+// be waiting.
+func (s *session) answer(reply slot, out outcome) {
+	reply <- out
+	if s.order == CompletionOrder {
+		s.replies <- reply
+	}
 }
 
 // relayReplies hands each backend reply to the slot of its request,
@@ -395,6 +528,7 @@ func (s *session) relayReplies() error {
 		}
 		s.logRequest(req, p)
 		s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
+		s.answered()
 	}
 }
 
@@ -403,7 +537,7 @@ func (s *session) relayReplies() error {
 // later replies keep flowing.
 func (s *session) deliver(req *request, packet []byte) {
 	if req.action == nil || req.action.when() != After {
-		req.reply <- outcome{packet: packet}
+		s.answer(req.reply, outcome{packet: packet})
 		return
 	}
 	s.logFault(req)
@@ -413,19 +547,20 @@ func (s *session) deliver(req *request, packet []byte) {
 	case Stall:
 		s.wg.Go(func() { s.holdReply(req, a.Limit, a.Release, packet) })
 	case Fail:
-		req.reply <- outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))}
+		s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
 	case Drop, Freeze:
-		req.reply <- outcome{drop: req}
+		s.placeDrop(req)
 	}
 }
 
 func (s *session) holdReply(req *request, limit time.Duration, release <-chan struct{}, packet []byte) {
 	if s.hold(req, limit, release) == nil {
-		req.reply <- outcome{packet: packet}
+		s.answer(req.reply, outcome{packet: packet})
 	}
 }
 
-// writeReplies writes replies to the client in the order of its requests.
+// writeReplies writes replies to the client in the order of the queue:
+// request order, or the order replies become ready in completion order.
 func (s *session) writeReplies() error {
 	for {
 		var next slot
@@ -441,6 +576,9 @@ func (s *session) writeReplies() error {
 			}
 			if _, err := s.client.Write(out.packet); err != nil {
 				return fmt.Errorf("sftpproxy: write reply: %w", err)
+			}
+			if s.order == CompletionOrder {
+				<-s.inFlight
 			}
 		case <-s.done:
 			return errStopped

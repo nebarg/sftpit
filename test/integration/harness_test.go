@@ -78,8 +78,9 @@ type server struct {
 }
 
 // startServer starts a server that routes each session as via says. A
-// proxied session applies faults, which may be nil.
-func startServer(t *testing.T, via route, faults func(sftpproxy.Request) sftpproxy.Action) *server {
+// proxied session runs with opts, given the session's connection and a
+// logger that discards everything.
+func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
 	t.Helper()
 	files := t.TempDir()
 	root, err := os.OpenRoot(files)
@@ -95,11 +96,9 @@ func startServer(t *testing.T, via route, faults func(sftpproxy.Request) sftppro
 	}
 	if via == proxied {
 		handler = func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
-			return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), sftpproxy.Options{
-				Faults: faults,
-				Conn:   conn,
-				Logger: logger,
-			})
+			opts := opts
+			opts.Conn, opts.Logger = conn, logger
+			return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), opts)
 		}
 	}
 	signer, err := ssh.NewSignerFromKey(clientKey)

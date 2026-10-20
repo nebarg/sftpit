@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -15,22 +16,31 @@ import (
 	"testing"
 
 	"github.com/pkg/sftp"
+
+	"sftpit/internal/sftpproxy"
 )
 
 // TestProxyIsTransparent runs one workload directly against a pkg/sftp
-// server and again through the proxy, and requires identical outcomes.
+// server and again through the proxy in each reply order, and requires
+// identical outcomes.
 func TestProxyIsTransparent(t *testing.T) {
 	upload := make([]byte, 1<<20+123)
 	rand.NewChaCha8([32]byte{}).Read(upload)
 
 	direct := runWorkload(t, newSFTPClient(t, inMemoryBackend(t)), upload)
 
-	client, _ := startProxyConn(t, inMemoryBackend(t))
-	proxied := runWorkload(t, newSFTPClient(t, client), upload)
-
-	if !slices.Equal(proxied, direct) {
-		t.Errorf("outcomes differ through the proxy\ndirect:\n%s\nproxied:\n%s",
-			strings.Join(direct, "\n"), strings.Join(proxied, "\n"))
+	for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
+		t.Run(order.String(), func(t *testing.T) {
+			client, _ := startProxyWith(t, context.Background(), inMemoryBackend(t), sftpproxy.Options{
+				ReplyOrder: order,
+				Logger:     slog.New(slog.DiscardHandler),
+			})
+			proxied := runWorkload(t, newSFTPClient(t, client.conn), upload)
+			if !slices.Equal(proxied, direct) {
+				t.Errorf("outcomes differ through the proxy\ndirect:\n%s\nproxied:\n%s",
+					strings.Join(direct, "\n"), strings.Join(proxied, "\n"))
+			}
+		})
 	}
 }
 
@@ -114,12 +124,6 @@ func runWorkload(t *testing.T, c *sftp.Client, upload []byte) []string {
 	record("rmdir /in", c.RemoveDirectory("/in"))
 	list("/")
 	return transcript
-}
-
-func startProxyConn(t *testing.T, backend net.Conn) (net.Conn, *proxyResult) {
-	t.Helper()
-	client, result := startProxy(t, context.Background(), backend)
-	return client.conn, result
 }
 
 // inMemoryBackend serves pkg/sftp's in-memory filesystem over a pipe and

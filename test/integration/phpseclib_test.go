@@ -12,31 +12,24 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"sftpit/internal/sftpproxy"
 )
 
 const phpseclibDir = "phpseclib"
 
 func TestPhpseclibTransparency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("runs phpseclib")
-	}
-	php, err := exec.LookPath("php")
-	if err != nil {
-		t.Skip("php not installed")
-	}
-	if _, err := os.Stat(filepath.Join(phpseclibDir, "vendor", "autoload.php")); err != nil {
-		t.Skipf("phpseclib not installed; run composer install in test/integration/%s", phpseclibDir)
-	}
+	php := phpseclibOrSkip(t)
 
 	upload := randomBytes(4<<20 + 321)
 	since := time.Now().Add(-time.Hour)
 	transcripts := make(map[route][]line)
 	trees := make(map[route][]treeEntry)
 	for _, via := range routes {
-		srv := startServer(t, via, nil)
+		srv := startServer(t, via, sftpproxy.Options{})
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "orders.csv"), upload)
-		transcripts[via] = runPhpseclib(t, php, srv, work)
+		transcripts[via] = runPhpseclib(t, php, srv, "workload.php", work)
 		trees[via] = readTree(t, srv.files, since)
 	}
 
@@ -64,7 +57,26 @@ func TestPhpseclibTransparency(t *testing.T) {
 	}
 }
 
-func runPhpseclib(t *testing.T, php string, srv *server, work string) []line {
+// phpseclibOrSkip returns the path of php, or skips the test if phpseclib
+// cannot run.
+func phpseclibOrSkip(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("runs phpseclib")
+	}
+	php, err := exec.LookPath("php")
+	if err != nil {
+		t.Skip("php not installed")
+	}
+	if _, err := os.Stat(filepath.Join(phpseclibDir, "vendor", "autoload.php")); err != nil {
+		t.Skipf("phpseclib not installed; run composer install in test/integration/%s", phpseclibDir)
+	}
+	return php
+}
+
+// runPhpseclib runs one of the phpseclib scripts against srv with work as
+// its work directory and any further arguments, and returns what it printed.
+func runPhpseclib(t *testing.T, php string, srv *server, script, work string, args ...string) []line {
 	t.Helper()
 	var keys bytes.Buffer
 	for _, key := range hostKeys {
@@ -75,8 +87,8 @@ func runPhpseclib(t *testing.T, php string, srv *server, work string) []line {
 
 	ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, php, filepath.Join(phpseclibDir, "workload.php"),
-		"127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work)
+	cmd := exec.CommandContext(ctx, php, append([]string{filepath.Join(phpseclibDir, script),
+		"127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
