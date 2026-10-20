@@ -5,7 +5,7 @@ import (
 	"path"
 	"sync"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 // slot holds the outcome of one client request until every earlier reply

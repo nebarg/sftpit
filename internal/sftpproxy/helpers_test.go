@@ -1,0 +1,432 @@
+package sftpproxy_test
+
+import (
+	"bufio"
+	"bytes"
+	"cmp"
+	"context"
+	"encoding/binary"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"slices"
+	"sync"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
+)
+
+const (
+	waitTimeout = 5 * time.Second
+	maxLength   = 256 * 1024
+)
+
+var openSSHVersion = sftpwire.Version{Version: 3, Extensions: []sftpwire.Extension{
+	{Name: sftpwire.ExtPosixRename, Data: "1"},
+	{Name: sftpwire.ExtStatVFS, Data: "2"},
+	{Name: "hardlink@openssh.com", Data: "1"},
+	{Name: "fsync@openssh.com", Data: "1"},
+}}
+
+// proxy is a session under test between a raw test client and a backend.
+type proxy struct {
+	client *rawClient
+	conn   *fakeConn
+	result *proxyResult
+	cancel context.CancelFunc
+}
+
+// startProxy runs Serve with opts between a raw test client and backend
+// until the test ends or p.cancel is called. opts.Conn is set to a fakeConn
+// over the client's pipe, and a nil opts.Logger discards the logs. The
+// client has not sent INIT.
+func startProxy(t *testing.T, backend net.Conn, opts sftpproxy.Options) *proxy {
+	t.Helper()
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	clientEnd, proxyEnd := net.Pipe()
+	conn := &fakeConn{stream: proxyEnd}
+	opts.Conn = conn
+	ctx, cancel := context.WithCancel(t.Context())
+	result := serveInBackground(ctx, proxyEnd, backend, opts)
+	t.Cleanup(func() {
+		clientEnd.Close()
+		result.wait(t)
+	})
+	return &proxy{client: newRawClient(clientEnd), conn: conn, result: result, cancel: cancel}
+}
+
+// startProxyOnFake starts a session with opts over a fake OpenSSH backend
+// whose default directory is /, and sends INIT.
+func startProxyOnFake(t *testing.T, opts sftpproxy.Options) (*proxy, *fakeBackend) {
+	t.Helper()
+	fb, backend := startFakeBackend(t, openSSHVersion, "/")
+	p := startProxy(t, backend, opts)
+	p.client.init(t, 3)
+	return p, fb
+}
+
+// serveInBackground runs Serve on its own goroutine.
+func serveInBackground(ctx context.Context, client, backend net.Conn, opts sftpproxy.Options) *proxyResult {
+	result := &proxyResult{done: make(chan struct{})}
+	go func() {
+		defer close(result.done)
+		result.err = sftpproxy.Serve(ctx, client, backend, opts)
+	}()
+	return result
+}
+
+type proxyResult struct {
+	done chan struct{}
+	err  error
+}
+
+func (r *proxyResult) wait(t *testing.T) error {
+	t.Helper()
+	select {
+	case <-r.done:
+		return r.err
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for Serve to return")
+		return nil
+	}
+}
+
+// fakeConn stands in for the client's connection and records what faults do
+// to it. Closing or resetting it closes the proxy's end of the client pipe,
+// as closing an SSH connection ends its channels.
+type fakeConn struct {
+	stream net.Conn
+
+	mu  sync.Mutex
+	log []string
+}
+
+func (c *fakeConn) Close() error { c.record("close"); return c.stream.Close() }
+func (c *fakeConn) Reset() error { c.record("reset"); return c.stream.Close() }
+func (c *fakeConn) Freeze()      { c.record("freeze") }
+
+func (c *fakeConn) record(event string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.log = append(c.log, event)
+}
+
+func (c *fakeConn) events() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.log)
+}
+
+// rawClient speaks SFTP packet by packet, so tests control exactly what the
+// proxy receives.
+type rawClient struct {
+	conn net.Conn
+	in   *bufio.Reader
+}
+
+func newRawClient(conn net.Conn) *rawClient {
+	return &rawClient{conn: conn, in: bufio.NewReader(conn)}
+}
+
+func (c *rawClient) init(t *testing.T, version uint32) sftpwire.Version {
+	t.Helper()
+	c.write(t, sftpwire.AppendInit(nil, sftpwire.Init{Version: version}))
+	v, err := sftpwire.DecodeVersion(c.receive(t))
+	if err != nil {
+		t.Fatalf("VERSION: %v", err)
+	}
+	return v
+}
+
+func (c *rawClient) send(t *testing.T, id uint32, p sftpwire.Packet) {
+	t.Helper()
+	c.write(t, sftpwire.AppendPacket(nil, id, p))
+}
+
+func (c *rawClient) sendRaw(t *testing.T, packet wire) {
+	t.Helper()
+	c.write(t, packet.framed())
+}
+
+// sendTogether writes requests with IDs 1, 2 and so on in a single write, as
+// a pipelining client does, so the proxy has them all before it handles the
+// first.
+func (c *rawClient) sendTogether(t *testing.T, requests ...sftpwire.Packet) {
+	t.Helper()
+	var b []byte
+	for i, p := range requests {
+		b = sftpwire.AppendPacket(b, uint32(i+1), p)
+	}
+	c.write(t, b)
+}
+
+func (c *rawClient) write(t *testing.T, b []byte) {
+	t.Helper()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(waitTimeout)); err != nil {
+		t.Fatalf("SetWriteDeadline: %v", err)
+	}
+	if _, err := c.conn.Write(b); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+}
+
+func (c *rawClient) receive(t *testing.T) []byte {
+	t.Helper()
+	if err := c.conn.SetReadDeadline(time.Now().Add(waitTimeout)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	b, err := sftpwire.ReadPacket(c.in, maxLength)
+	if err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	return b
+}
+
+func (c *rawClient) receiveReply(t *testing.T) (uint32, sftpwire.Packet) {
+	t.Helper()
+	id, p, err := sftpwire.DecodeReply(c.receive(t))
+	if err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	return id, p
+}
+
+func (c *rawClient) nextReplyID(t *testing.T) uint32 {
+	t.Helper()
+	id, _ := c.receiveReply(t)
+	return id
+}
+
+// assertReplies checks that the next replies the client receives answer the
+// requests with ids, in that order.
+func (c *rawClient) assertReplies(t *testing.T, ids ...uint32) {
+	t.Helper()
+	for _, want := range ids {
+		if id, p := c.receiveReply(t); id != want {
+			t.Fatalf("received a reply to request %d (%v), want one to %d", id, p.Type(), want)
+		}
+	}
+}
+
+func (c *rawClient) assertStatus(t *testing.T, id uint32, code sftpwire.StatusCode, message string) {
+	t.Helper()
+	gotID, p := c.receiveReply(t)
+	want := sftpwire.StatusReply{Code: code, Message: message}
+	if st, ok := p.(*sftpwire.StatusReply); !ok || gotID != id || *st != want {
+		t.Errorf("reply = %d %#v, want %d %#v", gotID, p, id, want)
+	}
+}
+
+// assertClosed checks that the proxy closes the client's connection without
+// sending anything more.
+func (c *rawClient) assertClosed(t *testing.T) {
+	t.Helper()
+	// net.Pipe refuses deadlines once either end is closed, and reads then
+	// return EOF at once.
+	if err := c.conn.SetReadDeadline(time.Now().Add(waitTimeout)); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	if b, err := sftpwire.ReadPacket(c.in, maxLength); !errors.Is(err, io.EOF) {
+		t.Fatalf("client read = %x, %v; want the connection closed", b, err)
+	}
+}
+
+// fakeBackend is a scripted SFTP server for tests that control or inspect
+// exactly what the backend receives and sends.
+type fakeBackend struct {
+	conn     net.Conn
+	requests chan backendRequest
+}
+
+type backendRequest struct {
+	id     uint32
+	packet sftpwire.Packet
+}
+
+// startFakeBackend returns a fake backend that answers INIT with version and
+// REALPATH "." with dir, plus the proxy's end of its connection.
+func startFakeBackend(t *testing.T, version sftpwire.Version, dir string) (*fakeBackend, net.Conn) {
+	t.Helper()
+	return startScriptedBackend(t, version, &sftpwire.NameReply{Entries: []sftpwire.NameEntry{{Filename: dir}}})
+}
+
+// startScriptedBackend is startFakeBackend with any reply to REALPATH ".".
+// A nil realPath leaves REALPATH unanswered.
+func startScriptedBackend(t *testing.T, version sftpwire.Version, realPath sftpwire.Packet) (*fakeBackend, net.Conn) {
+	t.Helper()
+	proxyEnd, backendEnd := net.Pipe()
+	fb := &fakeBackend{conn: backendEnd, requests: make(chan backendRequest, 16)}
+	go fb.serve(version, realPath)
+	t.Cleanup(func() { backendEnd.Close() })
+	return fb, proxyEnd
+}
+
+func (fb *fakeBackend) serve(version sftpwire.Version, realPath sftpwire.Packet) {
+	defer close(fb.requests)
+	in := bufio.NewReader(fb.conn)
+
+	b, err := sftpwire.ReadPacket(in, maxLength)
+	if err != nil {
+		return
+	}
+	if _, err := sftpwire.DecodeInit(b); err != nil {
+		return
+	}
+	if _, err := fb.conn.Write(sftpwire.AppendVersion(nil, version)); err != nil {
+		return
+	}
+	for {
+		b, err := sftpwire.ReadPacket(in, maxLength)
+		if err != nil {
+			return
+		}
+		id, p, err := sftpwire.DecodeRequest(b)
+		if err != nil {
+			return
+		}
+		if rp, ok := p.(*sftpwire.RealPath); ok && rp.Path == "." && realPath != nil {
+			if _, err := fb.conn.Write(sftpwire.AppendPacket(nil, id, realPath)); err != nil {
+				return
+			}
+			realPath = nil
+			continue
+		}
+		fb.requests <- backendRequest{id: id, packet: p}
+	}
+}
+
+func (fb *fakeBackend) next(t *testing.T) backendRequest {
+	t.Helper()
+	req, ok := receive(t, fb.requests)
+	if !ok {
+		t.Fatal("backend connection closed, want a request")
+	}
+	return req
+}
+
+func (fb *fakeBackend) reply(t *testing.T, id uint32, p sftpwire.Packet) {
+	t.Helper()
+	fb.write(t, sftpwire.AppendPacket(nil, id, p))
+}
+
+func (fb *fakeBackend) write(t *testing.T, b []byte) {
+	t.Helper()
+	if err := fb.conn.SetWriteDeadline(time.Now().Add(waitTimeout)); err != nil {
+		t.Fatalf("SetWriteDeadline: %v", err)
+	}
+	if _, err := fb.conn.Write(b); err != nil {
+		t.Fatalf("backend write: %v", err)
+	}
+}
+
+// assertNoRequest checks, once every goroutine in the synctest bubble is
+// blocked, that the backend has received nothing.
+func (fb *fakeBackend) assertNoRequest(t *testing.T) {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case req, ok := <-fb.requests:
+		if ok {
+			t.Fatalf("backend received %#v, want nothing yet", req.packet)
+		}
+	default:
+	}
+}
+
+// onPath returns faults that apply action to every request on path.
+func onPath(path string, action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
+	return func(r sftpproxy.Request) sftpproxy.Action {
+		if r.Path == path {
+			return action
+		}
+		return nil
+	}
+}
+
+// inSequence returns faults that apply actions to requests in the order
+// they arrive: the first action to the first request, and so on. A nil
+// action, or a request beyond the last, gets no fault.
+func inSequence(actions ...sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
+	var n int
+	return func(sftpproxy.Request) sftpproxy.Action {
+		n++
+		if n > len(actions) {
+			return nil
+		}
+		return actions[n-1]
+	}
+}
+
+func assertPaths(t *testing.T, reqs []backendRequest, paths ...string) {
+	t.Helper()
+	var got []string
+	for _, req := range reqs {
+		stat, ok := req.packet.(*sftpwire.Stat)
+		if !ok {
+			t.Fatalf("backend received %#v, want a STAT", req.packet)
+		}
+		got = append(got, stat.Path)
+	}
+	if !slices.Equal(got, paths) {
+		t.Errorf("backend received STATs for %v, want %v", got, paths)
+	}
+}
+
+func packetTypes(packets []sftpwire.Packet) []sftpwire.PacketType {
+	var types []sftpwire.PacketType
+	for _, p := range packets {
+		types = append(types, p.Type())
+	}
+	return types
+}
+
+func sameElements[T cmp.Ordered](got []T, want ...T) bool {
+	return slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want)))
+}
+
+func receive[T any](t *testing.T, ch <-chan T) (T, bool) {
+	t.Helper()
+	select {
+	case v, ok := <-ch:
+		return v, ok
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting")
+		var zero T
+		return zero, false
+	}
+}
+
+// wire builds packet bytes field by field, for packets the codec does not
+// encode.
+type wire []byte
+
+func (w wire) byte(v byte) wire  { return append(w, v) }
+func (w wire) u32(v uint32) wire { return binary.BigEndian.AppendUint32(w, v) }
+func (w wire) str(s string) wire { return append(w.u32(uint32(len(s))), s...) }
+
+func (w wire) framed() []byte {
+	return append(binary.BigEndian.AppendUint32(nil, uint32(len(w))), w...)
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

@@ -19,7 +19,7 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 // maxPacketLength is pkg/sftp's own limit on the packets it reads.

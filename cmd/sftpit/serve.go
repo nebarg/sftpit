@@ -14,10 +14,11 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sftpit/internal/backend"
-	"sftpit/internal/config"
-	"sftpit/internal/sftpproxy"
-	"sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/runs"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 const serveUsage = `Usage: sftpit serve [flags]
@@ -129,10 +130,8 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	srv, err := sshfront.New(sshfront.Config{
 		HostKeys: hostKeys,
 		Users:    cfg.Users,
-		Handler: func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
-			return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), sftpproxy.Options{Logger: logger})
-		},
-		Logger: logger,
+		Handler:  runs.Handler(embedded, sftpproxy.Options{Logger: logger}),
+		Logger:   logger,
 	})
 	if err != nil {
 		return err

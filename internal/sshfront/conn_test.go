@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 func TestConnClose(t *testing.T) {

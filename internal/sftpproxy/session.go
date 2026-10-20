@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 const (
@@ -101,14 +101,16 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		order:     opts.ReplyOrder,
 		logger:    opts.Logger,
 		replies:   make(chan slot, maxQueuedReplies),
-		waiting:   make(map[string]*request),
 		done:      make(chan struct{}),
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
 	if s.order == CompletionOrder {
-		s.inFlight = make(chan struct{}, maxQueuedReplies)
+		s.completion = completionState{
+			inFlight: make(chan struct{}, maxQueuedReplies),
+			waiting:  make(map[string]*request),
+		}
 	}
 	stopWhenCancelled := context.AfterFunc(ctx, func() { s.stop(ctx.Err()) })
 	defer stopWhenCancelled()
@@ -139,10 +141,6 @@ type session struct {
 	// requests and replies for a fault.
 	wg sync.WaitGroup
 
-	// inFlight bounds the requests a session handles at once in completion
-	// order, as the reply queue does in request order.
-	inFlight chan struct{}
-
 	// sendMu keeps requests to the backend whole and in the order they pass
 	// the halted check, when several goroutines forward them.
 	sendMu sync.Mutex
@@ -152,16 +150,8 @@ type session struct {
 	halted bool
 	// unanswered counts the requests the backend has yet to answer.
 	unanswered int
-	// dropping is set, in completion order, once a drop has its place in the
-	// reply stream or is waiting for one, so that a second drop that reaches
-	// its turn changes nothing.
-	dropping bool
-	// pendingDrop waits, in completion order, for the backend to answer
-	// every request it has.
-	pendingDrop *request
-	// waiting maps each file, in completion order, to its latest request
-	// that has yet to have its turn.
-	waiting map[string]*request
+	// completion is used only in completion order.
+	completion completionState
 
 	// version is the VERSION packet sent to the client, sent again if the
 	// client repeats INIT, as OpenSSH and pkg/sftp both do.
@@ -304,7 +294,7 @@ func (s *session) relayRequests() error {
 func (s *session) handleRequest(b []byte) error {
 	if s.order == CompletionOrder {
 		select {
-		case s.inFlight <- struct{}{}:
+		case s.completion.inFlight <- struct{}{}:
 		case <-s.done:
 			return errStopped
 		}
@@ -428,13 +418,13 @@ func (s *session) placeDrop(req *request) {
 		return
 	}
 	s.mu.Lock()
-	if s.dropping {
+	if s.completion.dropping {
 		s.mu.Unlock()
 		return
 	}
-	s.dropping = true
+	s.completion.dropping = true
 	if s.unanswered > 0 {
-		s.pendingDrop = req
+		s.completion.pendingDrop = req
 		req = nil
 	}
 	s.mu.Unlock()
@@ -450,7 +440,7 @@ func (s *session) answered() {
 	s.unanswered--
 	var drop *request
 	if s.unanswered == 0 {
-		drop, s.pendingDrop = s.pendingDrop, nil
+		drop, s.completion.pendingDrop = s.completion.pendingDrop, nil
 	}
 	s.mu.Unlock()
 	if drop != nil {
@@ -578,7 +568,7 @@ func (s *session) writeReplies() error {
 				return fmt.Errorf("sftpproxy: write reply: %w", err)
 			}
 			if s.order == CompletionOrder {
-				<-s.inFlight
+				<-s.completion.inFlight
 			}
 		case <-s.done:
 			return errStopped

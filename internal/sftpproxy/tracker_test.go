@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 var allExtensions = []sftpwire.Extension{

@@ -22,7 +22,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
-	"sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 const (

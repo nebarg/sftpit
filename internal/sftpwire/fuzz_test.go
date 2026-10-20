@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 // The fuzz targets check that decoding never panics and that re-encoding a

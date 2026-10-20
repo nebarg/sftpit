@@ -1,35 +1,17 @@
 package sftpproxy_test
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
-	"sftpit/internal/sftpproxy"
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
-
-const (
-	waitTimeout = 5 * time.Second
-	maxLength   = 256 * 1024
-)
-
-var openSSHVersion = sftpwire.Version{Version: 3, Extensions: []sftpwire.Extension{
-	{Name: sftpwire.ExtPosixRename, Data: "1"},
-	{Name: sftpwire.ExtStatVFS, Data: "2"},
-	{Name: "hardlink@openssh.com", Data: "1"},
-	{Name: "fsync@openssh.com", Data: "1"},
-}}
 
 func TestExtensionsOffered(t *testing.T) {
 	tests := []struct {
@@ -55,7 +37,7 @@ func TestExtensionsOffered(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, backend := startFakeBackend(t, sftpwire.Version{Version: 3, Extensions: tt.backend}, "/")
-			client, _ := startProxy(t, context.Background(), backend)
+			client := startProxy(t, backend, sftpproxy.Options{}).client
 			got := client.init(t, 3)
 			if got.Version != 3 || !reflect.DeepEqual(got.Extensions, tt.want) {
 				t.Errorf("VERSION = %d %v, want 3 %v", got.Version, got.Extensions, tt.want)
@@ -67,7 +49,7 @@ func TestExtensionsOffered(t *testing.T) {
 func TestClientVersionIsAnsweredWithVersion3(t *testing.T) {
 	for _, version := range []uint32{2, 3, 6} {
 		_, backend := startFakeBackend(t, openSSHVersion, "/")
-		client, _ := startProxy(t, context.Background(), backend)
+		client := startProxy(t, backend, sftpproxy.Options{}).client
 		if got := client.init(t, version); got.Version != 3 {
 			t.Errorf("client version %d answered with %d, want 3", version, got.Version)
 		}
@@ -76,7 +58,7 @@ func TestClientVersionIsAnsweredWithVersion3(t *testing.T) {
 
 func TestRelativePathsUseBackendDirectory(t *testing.T) {
 	fb, backend := startFakeBackend(t, openSSHVersion, "/home/partner-b/")
-	client, _ := startProxy(t, context.Background(), backend)
+	client := startProxy(t, backend, sftpproxy.Options{}).client
 	client.init(t, 3)
 
 	tests := []struct {
@@ -98,7 +80,7 @@ func TestRelativePathsUseBackendDirectory(t *testing.T) {
 
 func TestRequestIDsAreRemapped(t *testing.T) {
 	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	client, _ := startProxy(t, context.Background(), backend)
+	client := startProxy(t, backend, sftpproxy.Options{}).client
 	client.init(t, 3)
 
 	clientIDs := []uint32{7, 7, 0, 0xffffffff}
@@ -123,7 +105,7 @@ func TestRequestIDsAreRemapped(t *testing.T) {
 
 func TestRepliesFollowRequestOrder(t *testing.T) {
 	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	client, _ := startProxy(t, context.Background(), backend)
+	client := startProxy(t, backend, sftpproxy.Options{}).client
 	client.init(t, 3)
 
 	client.send(t, 1, &sftpwire.Stat{Path: "/a"})
@@ -183,7 +165,7 @@ func TestProxyAnswersWithoutTheBackend(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			version := sftpwire.Version{Version: 3, Extensions: []sftpwire.Extension{{Name: sftpwire.ExtPosixRename, Data: "1"}}}
 			fb, backend := startFakeBackend(t, version, "/")
-			client, _ := startProxy(t, context.Background(), backend)
+			client := startProxy(t, backend, sftpproxy.Options{}).client
 			client.init(t, 3)
 
 			client.sendRaw(t, tt.request)
@@ -202,7 +184,7 @@ func TestProxyAnswersWithoutTheBackend(t *testing.T) {
 
 func TestRepeatedInitIsAnsweredAgain(t *testing.T) {
 	_, backend := startFakeBackend(t, openSSHVersion, "/")
-	client, _ := startProxy(t, context.Background(), backend)
+	client := startProxy(t, backend, sftpproxy.Options{}).client
 	first := client.init(t, 3)
 
 	client.sendRaw(t, wire(sftpwire.AppendInit(nil, sftpwire.Init{Version: 3})[4:]))
@@ -237,18 +219,18 @@ func TestMalformedClientInputEndsSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, backend := startFakeBackend(t, openSSHVersion, "/")
-			client, result := startProxy(t, context.Background(), backend)
+			p := startProxy(t, backend, sftpproxy.Options{})
 			if !tt.skipInit {
-				client.init(t, 3)
+				p.client.init(t, 3)
 			}
-			client.write(t, tt.input)
+			p.client.write(t, tt.input)
 			if tt.thenClose {
-				client.conn.Close()
+				p.client.conn.Close()
 			} else {
-				client.assertClosed(t)
+				p.client.assertClosed(t)
 			}
 
-			if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			if err := p.result.wait(t); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("Serve error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
@@ -299,14 +281,14 @@ func TestBackendViolationsEndSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fb, backend := startFakeBackend(t, openSSHVersion, "/")
-			client, result := startProxy(t, context.Background(), backend)
-			client.init(t, 3)
+			p := startProxy(t, backend, sftpproxy.Options{})
+			p.client.init(t, 3)
 
-			client.send(t, 1, tt.request)
+			p.client.send(t, 1, tt.request)
 			fb.write(t, tt.reply(fb.next(t).id))
 
-			client.assertClosed(t)
-			if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			p.client.assertClosed(t)
+			if err := p.result.wait(t); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("Serve error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
@@ -342,9 +324,9 @@ func TestBackendStartupFailuresEndSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, backend := startScriptedBackend(t, tt.version, tt.realPath)
-			client, result := startProxy(t, context.Background(), backend)
-			client.assertClosed(t)
-			if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			p := startProxy(t, backend, sftpproxy.Options{})
+			p.client.assertClosed(t)
+			if err := p.result.wait(t); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("Serve error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
@@ -353,23 +335,23 @@ func TestBackendStartupFailuresEndSession(t *testing.T) {
 
 func TestBackendCloseEndsSession(t *testing.T) {
 	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	client, result := startProxy(t, context.Background(), backend)
-	client.init(t, 3)
+	p := startProxy(t, backend, sftpproxy.Options{})
+	p.client.init(t, 3)
 
 	fb.conn.Close()
-	client.assertClosed(t)
-	if err := result.wait(t); err == nil || !strings.Contains(err.Error(), "backend closed the session") {
+	p.client.assertClosed(t)
+	if err := p.result.wait(t); err == nil || !strings.Contains(err.Error(), "backend closed the session") {
 		t.Errorf("Serve error = %v, want the backend close reported", err)
 	}
 }
 
 func TestClientCloseEndsSessionCleanly(t *testing.T) {
 	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	client, result := startProxy(t, context.Background(), backend)
-	client.init(t, 3)
+	p := startProxy(t, backend, sftpproxy.Options{})
+	p.client.init(t, 3)
 
-	client.conn.Close()
-	if err := result.wait(t); err != nil {
+	p.client.conn.Close()
+	if err := p.result.wait(t); err != nil {
 		t.Errorf("Serve after the client closed = %v, want nil", err)
 	}
 	if req, ok := receive(t, fb.requests); ok {
@@ -379,13 +361,12 @@ func TestClientCloseEndsSessionCleanly(t *testing.T) {
 
 func TestCancelEndsSession(t *testing.T) {
 	_, backend := startFakeBackend(t, openSSHVersion, "/")
-	ctx, cancel := context.WithCancel(context.Background())
-	client, result := startProxy(t, ctx, backend)
-	client.init(t, 3)
+	p := startProxy(t, backend, sftpproxy.Options{})
+	p.client.init(t, 3)
 
-	cancel()
-	client.assertClosed(t)
-	if err := result.wait(t); !errors.Is(err, context.Canceled) {
+	p.cancel()
+	p.client.assertClosed(t)
+	if err := p.result.wait(t); !errors.Is(err, context.Canceled) {
 		t.Errorf("Serve after cancel = %v, want context.Canceled", err)
 	}
 }
@@ -394,7 +375,7 @@ func TestDebugLogAttributesHandleRequests(t *testing.T) {
 	var logs syncBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	fb, backend := startFakeBackend(t, openSSHVersion, "/home/partner-b")
-	client, _ := startProxyWith(t, context.Background(), backend, sftpproxy.Options{Logger: logger})
+	client := startProxy(t, backend, sftpproxy.Options{Logger: logger}).client
 	client.init(t, 3)
 
 	client.send(t, 1, &sftpwire.Open{Path: "orders.csv", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate})
@@ -413,243 +394,4 @@ func TestDebugLogAttributesHandleRequests(t *testing.T) {
 			t.Errorf("log does not contain %q:\n%s", want, logged)
 		}
 	}
-}
-
-type proxyResult struct {
-	done chan struct{}
-	err  error
-}
-
-func (r *proxyResult) wait(t *testing.T) error {
-	t.Helper()
-	select {
-	case <-r.done:
-		return r.err
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting for Serve to return")
-		return nil
-	}
-}
-
-func startProxy(t *testing.T, ctx context.Context, backend net.Conn) (*rawClient, *proxyResult) {
-	t.Helper()
-	return startProxyWith(t, ctx, backend, sftpproxy.Options{Logger: slog.New(slog.DiscardHandler)})
-}
-
-// startProxyWith runs Serve with opts between a pipe to a raw test client
-// and backend.
-func startProxyWith(t *testing.T, ctx context.Context, backend net.Conn, opts sftpproxy.Options) (*rawClient, *proxyResult) {
-	t.Helper()
-	clientEnd, proxyEnd := net.Pipe()
-	result := &proxyResult{done: make(chan struct{})}
-	go func() {
-		defer close(result.done)
-		result.err = sftpproxy.Serve(ctx, proxyEnd, backend, opts)
-	}()
-	t.Cleanup(func() {
-		clientEnd.Close()
-		result.wait(t)
-	})
-	return &rawClient{conn: clientEnd, in: bufio.NewReader(clientEnd)}, result
-}
-
-// rawClient speaks SFTP packet by packet, so tests control exactly what the
-// proxy receives.
-type rawClient struct {
-	conn net.Conn
-	in   *bufio.Reader
-}
-
-func (c *rawClient) init(t *testing.T, version uint32) sftpwire.Version {
-	t.Helper()
-	c.write(t, sftpwire.AppendInit(nil, sftpwire.Init{Version: version}))
-	v, err := sftpwire.DecodeVersion(c.receive(t))
-	if err != nil {
-		t.Fatalf("VERSION: %v", err)
-	}
-	return v
-}
-
-func (c *rawClient) send(t *testing.T, id uint32, p sftpwire.Packet) {
-	t.Helper()
-	c.write(t, sftpwire.AppendPacket(nil, id, p))
-}
-
-func (c *rawClient) sendRaw(t *testing.T, packet wire) {
-	t.Helper()
-	c.write(t, packet.framed())
-}
-
-func (c *rawClient) write(t *testing.T, b []byte) {
-	t.Helper()
-	if err := c.conn.SetWriteDeadline(time.Now().Add(waitTimeout)); err != nil {
-		t.Fatalf("SetWriteDeadline: %v", err)
-	}
-	if _, err := c.conn.Write(b); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
-}
-
-func (c *rawClient) receive(t *testing.T) []byte {
-	t.Helper()
-	if err := c.conn.SetReadDeadline(time.Now().Add(waitTimeout)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	b, err := sftpwire.ReadPacket(c.in, maxLength)
-	if err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	return b
-}
-
-func (c *rawClient) receiveReply(t *testing.T) (uint32, sftpwire.Packet) {
-	t.Helper()
-	id, p, err := sftpwire.DecodeReply(c.receive(t))
-	if err != nil {
-		t.Fatalf("decode reply: %v", err)
-	}
-	return id, p
-}
-
-// assertClosed checks that the proxy closes the client's connection without
-// sending anything more.
-func (c *rawClient) assertClosed(t *testing.T) {
-	t.Helper()
-	// net.Pipe refuses deadlines once either end is closed, and reads then
-	// return EOF at once.
-	if err := c.conn.SetReadDeadline(time.Now().Add(waitTimeout)); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	if b, err := sftpwire.ReadPacket(c.in, maxLength); !errors.Is(err, io.EOF) {
-		t.Fatalf("client read = %x, %v; want the connection closed", b, err)
-	}
-}
-
-// fakeBackend is a scripted SFTP server for tests that control or inspect
-// exactly what the backend receives and sends.
-type fakeBackend struct {
-	conn     net.Conn
-	requests chan backendRequest
-}
-
-type backendRequest struct {
-	id     uint32
-	packet sftpwire.Packet
-}
-
-// startFakeBackend returns a fake backend that answers INIT with version and
-// REALPATH "." with dir, plus the proxy's end of its connection.
-func startFakeBackend(t *testing.T, version sftpwire.Version, dir string) (*fakeBackend, net.Conn) {
-	t.Helper()
-	return startScriptedBackend(t, version, &sftpwire.NameReply{Entries: []sftpwire.NameEntry{{Filename: dir}}})
-}
-
-// startScriptedBackend is startFakeBackend with any reply to REALPATH ".".
-// A nil realPath leaves REALPATH unanswered.
-func startScriptedBackend(t *testing.T, version sftpwire.Version, realPath sftpwire.Packet) (*fakeBackend, net.Conn) {
-	t.Helper()
-	proxyEnd, backendEnd := net.Pipe()
-	fb := &fakeBackend{conn: backendEnd, requests: make(chan backendRequest, 16)}
-	go fb.serve(version, realPath)
-	t.Cleanup(func() { backendEnd.Close() })
-	return fb, proxyEnd
-}
-
-func (fb *fakeBackend) serve(version sftpwire.Version, realPath sftpwire.Packet) {
-	defer close(fb.requests)
-	in := bufio.NewReader(fb.conn)
-
-	b, err := sftpwire.ReadPacket(in, maxLength)
-	if err != nil {
-		return
-	}
-	if _, err := sftpwire.DecodeInit(b); err != nil {
-		return
-	}
-	if _, err := fb.conn.Write(sftpwire.AppendVersion(nil, version)); err != nil {
-		return
-	}
-	for {
-		b, err := sftpwire.ReadPacket(in, maxLength)
-		if err != nil {
-			return
-		}
-		id, p, err := sftpwire.DecodeRequest(b)
-		if err != nil {
-			return
-		}
-		if rp, ok := p.(*sftpwire.RealPath); ok && rp.Path == "." && realPath != nil {
-			if _, err := fb.conn.Write(sftpwire.AppendPacket(nil, id, realPath)); err != nil {
-				return
-			}
-			realPath = nil
-			continue
-		}
-		fb.requests <- backendRequest{id: id, packet: p}
-	}
-}
-
-func (fb *fakeBackend) next(t *testing.T) backendRequest {
-	t.Helper()
-	req, ok := receive(t, fb.requests)
-	if !ok {
-		t.Fatal("backend connection closed, want a request")
-	}
-	return req
-}
-
-func (fb *fakeBackend) reply(t *testing.T, id uint32, p sftpwire.Packet) {
-	t.Helper()
-	fb.write(t, sftpwire.AppendPacket(nil, id, p))
-}
-
-func (fb *fakeBackend) write(t *testing.T, b []byte) {
-	t.Helper()
-	if err := fb.conn.SetWriteDeadline(time.Now().Add(waitTimeout)); err != nil {
-		t.Fatalf("SetWriteDeadline: %v", err)
-	}
-	if _, err := fb.conn.Write(b); err != nil {
-		t.Fatalf("backend write: %v", err)
-	}
-}
-
-func receive[T any](t *testing.T, ch <-chan T) (T, bool) {
-	t.Helper()
-	select {
-	case v, ok := <-ch:
-		return v, ok
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting")
-		var zero T
-		return zero, false
-	}
-}
-
-// wire builds packet bytes field by field, for packets the codec does not
-// encode.
-type wire []byte
-
-func (w wire) byte(v byte) wire  { return append(w, v) }
-func (w wire) u32(v uint32) wire { return binary.BigEndian.AppendUint32(w, v) }
-func (w wire) str(s string) wire { return append(w.u32(uint32(len(s))), s...) }
-
-func (w wire) framed() []byte {
-	return append(binary.BigEndian.AppendUint32(nil, uint32(len(w))), w...)
-}
-
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }

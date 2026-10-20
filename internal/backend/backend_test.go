@@ -15,8 +15,8 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"sftpit/internal/backend"
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 func TestTransferRoundTrip(t *testing.T) {

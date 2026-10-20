@@ -1,4 +1,4 @@
-module sftpit
+module github.com/nebarg/sftpit
 
 go 1.26.0
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/backend"
 )
 
 func TestSeedCopiesFilesAndDirectories(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
 const phpseclibDir = "phpseclib"

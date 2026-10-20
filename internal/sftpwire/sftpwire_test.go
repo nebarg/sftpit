@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 const maxLength = 256 * 1024

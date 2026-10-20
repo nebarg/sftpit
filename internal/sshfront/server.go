@@ -359,7 +359,7 @@ func (s *Server) runHandler(ctx context.Context, conn *Conn, channel ssh.Channel
 
 // callHandler contains a panic to the one channel that caused it: an
 // unrecovered panic in any goroutine would otherwise stop the whole process,
-// including every other connection and the dashboard.
+// including every other connection.
 func (s *Server) callHandler(ctx context.Context, conn *Conn, channel ssh.Channel) (err error) {
 	defer func() {
 		if r := recover(); r != nil {

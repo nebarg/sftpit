@@ -18,6 +18,16 @@ type handler struct {
 	root *os.Root
 }
 
+// pkg/sftp finds the optional interfaces by type assertion and falls back
+// silently, so a signature that drifts on upgrade would change behavior
+// without failing the build.
+var (
+	_ sftp.FileReader           = (*handler)(nil)
+	_ sftp.OpenFileWriter       = (*handler)(nil)
+	_ sftp.PosixRenameFileCmder = (*handler)(nil)
+	_ sftp.LstatFileLister      = (*handler)(nil)
+)
+
 // rootName converts a clean absolute virtual path into a name relative to
 // the root.
 func rootName(virtual string) string {

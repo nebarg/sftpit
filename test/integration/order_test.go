@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"sftpit/internal/sftpproxy"
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 const (

@@ -1,7 +1,6 @@
 package sftpproxy_test
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"log/slog"
@@ -9,45 +8,44 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"sftpit/internal/sftpproxy"
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 func TestDelayBeforeHoldsTheRequestAndEveryLaterOne(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := startFaultProxy(t, context.Background(), onPath("/slow", sftpproxy.Delay{When: sftpproxy.Before, Duration: 3 * time.Second}), nil)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/slow", sftpproxy.Delay{When: sftpproxy.Before, Duration: 3 * time.Second})})
 		start := time.Now()
 		p.client.sendTogether(t, &sftpwire.Stat{Path: "/slow"}, &sftpwire.Stat{Path: "/other"})
 
-		p.assertNoBackendRequest(t)
-		slow := p.backend.next(t)
+		fb.assertNoRequest(t)
+		slow := fb.next(t)
 		if got := time.Since(start); got != 3*time.Second {
 			t.Errorf("backend received the delayed request after %v, want 3s", got)
 		}
-		other := p.backend.next(t)
+		other := fb.next(t)
 		assertPaths(t, []backendRequest{slow, other}, "/slow", "/other")
 
-		p.backend.reply(t, slow.id, &sftpwire.AttrsReply{})
-		p.backend.reply(t, other.id, &sftpwire.AttrsReply{})
+		fb.reply(t, slow.id, &sftpwire.AttrsReply{})
+		fb.reply(t, other.id, &sftpwire.AttrsReply{})
 		p.client.assertReplies(t, 1, 2)
 	})
 }
 
 func TestDelayAfterHoldsTheReplyAndEveryLaterOne(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := startFaultProxy(t, context.Background(), onPath("/slow", sftpproxy.Delay{When: sftpproxy.After, Duration: 3 * time.Second}), nil)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/slow", sftpproxy.Delay{When: sftpproxy.After, Duration: 3 * time.Second})})
 		start := time.Now()
 		p.client.sendTogether(t, &sftpwire.Stat{Path: "/slow"}, &sftpwire.Stat{Path: "/other"})
 
-		slow, other := p.backend.next(t), p.backend.next(t)
+		slow, other := fb.next(t), fb.next(t)
 		assertPaths(t, []backendRequest{slow, other}, "/slow", "/other")
-		p.backend.reply(t, slow.id, &sftpwire.AttrsReply{})
-		p.backend.reply(t, other.id, &sftpwire.AttrsReply{})
+		fb.reply(t, slow.id, &sftpwire.AttrsReply{})
+		fb.reply(t, other.id, &sftpwire.AttrsReply{})
 
 		p.client.assertReplies(t, 1)
 		if got := time.Since(start); got != 3*time.Second {
@@ -76,14 +74,17 @@ func TestStallEndsAtReleaseOrLimit(t *testing.T) {
 				var logs syncBuffer
 				release := make(chan struct{})
 				stall := sftpproxy.Stall{When: tt.when, Release: release, Limit: 4 * time.Second}
-				p := startFaultProxy(t, context.Background(), onPath("/a", stall), &logs)
+				p, fb := startProxyOnFake(t, sftpproxy.Options{
+					Faults: onPath("/a", stall),
+					Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+				})
 				start := time.Now()
 				p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
 				if tt.release {
 					time.AfterFunc(time.Second, func() { close(release) })
 				}
 
-				p.backend.reply(t, p.backend.next(t).id, &sftpwire.AttrsReply{})
+				fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
 				p.client.assertReplies(t, 1)
 				if got := time.Since(start); got != tt.want {
 					t.Errorf("stall ended after %v, want %v", got, tt.want)
@@ -103,12 +104,15 @@ func TestStallEndsAtReleaseOrLimit(t *testing.T) {
 func TestFailBeforeAnswersWithoutTheBackend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var logs syncBuffer
-		p := startFaultProxy(t, context.Background(), onPath("/a", sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}), &logs)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults: onPath("/a", sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}),
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		})
 		p.client.sendTogether(t, &sftpwire.Rename{OldPath: "/a", NewPath: "/b"}, &sftpwire.Stat{Path: "/c"})
 
-		stat := p.backend.next(t)
+		stat := fb.next(t)
 		assertPaths(t, []backendRequest{stat}, "/c")
-		p.backend.reply(t, stat.id, &sftpwire.AttrsReply{})
+		fb.reply(t, stat.id, &sftpwire.AttrsReply{})
 		p.client.assertStatus(t, 1, sftpwire.StatusPermissionDenied, "Permission denied")
 		p.client.assertReplies(t, 2)
 
@@ -121,14 +125,14 @@ func TestFailBeforeAnswersWithoutTheBackend(t *testing.T) {
 
 func TestFailAfterReplacesTheReply(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := startFaultProxy(t, context.Background(), onPath("/a", sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure}), nil)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/a", sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure})})
 		p.client.send(t, 1, &sftpwire.Rename{OldPath: "/a", NewPath: "/b"})
 
-		rename := p.backend.next(t)
+		rename := fb.next(t)
 		if _, ok := rename.packet.(*sftpwire.Rename); !ok {
 			t.Fatalf("backend received %#v, want the rename", rename.packet)
 		}
-		p.backend.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
+		fb.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
 		p.client.assertStatus(t, 1, sftpwire.StatusFailure, "Failure")
 	})
 }
@@ -143,16 +147,16 @@ func TestCloseFailedBeforeTheBackendKeepsItsHandle(t *testing.T) {
 			}
 			return nil
 		}
-		p := startFaultProxy(t, context.Background(), faults, nil)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: faults})
 		p.client.send(t, 1, &sftpwire.Open{Path: "/a", Flags: sftpwire.OpenRead})
-		p.backend.reply(t, p.backend.next(t).id, &sftpwire.HandleReply{Handle: "h"})
+		fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: "h"})
 		p.client.assertReplies(t, 1)
 
 		p.client.send(t, 2, &sftpwire.Close{Handle: "h"})
 		p.client.assertStatus(t, 2, sftpwire.StatusFailure, "Failure")
 		p.client.send(t, 3, &sftpwire.Read{Handle: "h", Length: 10})
 
-		read := p.backend.next(t)
+		read := fb.next(t)
 		if _, ok := read.packet.(*sftpwire.Read); !ok {
 			t.Errorf("backend received %#v, want only the READ", read.packet)
 		}
@@ -170,9 +174,10 @@ func TestFaultsSeeResolvedPaths(t *testing.T) {
 			return nil
 		}
 		fb, backend := startFakeBackend(t, openSSHVersion, "/home/p")
-		p := startFaultProxyOn(t, context.Background(), fb, backend, sftpproxy.Options{Faults: faults})
+		p := startProxy(t, backend, sftpproxy.Options{Faults: faults})
+		p.client.init(t, 3)
 		p.client.send(t, 1, &sftpwire.Rename{OldPath: "a.part", NewPath: "../q/a"})
-		p.backend.next(t)
+		fb.next(t)
 
 		want := sftpproxy.Request{
 			Packet: &sftpwire.Rename{OldPath: "/home/p/a.part", NewPath: "/home/q/a"},
@@ -200,24 +205,24 @@ func TestDropComesAfterEarlierRepliesAndBeforeLaterRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				p := startFaultProxy(t, context.Background(), onPath("/a", tt.drop), nil)
+				p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/a", tt.drop)})
 				p.client.sendTogether(t,
 					&sftpwire.Stat{Path: "/first"},
 					&sftpwire.Rename{OldPath: "/a", NewPath: "/b"},
 					&sftpwire.Stat{Path: "/last"},
 				)
 
-				first := p.backend.next(t)
+				first := fb.next(t)
 				if tt.drop.When == sftpproxy.After {
-					rename := p.backend.next(t)
-					p.backend.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
+					rename := fb.next(t)
+					fb.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
 				}
-				p.assertNoBackendRequest(t)
+				fb.assertNoRequest(t)
 				if got := p.conn.events(); len(got) != 0 {
 					t.Fatalf("connection %v before the earlier reply was written", got)
 				}
 
-				p.backend.reply(t, first.id, &sftpwire.AttrsReply{})
+				fb.reply(t, first.id, &sftpwire.AttrsReply{})
 				p.client.assertReplies(t, 1)
 				p.client.assertClosed(t)
 				if err := p.result.wait(t); err != nil {
@@ -226,7 +231,7 @@ func TestDropComesAfterEarlierRepliesAndBeforeLaterRequests(t *testing.T) {
 				if got := p.conn.events(); !slices.Equal(got, []string{tt.event}) {
 					t.Errorf("connection events = %v, want [%s]", got, tt.event)
 				}
-				p.assertNoBackendRequest(t)
+				fb.assertNoRequest(t)
 			})
 		})
 	}
@@ -239,10 +244,10 @@ func TestFreezeClosesAtReleaseOrLimit(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				releaseCh := make(chan struct{})
 				freeze := sftpproxy.Freeze{When: sftpproxy.After, Release: releaseCh, Limit: 4 * time.Second}
-				p := startFaultProxy(t, context.Background(), onPath("/a", freeze), nil)
+				p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/a", freeze)})
 				start := time.Now()
 				p.client.send(t, 1, &sftpwire.Rename{OldPath: "/a", NewPath: "/b"})
-				p.backend.reply(t, p.backend.next(t).id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
+				fb.reply(t, fb.next(t).id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
 
 				synctest.Wait()
 				if got := p.conn.events(); !slices.Equal(got, []string{"freeze"}) {
@@ -317,20 +322,18 @@ func TestFaultWaitsEndWithTheSession(t *testing.T) {
 					// Only a channel made inside the bubble counts as durably
 					// blocking, so each run makes its own.
 					release := make(chan struct{})
-					ctx, cancel := context.WithCancel(context.Background())
-					fb, backend := startFakeBackend(t, openSSHVersion, "/")
-					p := startFaultProxyOn(t, ctx, fb, backend, sftpproxy.Options{
+					p, fb := startProxyOnFake(t, sftpproxy.Options{
 						Faults:     onPath("/a", tt.action(release)),
 						ReplyOrder: order,
 					})
 					start := time.Now()
 					p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
 					if tt.after {
-						p.backend.reply(t, p.backend.next(t).id, &sftpwire.AttrsReply{})
+						fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
 					}
 
 					synctest.Wait()
-					cancel()
+					p.cancel()
 					if err := p.result.wait(t); !errors.Is(err, context.Canceled) {
 						t.Errorf("Serve = %v, want context.Canceled", err)
 					}
@@ -338,7 +341,7 @@ func TestFaultWaitsEndWithTheSession(t *testing.T) {
 						t.Errorf("Serve returned after %v, want at once", got)
 					}
 					time.Sleep(2 * time.Hour)
-					for req := range p.backend.requests {
+					for req := range fb.requests {
 						t.Errorf("backend received %#v after the session ended", req.packet)
 					}
 				})
@@ -352,15 +355,11 @@ func TestDropNeedsTheConnection(t *testing.T) {
 		fb, backend := startFakeBackend(t, openSSHVersion, "/")
 		clientEnd, proxyEnd := net.Pipe()
 		t.Cleanup(func() { clientEnd.Close() })
-		result := &proxyResult{done: make(chan struct{})}
-		go func() {
-			defer close(result.done)
-			result.err = sftpproxy.Serve(context.Background(), proxyEnd, backend, sftpproxy.Options{
-				Faults: onPath("/a", sftpproxy.Drop{When: sftpproxy.Before}),
-				Logger: slog.New(slog.DiscardHandler),
-			})
-		}()
-		client := &rawClient{conn: clientEnd, in: bufio.NewReader(clientEnd)}
+		result := serveInBackground(t.Context(), proxyEnd, backend, sftpproxy.Options{
+			Faults: onPath("/a", sftpproxy.Drop{When: sftpproxy.Before}),
+			Logger: slog.New(slog.DiscardHandler),
+		})
+		client := newRawClient(clientEnd)
 		client.init(t, 3)
 
 		client.send(t, 1, &sftpwire.Stat{Path: "/a"})
@@ -372,147 +371,4 @@ func TestDropNeedsTheConnection(t *testing.T) {
 			t.Errorf("backend received %#v", req.packet)
 		}
 	})
-}
-
-// faultProxy is a proxy session with faults between a raw test client and a
-// fake backend.
-type faultProxy struct {
-	client  *rawClient
-	backend *fakeBackend
-	conn    *fakeConn
-	result  *proxyResult
-}
-
-// startFaultProxy starts a session in request order with faults over a fake
-// connection, logging to logs if it is not nil. The client has already sent
-// INIT.
-func startFaultProxy(t *testing.T, ctx context.Context, faults func(sftpproxy.Request) sftpproxy.Action, logs *syncBuffer) *faultProxy {
-	t.Helper()
-	opts := sftpproxy.Options{Faults: faults}
-	if logs != nil {
-		opts.Logger = slog.New(slog.NewTextHandler(logs, nil))
-	}
-	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	return startFaultProxyOn(t, ctx, fb, backend, opts)
-}
-
-// startFaultProxyOn starts a session with opts and a fake connection between
-// a raw test client and fb. A nil opts.Logger discards the logs.
-func startFaultProxyOn(t *testing.T, ctx context.Context, fb *fakeBackend, backend net.Conn, opts sftpproxy.Options) *faultProxy {
-	t.Helper()
-	if opts.Logger == nil {
-		opts.Logger = slog.New(slog.DiscardHandler)
-	}
-	clientEnd, proxyEnd := net.Pipe()
-	conn := &fakeConn{stream: proxyEnd}
-	opts.Conn = conn
-	result := &proxyResult{done: make(chan struct{})}
-	go func() {
-		defer close(result.done)
-		result.err = sftpproxy.Serve(ctx, proxyEnd, backend, opts)
-	}()
-	t.Cleanup(func() {
-		clientEnd.Close()
-		result.wait(t)
-	})
-	client := &rawClient{conn: clientEnd, in: bufio.NewReader(clientEnd)}
-	client.init(t, 3)
-	return &faultProxy{client: client, backend: fb, conn: conn, result: result}
-}
-
-// assertNoBackendRequest checks, once every goroutine in the bubble is
-// blocked, that the backend has received nothing.
-func (p *faultProxy) assertNoBackendRequest(t *testing.T) {
-	t.Helper()
-	synctest.Wait()
-	select {
-	case req, ok := <-p.backend.requests:
-		if ok {
-			t.Fatalf("backend received %#v, want nothing yet", req.packet)
-		}
-	default:
-	}
-}
-
-// onPath returns faults that apply action to every request on path.
-func onPath(path string, action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
-		if r.Path == path {
-			return action
-		}
-		return nil
-	}
-}
-
-// fakeConn stands in for the client's connection and records what faults do
-// to it. Closing or resetting it closes the proxy's end of the client pipe,
-// as closing an SSH connection ends its channels.
-type fakeConn struct {
-	stream net.Conn
-
-	mu  sync.Mutex
-	log []string
-}
-
-func (c *fakeConn) Close() error { c.record("close"); return c.stream.Close() }
-func (c *fakeConn) Reset() error { c.record("reset"); return c.stream.Close() }
-func (c *fakeConn) Freeze()      { c.record("freeze") }
-
-func (c *fakeConn) record(event string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.log = append(c.log, event)
-}
-
-func (c *fakeConn) events() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return slices.Clone(c.log)
-}
-
-// sendTogether writes requests with IDs 1, 2 and so on in a single write, as
-// a pipelining client does, so the proxy has them all before it handles the
-// first.
-func (c *rawClient) sendTogether(t *testing.T, requests ...sftpwire.Packet) {
-	t.Helper()
-	var b []byte
-	for i, p := range requests {
-		b = sftpwire.AppendPacket(b, uint32(i+1), p)
-	}
-	c.write(t, b)
-}
-
-// assertReplies checks that the next replies the client receives answer the
-// requests with ids, in that order.
-func (c *rawClient) assertReplies(t *testing.T, ids ...uint32) {
-	t.Helper()
-	for _, want := range ids {
-		if id, p := c.receiveReply(t); id != want {
-			t.Fatalf("received a reply to request %d (%v), want one to %d", id, p.Type(), want)
-		}
-	}
-}
-
-func (c *rawClient) assertStatus(t *testing.T, id uint32, code sftpwire.StatusCode, message string) {
-	t.Helper()
-	gotID, p := c.receiveReply(t)
-	want := sftpwire.StatusReply{Code: code, Message: message}
-	if st, ok := p.(*sftpwire.StatusReply); !ok || gotID != id || *st != want {
-		t.Errorf("reply = %d %#v, want %d %#v", gotID, p, id, want)
-	}
-}
-
-func assertPaths(t *testing.T, reqs []backendRequest, paths ...string) {
-	t.Helper()
-	var got []string
-	for _, req := range reqs {
-		stat, ok := req.packet.(*sftpwire.Stat)
-		if !ok {
-			t.Fatalf("backend received %#v, want a STAT", req.packet)
-		}
-		got = append(got, stat.Path)
-	}
-	if !slices.Equal(got, paths) {
-		t.Errorf("backend received STATs for %v, want %v", got, paths)
-	}
 }

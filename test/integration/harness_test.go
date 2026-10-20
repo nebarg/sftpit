@@ -24,9 +24,10 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sftpit/internal/backend"
-	"sftpit/internal/sftpproxy"
-	"sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/runs"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 const (
@@ -78,8 +79,8 @@ type server struct {
 }
 
 // startServer starts a server that routes each session as via says. A
-// proxied session runs with opts, given the session's connection and a
-// logger that discards everything.
+// proxied session goes through the same handler as sftpit serve and runs
+// with opts, given a logger that discards everything.
 func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
 	t.Helper()
 	files := t.TempDir()
@@ -95,11 +96,8 @@ func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
 		return embedded.Serve(channel, conn.Home())
 	}
 	if via == proxied {
-		handler = func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
-			opts := opts
-			opts.Conn, opts.Logger = conn, logger
-			return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), opts)
-		}
+		opts.Logger = logger
+		handler = runs.Handler(embedded, opts)
 	}
 	signer, err := ssh.NewSignerFromKey(clientKey)
 	if err != nil {
@@ -266,7 +264,7 @@ func (l line) String() string { return string(l) }
 
 func splitLines(out []byte) []line {
 	var ls []line
-	for _, s := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+	for s := range strings.SplitSeq(strings.TrimRight(string(out), "\n"), "\n") {
 		ls = append(ls, line(s))
 	}
 	return ls

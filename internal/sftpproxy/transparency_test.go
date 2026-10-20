@@ -2,12 +2,10 @@ package sftpproxy_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -17,7 +15,7 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
 // TestProxyIsTransparent runs one workload directly against a pkg/sftp
@@ -31,11 +29,8 @@ func TestProxyIsTransparent(t *testing.T) {
 
 	for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
 		t.Run(order.String(), func(t *testing.T) {
-			client, _ := startProxyWith(t, context.Background(), inMemoryBackend(t), sftpproxy.Options{
-				ReplyOrder: order,
-				Logger:     slog.New(slog.DiscardHandler),
-			})
-			proxied := runWorkload(t, newSFTPClient(t, client.conn), upload)
+			p := startProxy(t, inMemoryBackend(t), sftpproxy.Options{ReplyOrder: order})
+			proxied := runWorkload(t, newSFTPClient(t, p.client.conn), upload)
 			if !slices.Equal(proxied, direct) {
 				t.Errorf("outcomes differ through the proxy\ndirect:\n%s\nproxied:\n%s",
 					strings.Join(direct, "\n"), strings.Join(proxied, "\n"))

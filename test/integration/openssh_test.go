@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
 // openSSHBatch is run with sftp -b. A leading "-" lets the batch continue

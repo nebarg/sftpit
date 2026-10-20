@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 )
 
 // ErrUnsupportedFile reports a seed entry that is neither a regular file
@@ -22,7 +23,7 @@ var ErrUnsupportedFile = errors.New("only regular files and directories can be s
 func (e *Embedded) Seed(src string) error {
 	srcRoot, err := os.OpenRoot(src)
 	if err != nil {
-		return fmt.Errorf("seed: %w", err)
+		return fmt.Errorf("backend: seed: %w", err)
 	}
 	defer srcRoot.Close()
 
@@ -46,11 +47,11 @@ func (e *Embedded) Seed(src string) error {
 		return fmt.Errorf("%s: %w", filepath.Join(src, filepath.FromSlash(name)), ErrUnsupportedFile)
 	})
 	if err != nil {
-		return fmt.Errorf("seed: %w", err)
+		return fmt.Errorf("backend: seed: %w", err)
 	}
-	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := e.copyMetadata(srcRoot, dirs[i]); err != nil {
-			return fmt.Errorf("seed: %w", err)
+	for _, dir := range slices.Backward(dirs) {
+		if err := e.copyMetadata(srcRoot, dir); err != nil {
+			return fmt.Errorf("backend: seed: %w", err)
 		}
 	}
 	return nil

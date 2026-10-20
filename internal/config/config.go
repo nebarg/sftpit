@@ -28,7 +28,7 @@ import (
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/crypto/ssh"
 
-	"sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 // SchemaVersion is the configuration file format this package reads.

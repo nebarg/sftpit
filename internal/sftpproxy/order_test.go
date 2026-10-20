@@ -1,15 +1,13 @@
 package sftpproxy_test
 
 import (
-	"cmp"
-	"context"
 	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"sftpit/internal/sftpproxy"
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 func TestCompletionOrderDeliversEachReplyWhenReady(t *testing.T) {
@@ -33,13 +31,16 @@ func TestCompletionOrderDeliversEachReplyWhenReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				delay := sftpproxy.Delay{When: sftpproxy.After, Duration: 3 * time.Second}
-				p := startCompletionProxy(t, context.Background(), inSequence(delay))
+				p, fb := startProxyOnFake(t, sftpproxy.Options{
+					Faults:     inSequence(delay),
+					ReplyOrder: sftpproxy.CompletionOrder,
+				})
 				start := time.Now()
 				p.client.sendTogether(t, tt.requests...)
 
-				first, second := p.backend.next(t), p.backend.next(t)
-				p.backend.reply(t, first.id, &sftpwire.AttrsReply{})
-				p.backend.reply(t, second.id, &sftpwire.AttrsReply{})
+				first, second := fb.next(t), fb.next(t)
+				fb.reply(t, first.id, &sftpwire.AttrsReply{})
+				fb.reply(t, second.id, &sftpwire.AttrsReply{})
 
 				p.client.assertReplies(t, 2)
 				if got := time.Since(start); got != 0 {
@@ -57,9 +58,12 @@ func TestCompletionOrderDeliversEachReplyWhenReady(t *testing.T) {
 func TestCompletionOrderHoldsBackOnlyTheSameFile(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		delay := sftpproxy.Delay{When: sftpproxy.Before, Duration: 3 * time.Second}
-		p := startCompletionProxy(t, context.Background(), inSequence(nil, delay))
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults:     inSequence(nil, delay),
+			ReplyOrder: sftpproxy.CompletionOrder,
+		})
 		p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenWrite})
-		p.backend.reply(t, p.backend.next(t).id, &sftpwire.HandleReply{Handle: "h"})
+		fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: "h"})
 		p.client.assertReplies(t, 1)
 
 		start := time.Now()
@@ -72,16 +76,16 @@ func TestCompletionOrderHoldsBackOnlyTheSameFile(t *testing.T) {
 			&sftpwire.Close{Handle: "h"},
 		)
 
-		other := p.backend.next(t)
-		p.assertNoBackendRequest(t)
-		p.backend.reply(t, other.id, &sftpwire.AttrsReply{})
+		other := fb.next(t)
+		fb.assertNoRequest(t)
+		fb.reply(t, other.id, &sftpwire.AttrsReply{})
 		p.client.assertReplies(t, 2)
 
 		var held []sftpwire.Packet
 		for range 5 {
-			req := p.backend.next(t)
+			req := fb.next(t)
 			held = append(held, req.packet)
-			p.backend.reply(t, req.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
+			fb.reply(t, req.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
 		}
 		if got := time.Since(start); got != 3*time.Second {
 			t.Errorf("held requests reached the backend after %v, want 3s", got)
@@ -104,19 +108,22 @@ func TestCompletionOrderHoldsBackOnlyTheSameFile(t *testing.T) {
 
 func TestCompletionOrderDropWaitsForTheBackend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := startCompletionProxy(t, context.Background(), inSequence(nil, sftpproxy.Drop{When: sftpproxy.Before}))
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults:     inSequence(nil, sftpproxy.Drop{When: sftpproxy.Before}),
+			ReplyOrder: sftpproxy.CompletionOrder,
+		})
 		p.client.sendTogether(t,
 			&sftpwire.Stat{Path: "/first"},
 			&sftpwire.Stat{Path: "/a"},
 			&sftpwire.Stat{Path: "/last"},
 		)
 
-		first := p.backend.next(t)
-		p.assertNoBackendRequest(t)
+		first := fb.next(t)
+		fb.assertNoRequest(t)
 		if got := p.conn.events(); len(got) != 0 {
 			t.Fatalf("connection %v while the backend still had a request", got)
 		}
-		p.backend.reply(t, first.id, &sftpwire.AttrsReply{})
+		fb.reply(t, first.id, &sftpwire.AttrsReply{})
 		p.client.assertReplies(t, 1)
 		p.client.assertClosed(t)
 		if err := p.result.wait(t); err != nil {
@@ -125,17 +132,20 @@ func TestCompletionOrderDropWaitsForTheBackend(t *testing.T) {
 		if got := p.conn.events(); !slices.Equal(got, []string{"close"}) {
 			t.Errorf("connection events = %v, want [close]", got)
 		}
-		p.assertNoBackendRequest(t)
+		fb.assertNoRequest(t)
 	})
 }
 
 func TestCompletionOrderDropLosesHeldReplies(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		held := sftpproxy.Delay{When: sftpproxy.After, Duration: time.Hour}
-		p := startCompletionProxy(t, context.Background(), inSequence(held, sftpproxy.Drop{When: sftpproxy.Before}))
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults:     inSequence(held, sftpproxy.Drop{When: sftpproxy.Before}),
+			ReplyOrder: sftpproxy.CompletionOrder,
+		})
 		p.client.sendTogether(t, &sftpwire.Stat{Path: "/held"}, &sftpwire.Stat{Path: "/a"})
 
-		p.backend.reply(t, p.backend.next(t).id, &sftpwire.AttrsReply{})
+		fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
 		p.client.assertClosed(t)
 		if got := p.conn.events(); !slices.Equal(got, []string{"close"}) {
 			t.Errorf("connection events = %v, want [close]", got)
@@ -145,17 +155,20 @@ func TestCompletionOrderDropLosesHeldReplies(t *testing.T) {
 
 func TestCompletionOrderDropAfterStopsLaterRequests(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := startCompletionProxy(t, context.Background(), inSequence(sftpproxy.Drop{When: sftpproxy.After, Reset: true}))
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults:     inSequence(sftpproxy.Drop{When: sftpproxy.After, Reset: true}),
+			ReplyOrder: sftpproxy.CompletionOrder,
+		})
 		p.client.sendTogether(t, &sftpwire.Rename{OldPath: "/a", NewPath: "/b"}, &sftpwire.Stat{Path: "/later"})
 
-		rename := p.backend.next(t)
-		p.assertNoBackendRequest(t)
-		p.backend.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
+		rename := fb.next(t)
+		fb.assertNoRequest(t)
+		fb.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
 		p.client.assertClosed(t)
 		if got := p.conn.events(); !slices.Equal(got, []string{"reset"}) {
 			t.Errorf("connection events = %v, want [reset]", got)
 		}
-		p.assertNoBackendRequest(t)
+		fb.assertNoRequest(t)
 	})
 }
 
@@ -164,7 +177,10 @@ func TestCompletionOrderDropAfterStopsLaterRequests(t *testing.T) {
 func TestCompletionOrderDropTakesItsTurn(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		delay := sftpproxy.Delay{When: sftpproxy.Before, Duration: 2 * time.Second}
-		p := startCompletionProxy(t, context.Background(), inSequence(delay, sftpproxy.Drop{When: sftpproxy.Before}))
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults:     inSequence(delay, sftpproxy.Drop{When: sftpproxy.Before}),
+			ReplyOrder: sftpproxy.CompletionOrder,
+		})
 		start := time.Now()
 		p.client.sendTogether(t,
 			&sftpwire.Stat{Path: "/a"},
@@ -172,20 +188,20 @@ func TestCompletionOrderDropTakesItsTurn(t *testing.T) {
 			&sftpwire.Stat{Path: "/g"},
 		)
 
-		other := p.backend.next(t)
-		p.backend.reply(t, other.id, &sftpwire.AttrsReply{})
+		other := fb.next(t)
+		fb.reply(t, other.id, &sftpwire.AttrsReply{})
 		p.client.assertReplies(t, 3)
 
-		stat := p.backend.next(t)
+		stat := fb.next(t)
 		if got := time.Since(start); got != 2*time.Second {
 			t.Errorf("held request reached the backend after %v, want 2s", got)
 		}
 		assertPaths(t, []backendRequest{stat}, "/a")
-		p.assertNoBackendRequest(t)
+		fb.assertNoRequest(t)
 		if got := p.conn.events(); len(got) != 0 {
 			t.Fatalf("connection %v while the backend still had a request", got)
 		}
-		p.backend.reply(t, stat.id, &sftpwire.AttrsReply{})
+		fb.reply(t, stat.id, &sftpwire.AttrsReply{})
 		p.client.assertReplies(t, 1)
 		p.client.assertClosed(t)
 	})
@@ -197,7 +213,7 @@ func TestCompletionOrderDropTakesItsTurn(t *testing.T) {
 func TestCompletionOrderBoundsRequestsInFlight(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const limit = 256
-		p := startCompletionProxy(t, context.Background(), nil)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{ReplyOrder: sftpproxy.CompletionOrder})
 		requests := make([]sftpwire.Packet, limit+1)
 		for i := range requests {
 			requests[i] = &sftpwire.Stat{Path: "/a"}
@@ -209,7 +225,7 @@ func TestCompletionOrderBoundsRequestsInFlight(t *testing.T) {
 			synctest.Wait()
 			for {
 				select {
-				case req := <-p.backend.requests:
+				case req := <-fb.requests:
 					received = append(received, req)
 				default:
 					return
@@ -225,51 +241,11 @@ func TestCompletionOrderBoundsRequestsInFlight(t *testing.T) {
 			t.Fatalf("backend received %d requests, want %d", len(received), limit)
 		}
 
-		p.backend.reply(t, received[0].id, &sftpwire.AttrsReply{})
+		fb.reply(t, received[0].id, &sftpwire.AttrsReply{})
 		p.client.assertReplies(t, 1)
 		collect()
 		if len(received) != limit+1 {
 			t.Errorf("backend received %d requests after one reply, want %d", len(received), limit+1)
 		}
 	})
-}
-
-// startCompletionProxy starts a session in completion order with faults
-// over a fake connection. The client has already sent INIT.
-func startCompletionProxy(t *testing.T, ctx context.Context, faults func(sftpproxy.Request) sftpproxy.Action) *faultProxy {
-	t.Helper()
-	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	return startFaultProxyOn(t, ctx, fb, backend, sftpproxy.Options{Faults: faults, ReplyOrder: sftpproxy.CompletionOrder})
-}
-
-// inSequence returns faults that apply actions to requests in the order
-// they arrive: the first action to the first request, and so on. A nil
-// action, or a request beyond the last, gets no fault.
-func inSequence(actions ...sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
-	var n int
-	return func(sftpproxy.Request) sftpproxy.Action {
-		n++
-		if n > len(actions) {
-			return nil
-		}
-		return actions[n-1]
-	}
-}
-
-func packetTypes(packets []sftpwire.Packet) []sftpwire.PacketType {
-	var types []sftpwire.PacketType
-	for _, p := range packets {
-		types = append(types, p.Type())
-	}
-	return types
-}
-
-func (c *rawClient) nextReplyID(t *testing.T) uint32 {
-	t.Helper()
-	id, _ := c.receiveReply(t)
-	return id
-}
-
-func sameElements[T cmp.Ordered](got []T, want ...T) bool {
-	return slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want)))
 }

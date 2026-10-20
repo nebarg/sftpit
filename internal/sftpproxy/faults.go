@@ -3,7 +3,7 @@ package sftpproxy
 import (
 	"time"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 // Request describes a client request to Options.Faults.
@@ -43,11 +43,7 @@ func (w When) String() string {
 }
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop or Freeze.
-//
-// Replies always reach the client in request order, so an action that holds
-// one reply back holds back every later reply too. An action before a
-// request also holds back every later request, as a server that handles one
-// request at a time would.
+// What else an action holds back depends on the session's ReplyOrder.
 type Action interface {
 	when() When
 }

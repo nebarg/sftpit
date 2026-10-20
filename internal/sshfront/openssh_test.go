@@ -17,7 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 func TestOpenSSHClientTransfer(t *testing.T) {

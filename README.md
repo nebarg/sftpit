@@ -81,7 +81,7 @@ Requires Go 1.26 or later.
 make check
 ```
 
-`make check` runs the gofmt check, `go vet`, staticcheck and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
+`make check` runs the gofmt check, a check that `go.mod` is tidy, `go vet`, staticcheck and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
 
 The integration tests in `test/integration` drive the OpenSSH `sftp` client and phpseclib against sftpit, and are skipped when a client is missing. phpseclib needs PHP 8.1 or later and Composer:
 

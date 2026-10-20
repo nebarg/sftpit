@@ -8,7 +8,7 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 // status is an error that pkg/sftp reports to the client with code, carrying

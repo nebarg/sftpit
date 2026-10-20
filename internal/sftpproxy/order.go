@@ -23,6 +23,26 @@ func (o ReplyOrder) String() string {
 	return "request"
 }
 
+// completionState is the part of a session that only completion order uses.
+// Every field but inFlight is guarded by the session's mu.
+type completionState struct {
+	// inFlight bounds the requests the session handles at once, as the reply
+	// queue does in request order.
+	inFlight chan struct{}
+
+	// dropping is set once a drop has its place in the reply stream or is
+	// waiting for one, so that a second drop that reaches its turn changes
+	// nothing.
+	dropping bool
+
+	// pendingDrop waits for the backend to answer every request it has.
+	pendingDrop *request
+
+	// waiting maps each file to its latest request that has yet to have its
+	// turn.
+	waiting map[string]*request
+}
+
 // schedule processes req, in completion order, once every earlier request
 // on its files has had its turn, so the backend sees the requests on each
 // file in the order they were sent. A reply held after the backend has acted
@@ -32,10 +52,10 @@ func (s *session) schedule(req *request) error {
 	var earlier []chan struct{}
 	s.mu.Lock()
 	for _, name := range req.files() {
-		if prev := s.waiting[name]; prev != nil {
+		if prev := s.completion.waiting[name]; prev != nil {
 			earlier = append(earlier, prev.turn)
 		}
-		s.waiting[name] = req
+		s.completion.waiting[name] = req
 	}
 	s.mu.Unlock()
 
@@ -62,8 +82,8 @@ func (s *session) takeTurn(req *request) error {
 	err := s.process(req)
 	s.mu.Lock()
 	for _, name := range req.files() {
-		if s.waiting[name] == req {
-			delete(s.waiting, name)
+		if s.completion.waiting[name] == req {
+			delete(s.completion.waiting, name)
 		}
 	}
 	s.mu.Unlock()
