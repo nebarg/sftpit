@@ -1,0 +1,249 @@
+package sftpproxy
+
+import (
+	"fmt"
+	"path"
+	"sync"
+
+	"sftpit/internal/sftpwire"
+)
+
+// slot holds the reply to one client request until every earlier reply has
+// been written.
+type slot chan []byte
+
+// request is a client request that has been forwarded to the backend, or
+// answered by the proxy itself.
+type request struct {
+	clientID uint32
+	proxyID  uint32
+	packet   sftpwire.Packet
+
+	// path is the canonical path the request acts on. For a request on a
+	// handle, it is the path the handle was opened with, or empty if the
+	// handle is unknown.
+	path string
+
+	// target is a rename's canonical destination.
+	target string
+
+	reply slot
+}
+
+// tracker maps the proxy's backend request IDs to client requests, records
+// which path each open handle refers to and resolves client paths.
+type tracker struct {
+	dir        string
+	extensions map[string]bool
+
+	mu      sync.Mutex
+	nextID  uint32
+	pending map[uint32]*request
+	handles map[string]string
+}
+
+// newTracker returns a tracker for a session whose backend default directory
+// is dir and which offers the client exts.
+func newTracker(dir string, exts []sftpwire.Extension) *tracker {
+	t := &tracker{
+		dir:        dir,
+		extensions: make(map[string]bool, len(exts)),
+		pending:    make(map[uint32]*request),
+		handles:    make(map[string]string),
+	}
+	for _, ext := range exts {
+		t.extensions[ext.Name] = true
+	}
+	return t
+}
+
+// track resolves the paths in p in place and registers p as pending under a
+// new proxy request ID, with reply as the slot for its answer. If the proxy
+// must answer p itself instead, track registers nothing and returns the
+// status to send.
+//
+// Requests on unknown handles are forwarded: the backend knows no more
+// handles than the proxy does, and its own error is the faithful answer.
+func (t *tracker) track(clientID uint32, p sftpwire.Packet, reply slot) (*request, *sftpwire.StatusReply) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	req := &request{clientID: clientID, packet: p, reply: reply}
+	ok := true
+	switch p := p.(type) {
+	case *sftpwire.Open:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.OpenDir:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.Stat:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.LStat:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.SetStat:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.Remove:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.Mkdir:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.Rmdir:
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.RealPath:
+		// OpenSSH and pkg/sftp both canonicalize an empty path as ".".
+		if p.Path == "" {
+			p.Path = "."
+		}
+		p.Path, _ = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.Rename:
+		p.OldPath, ok = t.resolve(p.OldPath)
+		if ok {
+			p.NewPath, ok = t.resolve(p.NewPath)
+		}
+		req.path, req.target = p.OldPath, p.NewPath
+	case *sftpwire.PosixRename:
+		if !t.extensions[sftpwire.ExtPosixRename] {
+			return req, status(sftpwire.StatusOpUnsupported)
+		}
+		p.OldPath, ok = t.resolve(p.OldPath)
+		if ok {
+			p.NewPath, ok = t.resolve(p.NewPath)
+		}
+		req.path, req.target = p.OldPath, p.NewPath
+	case *sftpwire.StatVFS:
+		if !t.extensions[sftpwire.ExtStatVFS] {
+			return req, status(sftpwire.StatusOpUnsupported)
+		}
+		p.Path, ok = t.resolve(p.Path)
+		req.path = p.Path
+	case *sftpwire.Close:
+		// The draft makes a handle invalid as soon as CLOSE is sent, even if
+		// the close then fails.
+		req.path = t.handles[p.Handle]
+		delete(t.handles, p.Handle)
+	case *sftpwire.Read:
+		req.path = t.handles[p.Handle]
+	case *sftpwire.Write:
+		req.path = t.handles[p.Handle]
+	case *sftpwire.FStat:
+		req.path = t.handles[p.Handle]
+	case *sftpwire.FSetStat:
+		req.path = t.handles[p.Handle]
+	case *sftpwire.ReadDir:
+		req.path = t.handles[p.Handle]
+	default:
+		panic(fmt.Sprintf("sftpproxy: no tracking for %T", p))
+	}
+	if !ok {
+		return req, status(sftpwire.StatusNoSuchFile)
+	}
+
+	req.proxyID = t.newID()
+	t.pending[req.proxyID] = req
+	return req, nil
+}
+
+// resolve makes p absolute against the backend's default directory and
+// cleans it lexically, so rules and the backend see the same path. An empty
+// path names no file, as in OpenSSH.
+func (t *tracker) resolve(p string) (string, bool) {
+	if p == "" {
+		return "", false
+	}
+	if !path.IsAbs(p) {
+		return path.Join(t.dir, p), true
+	}
+	return path.Clean(p), true
+}
+
+func (t *tracker) newID() uint32 {
+	for {
+		id := t.nextID
+		t.nextID++
+		if _, inUse := t.pending[id]; !inUse {
+			return id
+		}
+	}
+}
+
+// complete matches a backend reply to its pending request, checks that the
+// reply answers that kind of request and records any handle it opens.
+func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	req, ok := t.pending[proxyID]
+	if !ok {
+		return nil, fmt.Errorf("sftpproxy: backend replied to unknown request %d", proxyID)
+	}
+	delete(t.pending, proxyID)
+	if !replyFits(req.packet, reply) {
+		return nil, fmt.Errorf("sftpproxy: backend answered %v with %v", operation(req.packet), reply.Type())
+	}
+	if h, ok := reply.(*sftpwire.HandleReply); ok {
+		if _, open := t.handles[h.Handle]; open {
+			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
+		}
+		t.handles[h.Handle] = req.path
+	}
+	return req, nil
+}
+
+// replyFits reports whether reply can answer req. Any request can fail with
+// a status; requests that return data expect one particular reply type.
+func replyFits(req, reply sftpwire.Packet) bool {
+	if _, ok := reply.(*sftpwire.StatusReply); ok {
+		return true
+	}
+	switch req := req.(type) {
+	case *sftpwire.Open, *sftpwire.OpenDir:
+		_, ok := reply.(*sftpwire.HandleReply)
+		return ok
+	case *sftpwire.Read:
+		data, ok := reply.(*sftpwire.DataReply)
+		return ok && uint64(len(data.Data)) <= uint64(req.Length)
+	case *sftpwire.ReadDir:
+		_, ok := reply.(*sftpwire.NameReply)
+		return ok
+	case *sftpwire.RealPath:
+		name, ok := reply.(*sftpwire.NameReply)
+		return ok && len(name.Entries) == 1
+	case *sftpwire.Stat, *sftpwire.LStat, *sftpwire.FStat:
+		_, ok := reply.(*sftpwire.AttrsReply)
+		return ok
+	case *sftpwire.StatVFS:
+		_, ok := reply.(*sftpwire.ExtendedReply)
+		return ok
+	}
+	return false
+}
+
+// openSSHMessages are the messages OpenSSH's sftp-server sends with each
+// status, used for statuses the proxy sends itself.
+var openSSHMessages = map[sftpwire.StatusCode]string{
+	sftpwire.StatusNoSuchFile:    "No such file",
+	sftpwire.StatusOpUnsupported: "Operation unsupported",
+}
+
+func status(code sftpwire.StatusCode) *sftpwire.StatusReply {
+	return &sftpwire.StatusReply{Code: code, Message: openSSHMessages[code]}
+}
+
+// operation names a request for logs and errors, telling the extended
+// requests apart.
+func operation(p sftpwire.Packet) string {
+	switch p.(type) {
+	case *sftpwire.PosixRename:
+		return sftpwire.ExtPosixRename
+	case *sftpwire.StatVFS:
+		return sftpwire.ExtStatVFS
+	}
+	return p.Type().String()
+}
