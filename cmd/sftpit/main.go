@@ -3,32 +3,51 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
 )
 
 const (
-	exitOK    = 0
+	exitOK = 0
+	// exitUsage reports an invalid command line or configuration.
 	exitUsage = 2
+	// exitFailure reports that sftpit could not start or keep running.
+	exitFailure = 3
 )
 
 const usage = `Usage: sftpit <command>
 
 Commands:
+  serve     Run the SFTP server
   version   Print the build version
   help      Show this help
+
+Run "sftpit serve --help" for the server's flags.
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// After the first signal, restore the default handling, so a second one
+	// stops sftpit even if shutting down hangs.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
+	}
+	if args[0] == "serve" {
+		return serve(ctx, args[1:], stdout, stderr)
 	}
 	if len(args) > 1 {
 		fmt.Fprintf(stderr, "sftpit %s: unexpected arguments %q\n", args[0], args[1:])

@@ -1,4 +1,4 @@
-.PHONY: build test vet lint vuln fmt-check check
+.PHONY: build test vet lint vuln fmt-check check integration-deps
 
 build:
 	go build -o bin/sftpit ./cmd/sftpit
@@ -22,3 +22,6 @@ fmt-check:
 	fi
 
 check: fmt-check vet lint test
+
+integration-deps:
+	composer install --working-dir=test/integration/phpseclib

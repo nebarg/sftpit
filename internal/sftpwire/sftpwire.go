@@ -119,6 +119,26 @@ func (c StatusCode) String() string {
 	return fmt.Sprintf("SSH_FX_UNKNOWN(%d)", c)
 }
 
+var statusMessages = map[StatusCode]string{
+	StatusOK:               "Success",
+	StatusEOF:              "End of file",
+	StatusNoSuchFile:       "No such file",
+	StatusPermissionDenied: "Permission denied",
+	StatusFailure:          "Failure",
+	StatusBadMessage:       "Bad message",
+	StatusNoConnection:     "No connection",
+	StatusConnectionLost:   "Connection lost",
+	StatusOpUnsupported:    "Operation unsupported",
+}
+
+// Message returns the message OpenSSH's sftp-server sends with c.
+func (c StatusCode) Message() string {
+	if msg, ok := statusMessages[c]; ok {
+		return msg
+	}
+	return "Unknown error"
+}
+
 // Open flags, the SSH_FXF_* bits of Open.Flags.
 const (
 	OpenRead      = 0x01

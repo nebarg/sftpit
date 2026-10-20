@@ -375,6 +375,49 @@ func TestHandlerResultSetsExitStatus(t *testing.T) {
 	}
 }
 
+func TestHandlerFailuresAreLogged(t *testing.T) {
+	var logs syncBuffer
+	stopped := make(chan struct{})
+	addr, srv := startServer(t, sshfront.Config{
+		Users: []sshfront.User{{Name: "fails", Password: testPassword}, {Name: "waits", Password: testPassword}},
+		Handler: func(ctx context.Context, conn *sshfront.Conn, _ io.ReadWriteCloser) error {
+			if conn.User() == "fails" {
+				return errors.New("backend unavailable")
+			}
+			defer close(stopped)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+	})
+
+	sftpExitStatus(t, mustDial(t, addr, "fails", ssh.Password(testPassword)))
+	client := mustDial(t, addr, "waits", ssh.Password(testPassword))
+	channel, _, err := client.OpenChannel("session", nil)
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	if ok, err := channel.SendRequest("subsystem", true, ssh.Marshal(struct{ Name string }{"sftp"})); err != nil || !ok {
+		t.Fatalf("subsystem request: ok %v, err %v", ok, err)
+	}
+	client.Close()
+	select {
+	case <-stopped:
+	case <-time.After(waitTimeout):
+		t.Fatal("handler was not cancelled when its connection closed")
+	}
+	// Close waits for every handler's result to be logged.
+	srv.Close()
+
+	logged := logs.String()
+	if !strings.Contains(logged, `msg="sftp handler failed" conn=1 user=fails err="backend unavailable"`) {
+		t.Errorf("the failing handler was not logged:\n%s", logged)
+	}
+	if strings.Contains(logged, "user=waits") {
+		t.Errorf("a handler stopped by its connection closing was logged as a failure:\n%s", logged)
+	}
+}
+
 func TestHandlerPanicIsContained(t *testing.T) {
 	var logs syncBuffer
 	addr, _ := startServer(t, sshfront.Config{

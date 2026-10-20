@@ -2,7 +2,65 @@
 
 Mailpit for SFTP: a local SFTP server for developing and testing file integrations, with faults you can inject on demand — slow responses, dropped connections, random failures and simulated corruption.
 
-**Status:** pre-alpha. Only `sftpit version` works so far.
+**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server with no faults yet.
+
+## Quickstart
+
+```bash
+go run ./cmd/sftpit serve
+```
+
+sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. At startup it prints the address, its host-key fingerprints and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
+
+`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces.
+
+## Configuration
+
+```bash
+sftpit serve --config ./sftpit.yaml
+```
+
+```yaml
+schema_version: 1
+
+env_file: ".env" # optional; a path or a list of paths
+
+server:
+  sftp_listen: "127.0.0.1:2122"
+  host_key: "./hostkeys" # or "workspace" (the default) for keys that change every run
+
+users:
+  - name: "test"
+    password_env: "SFTPIT_TEST_PASSWORD"
+  - name: "partner-b"
+    authorized_keys: "./keys/partner-b.pub"
+    home: "/partner-b" # default directory for relative paths
+```
+
+- Relative paths are resolved against the config file's directory.
+- Unknown fields and duplicate keys are errors.
+- Flags override the file.
+- With no `users`, the `test`/`test` login is used.
+- A `host_key` directory gets an Ed25519 and an RSA key the first time it is used. Commit them so a team shares one fingerprint.
+
+Passwords never appear in the config file. `password_env` names an environment variable, which is read from the process environment first and then from the env files named by `env_file` and `--env-file`. A later file overrides an earlier one, and a missing env file is skipped.
+
+sftpit never reads a `.env` it was not told about. It never copies env-file values into its own environment, and it keeps only the variables the config references. Env files accept the following:
+- `KEY=value` lines, with an optional `export` prefix;
+- single or double quotes;
+- `#` comments;
+- LF or CRLF line endings.
+
+Expansion such as `${OTHER}`, escapes and multi-line values are rejected for referenced variables. Keep env files out of version control.
+
+## Behavior
+
+With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The main differences:
+- symlinks, hard links and `statvfs` are not supported;
+- ownership cannot be changed;
+- new files are created with mode 0666 and new directories with 0777, less the umask, whatever permissions the client sends with them.
+
+A standard rename fails when the target exists, while `posix-rename@openssh.com` replaces it.
 
 ## Development
 
@@ -13,6 +71,12 @@ make check
 ```
 
 `make check` runs the gofmt check, `go vet`, staticcheck and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
+
+The integration tests in `test/integration` drive the OpenSSH `sftp` client and phpseclib against sftpit, and are skipped when a client is missing. phpseclib needs PHP 8.1 or later and Composer:
+
+```bash
+make integration-deps
+```
 
 ## License
 

@@ -225,15 +225,8 @@ func replyFits(req, reply sftpwire.Packet) bool {
 	return false
 }
 
-// openSSHMessages are the messages OpenSSH's sftp-server sends with each
-// status, used for statuses the proxy sends itself.
-var openSSHMessages = map[sftpwire.StatusCode]string{
-	sftpwire.StatusNoSuchFile:    "No such file",
-	sftpwire.StatusOpUnsupported: "Operation unsupported",
-}
-
 func status(code sftpwire.StatusCode) *sftpwire.StatusReply {
-	return &sftpwire.StatusReply{Code: code, Message: openSSHMessages[code]}
+	return &sftpwire.StatusReply{Code: code, Message: code.Message()}
 }
 
 // operation names a request for logs and errors, telling the extended

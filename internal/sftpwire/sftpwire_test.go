@@ -285,6 +285,20 @@ func TestDecodeKeepsUndefinedAttributeFlags(t *testing.T) {
 	}
 }
 
+func TestStatusMessages(t *testing.T) {
+	tests := map[sftpwire.StatusCode]string{
+		sftpwire.StatusOK:            "Success",
+		sftpwire.StatusNoSuchFile:    "No such file",
+		sftpwire.StatusOpUnsupported: "Operation unsupported",
+		99:                           "Unknown error",
+	}
+	for code, want := range tests {
+		if got := code.Message(); got != want {
+			t.Errorf("%v.Message() = %q, want %q", code, got, want)
+		}
+	}
+}
+
 func TestReadPacket(t *testing.T) {
 	stat := wire{}.byte(17).u32(1).str("/a")
 

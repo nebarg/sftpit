@@ -368,11 +368,16 @@ func (s *Server) callHandler(ctx context.Context, conn *Conn, channel ssh.Channe
 		}
 	}()
 
-	if err := s.handler(ctx, conn, channel); err != nil {
+	err = s.handler(ctx, conn, channel)
+	switch {
+	case err == nil:
+	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		// The connection ended, and the handler stopped because of it.
+		s.logger.Debug("sftp handler stopped with its connection", "conn", conn.id, "user", conn.user)
+	default:
 		s.logger.Warn("sftp handler failed", "conn", conn.id, "user", conn.user, "err", err)
-		return err
 	}
-	return nil
+	return err
 }
 
 func subsystemName(payload []byte) string {
