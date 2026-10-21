@@ -84,11 +84,15 @@ Expansion such as `${OTHER}`, escapes and multi-line values are rejected for ref
 
 ## Behavior
 
-With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The main differences:
+With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The differences:
 - symlinks and hard links are not supported;
 - `statvfs@openssh.com`, which `df` uses, reports the storage limits instead of the host's disk;
-- ownership cannot be changed;
-- new files are created with mode 0666 and new directories with 0777, less the umask, whatever permissions the client sends with them.
+- ownership cannot be changed, though setting the owner and group a file already has succeeds;
+- the setuid, setgid and sticky bits are dropped from permissions;
+- paths are cleaned before they are used, so a trailing slash after a file name, or `..` after a directory that does not exist, is ignored where OpenSSH answers that there is no such file;
+- `posix-rename@openssh.com` does not replace an empty directory with another directory;
+- the long names in listings, which are for display, show the owner and group as numbers;
+- names are encoded on the host, which shortens the longest name that fits, as [Quickstart](#quickstart) explains.
 
 A standard rename fails when the target exists, while `posix-rename@openssh.com` replaces it.
 
@@ -107,6 +111,8 @@ The integration tests in `test/integration` drive the OpenSSH `sftp` client and 
 ```bash
 make integration-deps
 ```
+
+`make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the phpseclib that `make integration-deps` installed.
 
 ## License
 

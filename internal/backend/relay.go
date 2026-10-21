@@ -5,19 +5,21 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 var errServerEnded = errors.New("backend: request server ended the session")
 
-// relayInOrder passes each request from client to server and waits for its
-// reply before passing the next. Every request gets exactly one reply, and
-// a status reply carries OpenSSH's message for its code, in place of
-// pkg/sftp's, which can be empty or name a file by its name on the host.
-func relayInOrder(client, server io.ReadWriter) error {
+// relayInOrder passes each request from client to server, which serves the
+// session with h, and waits for its reply before passing the next. Every
+// request gets exactly one reply, and a status reply carries OpenSSH's
+// message for its code, in place of pkg/sftp's, which can be empty or name a
+// file by its name on the host.
+func relayInOrder(client, server io.ReadWriter, h *handler) error {
 	fromClient, fromServer := bufio.NewReader(client), bufio.NewReader(server)
-	g := &guard{handles: make(map[string]handleKind)}
+	g := &guard{handles: make(map[string]handleKind), handler: h}
 	for {
 		request, err := sftpwire.ReadPacket(fromClient, maxPacketLength)
 		if err != nil {
@@ -53,9 +55,11 @@ func writePacket(w io.Writer, body []byte) error {
 // serves a request by how its handle was opened rather than by what it
 // asks, so it would serve a READ on a handle open only for writing by
 // writing the read buffer to the file, and a WRITE on one open only for
-// reading with the file's data.
+// reading with the file's data. The guard also gives the handler the
+// permissions that pkg/sftp loses from an OPEN or MKDIR.
 type guard struct {
 	handles map[string]handleKind
+	handler *handler
 }
 
 // handleKind is what a handle was opened as, which decides the requests it
@@ -76,18 +80,33 @@ func (g *guard) serve(request []byte, forward func([]byte) ([]byte, error)) ([]b
 	if code := g.refusal(p); code != sftpwire.StatusOK {
 		return statusPacket(id, code), nil
 	}
-	// OpenSSH opens a file for reading when an OPEN asks neither to read
-	// nor to write, where pkg/sftp would refuse it or serve its reads by
-	// writing.
-	if open, ok := p.(*sftpwire.Open); ok && open.Flags&(sftpwire.OpenRead|sftpwire.OpenWrite) == 0 {
-		open.Flags |= sftpwire.OpenRead
-		request = sftpwire.AppendPacket(nil, id, open)[4:]
+	switch p := p.(type) {
+	case *sftpwire.Open:
+		// OpenSSH opens a file for reading when an OPEN asks neither to
+		// read nor to write, where pkg/sftp would refuse it or serve its
+		// reads by writing.
+		if p.Flags&(sftpwire.OpenRead|sftpwire.OpenWrite) == 0 {
+			p.Flags |= sftpwire.OpenRead
+			request = sftpwire.AppendPacket(nil, id, p)[4:]
+		}
+		g.handler.perm = requestedPerm(p.Attrs, 0o666)
+	case *sftpwire.Mkdir:
+		g.handler.perm = requestedPerm(p.Attrs, 0o777)
 	}
 	reply, err := forward(request)
 	if err == nil {
 		g.observe(p, reply)
 	}
 	return reply, err
+}
+
+// requestedPerm returns the permissions attrs ask for a new file or
+// directory, or def if they ask for none, as OpenSSH's sftp-server does.
+func requestedPerm(attrs sftpwire.Attrs, def os.FileMode) os.FileMode {
+	if attrs.Flags&sftpwire.AttrPermissions == 0 {
+		return def
+	}
+	return permissions(attrs.Permissions)
 }
 
 // refusal returns the status OpenSSH answers p with when p's handle cannot

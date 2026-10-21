@@ -160,7 +160,12 @@ var scripts = map[string][]step{
 			{"create with permissions", req(&sftpwire.Open{Path: "p.txt", Flags: create, Attrs: perms(0o600)})},
 			{"close the file created with permissions", closeHandle("create with permissions")},
 			{"stat the file created with permissions", req(&sftpwire.Stat{Path: "p.txt"})},
-			{"set the permissions both servers give", req(&sftpwire.SetStat{Path: "p.txt", Attrs: perms(0o644)})},
+			{"open an existing file with permissions", req(&sftpwire.Open{Path: "a.txt", Flags: wr, Attrs: perms(0o600)})},
+			{"close the existing file", closeHandle("open an existing file with permissions")},
+			{"stat the existing file", req(&sftpwire.Stat{Path: "a.txt"})},
+			{"create with setuid", req(&sftpwire.Open{Path: "s.sh", Flags: create, Attrs: perms(0o4755)})},
+			{"close the file created with setuid", closeHandle("create with setuid")},
+			{"stat the file created with setuid", req(&sftpwire.Stat{Path: "s.sh"})},
 		},
 	),
 	"setstat": concat(
@@ -183,6 +188,9 @@ var scripts = map[string][]step{
 			{"chown to the owner", req(&sftpwire.SetStat{Path: "a.txt", Attrs: sftpwire.Attrs{
 				Flags: sftpwire.AttrUIDGID, UID: uint32(os.Getuid()), GID: uint32(os.Getgid()),
 			}})},
+			{"chown to another user", req(&sftpwire.SetStat{Path: "a.txt", Attrs: sftpwire.Attrs{
+				Flags: sftpwire.AttrUIDGID, UID: uint32(os.Getuid()) + 1, GID: uint32(os.Getgid()),
+			}})},
 			{"setstat nothing", req(&sftpwire.SetStat{Path: "a.txt"})},
 			{"setstat a missing file", req(&sftpwire.SetStat{Path: "missing", Attrs: perms(0o644)})},
 			{"truncate a directory", req(&sftpwire.SetStat{Path: "d", Attrs: size(0)})},
@@ -200,7 +208,6 @@ var scripts = map[string][]step{
 			{"mkdir in a missing directory", req(&sftpwire.Mkdir{Path: "missing/d"})},
 			{"mkdir with permissions", req(&sftpwire.Mkdir{Path: "p", Attrs: perms(0o700)})},
 			{"stat the directory made with permissions", req(&sftpwire.Stat{Path: "p"})},
-			{"set the permissions both servers give", req(&sftpwire.SetStat{Path: "p", Attrs: perms(0o755)})},
 		},
 		file("d/a.txt", "a"),
 		[]step{
@@ -263,6 +270,7 @@ var scripts = map[string][]step{
 			{"stat with a trailing slash", req(&sftpwire.Stat{Path: "d/"})},
 			{"stat a file with a trailing slash", req(&sftpwire.Stat{Path: "a.txt/"})},
 			{"stat through a file", req(&sftpwire.Stat{Path: "a.txt/x"})},
+			{"stat through a missing directory", req(&sftpwire.Stat{Path: "missing/../a.txt"})},
 			{"stat with doubled slashes", req(&sftpwire.Stat{Path: "d//..//a.txt"})},
 			{"statvfs", req(&sftpwire.StatVFS{Path: "."})},
 			{"statvfs a missing path", req(&sftpwire.StatVFS{Path: "missing"})},
@@ -295,24 +303,23 @@ func concat(parts ...[]step) []step {
 }
 
 // differences are the steps whose replies from sftpit knowingly differ from
-// OpenSSH's, by script and step, and the scripts whose files do, by script
-// and "files", each with the reason.
+// OpenSSH's, by script and step, the steps whose longnames do, by script,
+// step and "longnames", and the scripts whose files do, by script and
+// "files", each with the reason.
 var differences = map[string]string{
-	"open flags/stat the file created with permissions": "pkg/sftp's request server loses the permissions an OPEN carries, so files are created 0666 less the umask",
+	"open flags/stat the file created with setuid": "the setuid, setgid and sticky bits are dropped, so a client cannot leave a setuid program in the developer's workspace",
 
-	"directories/stat the directory made with permissions": "pkg/sftp's request server drops a MKDIR's attributes, so directories are made 0777 less the umask",
-
-	"directories/readdir": "listings leave out . and .., and longnames give the owner and group as numbers and do not pad the day",
+	"directories/readdir longnames": "pkg/sftp formats longnames, giving the owner and group as numbers where OpenSSH names them, and the day unpadded",
 
 	"setstat/stat after chmod with setuid": "the setuid, setgid and sticky bits are dropped, so a client cannot leave a setuid program in the developer's workspace",
-
-	"setstat/chown to the owner": "every ownership change is refused, even to the current owner",
 
 	"replacing an empty directory/posix-rename a directory onto an empty one": "os.Root refuses to rename onto a directory, which rename(2) replaces when it is empty",
 
 	"replacing an empty directory/files": "the source directory is left where it was",
 
 	"paths/stat a file with a trailing slash": "pkg/sftp's request server cleans paths before the backend sees them, so a trailing slash after a file is ignored",
+
+	"paths/stat through a missing directory": "pkg/sftp's request server cleans paths before the backend sees them, so .. after a missing directory is ignored",
 
 	"names/mkdir a name of 128 capitals": "names are encoded on the host, so a name of more than 127 capitals is too long to store",
 
@@ -328,7 +335,7 @@ func TestRepliesMatchOpenSSH(t *testing.T) {
 	for name, steps := range scripts {
 		t.Run(name, func(t *testing.T) {
 			targets := []*target{sftpitTarget(t, false), openSSHTarget(t, server), sftpitTarget(t, true)}
-			var replies [3][]string
+			var outcomes [3][]outcome
 			for i, target := range targets {
 				s := startSession(t, target)
 				for _, st := range steps {
@@ -337,14 +344,19 @@ func TestRepliesMatchOpenSSH(t *testing.T) {
 					if h, ok := reply.(*sftpwire.HandleReply); ok {
 						s.handles[st.name] = h.Handle
 					}
-					replies[i] = append(replies[i], s.describe(p, reply))
+					outcomes[i] = append(outcomes[i], s.describe(p, reply))
 				}
 			}
 			for i, st := range steps {
-				if replies[0][i] != replies[2][i] {
-					t.Errorf("%s: the proxy changed the reply\n  directly:          %s\n  through the proxy: %s", st.name, replies[0][i], replies[2][i])
+				sftpit, openSSH, proxied := outcomes[0][i], outcomes[1][i], outcomes[2][i]
+				if sftpit != proxied {
+					t.Errorf("%s: the proxy changed the reply\n  directly:          %+v\n  through the proxy: %+v", st.name, sftpit, proxied)
 				}
-				compare(t, name+"/"+st.name, replies[0][i], replies[1][i])
+				key := name + "/" + st.name
+				compare(t, key, sftpit.reply, openSSH.reply)
+				if sftpit.longnames != "" && openSSH.longnames != "" {
+					compare(t, key+" longnames", sftpit.longnames, openSSH.longnames)
+				}
 			}
 			trees := make([]string, len(targets))
 			for i, target := range targets {

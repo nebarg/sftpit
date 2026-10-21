@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"syscall"
 	"time"
 
@@ -16,6 +17,12 @@ type handler struct {
 	root  *os.Root
 	holds *holds
 	usage *usage
+
+	// perm is the permissions the OPEN or MKDIR being served asks for
+	// whatever it creates, which pkg/sftp loses on the way to the handler.
+	// The relay sets it before passing such a request on, and passes one
+	// request at a time.
+	perm os.FileMode
 }
 
 // pkg/sftp finds the optional interfaces by type assertion and falls back
@@ -30,7 +37,7 @@ var (
 )
 
 func (h *handler) Fileread(r *sftp.Request) (io.ReaderAt, error) {
-	f, err := h.open(r.Filepath, os.O_RDONLY)
+	f, err := h.open(r.Filepath, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +82,7 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 			}
 		}
 	}
-	f, err := h.open(r.Filepath, flag)
+	f, err := h.open(r.Filepath, flag, h.perm)
 	if err != nil {
 		return nil, err
 	}
@@ -85,15 +92,13 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 	return &file{f: f, usage: h.usage, appending: pflags.Append, name: r.Filepath, holds: h.holds}, nil
 }
 
-// open opens the file at the virtual path name with flag, as long as another
-// file handle can be open.
-func (h *handler) open(name string, flag int) (*os.File, error) {
+// open opens the file at the virtual path name with flag, creating it with
+// perm less the umask, as long as another file handle can be open.
+func (h *handler) open(name string, flag int, perm os.FileMode) (*os.File, error) {
 	if limit := h.usage.openHandle(); limit != nil {
 		return nil, h.usage.refuse(name, limit)
 	}
-	// pkg/sftp passes the open flags where an OPEN's attribute flags belong,
-	// so the permissions a client sends cannot be told apart from noise.
-	f, err := h.root.OpenFile(rootName(name), flag, 0o666)
+	f, err := h.root.OpenFile(rootName(name), flag, perm)
 	if err != nil {
 		h.usage.closeHandle()
 		return nil, statusError(err)
@@ -126,8 +131,7 @@ func (h *handler) Filecmd(r *sftp.Request) error {
 		if limit := h.usage.limitOnCreate(r.Filepath); limit != nil {
 			return h.usage.refuse(r.Filepath, limit)
 		}
-		// pkg/sftp drops the attributes a MKDIR carries.
-		return statusError(h.root.Mkdir(name, 0o777))
+		return statusError(h.root.Mkdir(name, h.perm))
 	case "Rmdir":
 		return h.rmdir(name)
 	case "Remove":
@@ -173,9 +177,24 @@ func (h *handler) setstat(name string, r *sftp.Request) error {
 		}
 	}
 	if flags.UidGid {
-		err = errPermissionDenied
+		if chownErr := h.chown(name, attrs.UID, attrs.GID); chownErr != nil {
+			err = chownErr
+		}
 	}
 	return statusError(err)
+}
+
+// chown accepts a change of owner and group only when it changes neither,
+// as chown(2) does for a user who is not root. Ownership cannot be changed.
+func (h *handler) chown(name string, uid, gid uint32) error {
+	info, err := h.root.Stat(name)
+	if err != nil {
+		return err
+	}
+	if owner, group, ok := ownerOf(info); ok && owner == uid && group == gid {
+		return nil
+	}
+	return errPermissionDenied
 }
 
 // truncate sets the size of the file at the virtual path name, unless that
@@ -277,19 +296,28 @@ func (h *handler) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
 }
 
 // list lists the directory name under the virtual names of its entries,
-// leaving out any entry whose name sftpit cannot have given it, such as a
-// file copied into the root by hand.
+// after . and .. as OpenSSH's sftp-server lists them, leaving out any entry
+// whose name sftpit cannot have given it, such as a file copied into the
+// root by hand. The root is its own parent.
 func (h *handler) list(name string) (sftp.ListerAt, error) {
 	dir, err := h.root.Open(name)
 	if err != nil {
 		return nil, statusError(err)
 	}
 	defer dir.Close()
+	self, err := dir.Stat()
+	if err != nil {
+		return nil, statusError(err)
+	}
+	parent, err := h.root.Stat(path.Dir(name))
+	if err != nil {
+		return nil, statusError(err)
+	}
 	entries, err := dir.Readdir(-1)
 	if err != nil {
 		return nil, statusError(err)
 	}
-	var list listerAt
+	list := listerAt{namedInfo{FileInfo: self, name: "."}, namedInfo{FileInfo: parent, name: ".."}}
 	for _, e := range entries {
 		if virtual, ok := decodeName(e.Name()); ok {
 			list = append(list, namedInfo{FileInfo: e, name: virtual})

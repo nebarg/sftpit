@@ -356,7 +356,20 @@ func TestSetstat(t *testing.T) {
 		t.Errorf("mtime after Chtimes = %v, %v; want %v", info.ModTime(), err, mtime)
 	}
 
-	assertStatus(t, c.Chown("/orders.csv", 0, 0), sftpwire.StatusPermissionDenied)
+	// A client that copies every attribute back sets the owner it was
+	// shown, which changes nothing. Any other owner is refused.
+	stat, err := c.Stat("/orders.csv")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	owner := stat.Sys().(*sftp.FileStat)
+	uid, gid := int(owner.UID), int(owner.GID)
+	if err := c.Chown("/orders.csv", uid, gid); err != nil {
+		t.Errorf("Chown to the owner: %v", err)
+	}
+	assertStatus(t, c.Chown("/orders.csv", uid+1, gid), sftpwire.StatusPermissionDenied)
+	assertStatus(t, c.Chown("/orders.csv", uid, gid+1), sftpwire.StatusPermissionDenied)
+	assertStatus(t, c.Chown("/missing.csv", uid, gid), sftpwire.StatusNoSuchFile)
 	assertStatus(t, c.Truncate("/missing.csv", 0), sftpwire.StatusNoSuchFile)
 }
 

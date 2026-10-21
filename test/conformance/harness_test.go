@@ -205,35 +205,47 @@ func (s *session) send(p sftpwire.Packet) sftpwire.Packet {
 // say so.
 var stamp = time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 
+// outcome describes how a server answered one request. The longnames of a
+// NAME reply, which are for display, are described apart from the rest of
+// the reply, so that a difference in them hides nothing else.
+type outcome struct {
+	reply     string
+	longnames string
+}
+
 // describe describes reply to request in the terms that both servers
 // should agree on.
-func (s *session) describe(request, reply sftpwire.Packet) string {
+func (s *session) describe(request, reply sftpwire.Packet) outcome {
 	switch r := reply.(type) {
 	case *sftpwire.StatusReply:
-		return fmt.Sprintf("%v %q", r.Code, r.Message)
+		return outcome{reply: fmt.Sprintf("%v %q", r.Code, r.Message)}
 	case *sftpwire.HandleReply:
-		return "handle"
+		return outcome{reply: "handle"}
 	case *sftpwire.DataReply:
-		return fmt.Sprintf("data %q", r.Data)
+		return outcome{reply: fmt.Sprintf("data %q", r.Data)}
 	case *sftpwire.AttrsReply:
-		return "attrs " + describeAttrs(r.Attrs)
+		return outcome{reply: "attrs " + describeAttrs(r.Attrs)}
 	case *sftpwire.ExtendedReply:
-		return fmt.Sprintf("extended reply of %d bytes", len(r.Data))
+		return outcome{reply: fmt.Sprintf("extended reply of %d bytes", len(r.Data))}
 	case *sftpwire.NameReply:
-		var entries []string
-		for _, e := range r.Entries {
+		entries := r.Entries
+		if _, ok := request.(*sftpwire.ReadDir); ok {
+			entries = slices.SortedFunc(slices.Values(entries), func(a, b sftpwire.NameEntry) int {
+				return strings.Compare(a.Filename, b.Filename)
+			})
+		}
+		var names, longnames []string
+		for _, e := range entries {
+			names = append(names, fmt.Sprintf("%q %s", s.relative(e.Filename), describeAttrs(e.Attrs)))
 			longname := s.relative(e.Longname)
 			if e.Attrs.MTime != uint32(stamp.Unix()) {
 				longname = recentDate.ReplaceAllString(longname, "<recent>")
 			}
-			entries = append(entries, fmt.Sprintf("%q %q %s", s.relative(e.Filename), longname, describeAttrs(e.Attrs)))
+			longnames = append(longnames, fmt.Sprintf("%q", longname))
 		}
-		if _, ok := request.(*sftpwire.ReadDir); ok {
-			slices.Sort(entries)
-		}
-		return "names " + strings.Join(entries, ", ")
+		return outcome{reply: "names " + strings.Join(names, ", "), longnames: strings.Join(longnames, ", ")}
 	}
-	return fmt.Sprintf("%T", reply)
+	return outcome{reply: fmt.Sprintf("%T", reply)}
 }
 
 // relative turns a path under the target's directory, as sftp-server's

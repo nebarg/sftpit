@@ -94,7 +94,7 @@ func (e *Embedded) Serve(rwc io.ReadWriteCloser, home string) error {
 		serverEnd.Close()
 	}()
 
-	err := relayInOrder(rwc, conn)
+	err := relayInOrder(rwc, conn, h)
 	conn.Close()
 	if serveErr := <-served; errors.Is(err, errServerEnded) {
 		err = serveErr

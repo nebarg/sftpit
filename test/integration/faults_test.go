@@ -2,6 +2,7 @@ package integration
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,15 +27,18 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 
 	const (
 		closed  = "Connection to 127.0.0.1 closed by remote host."
-		reset   = "Read from remote host 127.0.0.1: Connection reset by peer"
 		timeout = "Timeout, server 127.0.0.1 not responding."
 		delay   = 200 * time.Millisecond
 	)
+	// OpenSSH 10 reports a reset as a read that failed. 9.6 reports only
+	// that sending its disconnect message failed.
+	reset := []string{"Read from remote host 127.0.0.1: Connection reset by peer", "client_loop: send disconnect: Broken pipe"}
 	tests := []struct {
 		name   string
 		action sftpproxy.Action
-		// output is what sftp prints for the rename, if anything.
-		output string
+		// output holds the forms in which the tested versions of sftp
+		// report the rename, if they report it at all.
+		output []string
 		// lost reports that the connection ends at the rename.
 		lost bool
 		// renamed reports that the file ends up under its final name.
@@ -42,13 +46,13 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 	}{
 		{name: "delay before", action: sftpproxy.Delay{When: sftpproxy.Before, Duration: delay}, renamed: true},
 		{name: "delay after", action: sftpproxy.Delay{When: sftpproxy.After, Duration: delay}, renamed: true},
-		{name: "fail before", action: sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}, output: "Permission denied"},
-		{name: "fail after", action: sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure}, output: "Failure", renamed: true},
-		{name: "drop before", action: sftpproxy.Drop{When: sftpproxy.Before}, output: closed, lost: true},
-		{name: "drop after", action: sftpproxy.Drop{When: sftpproxy.After}, output: closed, lost: true, renamed: true},
+		{name: "fail before", action: sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}, output: []string{"Permission denied"}},
+		{name: "fail after", action: sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure}, output: []string{"Failure"}, renamed: true},
+		{name: "drop before", action: sftpproxy.Drop{When: sftpproxy.Before}, output: []string{closed}, lost: true},
+		{name: "drop after", action: sftpproxy.Drop{When: sftpproxy.After}, output: []string{closed}, lost: true, renamed: true},
 		{name: "reset before", action: sftpproxy.Drop{When: sftpproxy.Before, Reset: true}, output: reset, lost: true},
 		{name: "reset after", action: sftpproxy.Drop{When: sftpproxy.After, Reset: true}, output: reset, lost: true, renamed: true},
-		{name: "freeze after", action: sftpproxy.Freeze{When: sftpproxy.After, Limit: time.Minute}, output: timeout, lost: true, renamed: true},
+		{name: "freeze after", action: sftpproxy.Freeze{When: sftpproxy.After, Limit: time.Minute}, output: []string{timeout}, lost: true, renamed: true},
 	}
 
 	data := []byte("id,total\n1,9.99\n")
@@ -70,8 +74,8 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 			if lost := err != nil; lost != tt.lost {
 				t.Errorf("sftp error = %v, want the connection lost: %v\n%s", err, tt.lost, out)
 			}
-			if !strings.Contains(string(out), tt.output) {
-				t.Errorf("sftp output does not contain %q:\n%s", tt.output, out)
+			if tt.output != nil && !slices.ContainsFunc(tt.output, func(o string) bool { return strings.Contains(string(out), o) }) {
+				t.Errorf("sftp output contains none of %q:\n%s", tt.output, out)
 			}
 			if _, ok := tt.action.(sftpproxy.Delay); ok && elapsed < delay {
 				t.Errorf("sftp finished after %v, want at least %v", elapsed, delay)

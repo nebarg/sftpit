@@ -1,6 +1,8 @@
 package backend_test
 
 import (
+	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
@@ -100,5 +102,41 @@ func TestEveryStatusCarriesOpenSSHsMessage(t *testing.T) {
 		if reply := s.wantStatus(tt.request, tt.want); reply.Message != tt.want.Message() || reply.Language != "" {
 			t.Errorf("%v: message %q in %q, want %q with no language tag", tt.request.Type(), reply.Message, reply.Language, tt.want.Message())
 		}
+	}
+}
+
+func TestListingsStartWithDotAndDotDot(t *testing.T) {
+	dir, e := newBackend(t)
+	writeTree(t, dir, map[string]string{"in/orders.csv": "data"})
+	if err := os.Chmod(filepath.Join(dir, "in"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	s := startRaw(t, e)
+	permissions := func(name string) uint32 {
+		attrs, ok := s.send(&sftpwire.Stat{Path: name}).(*sftpwire.AttrsReply)
+		if !ok {
+			t.Fatalf("STAT %s failed", name)
+		}
+		return attrs.Attrs.Permissions
+	}
+	// The root is its own parent, as in a chroot.
+	for _, tt := range []struct{ dir, parent, entry string }{
+		{"/in", "/", "orders.csv"},
+		{"/", "/", "in"},
+	} {
+		handle := s.handle(&sftpwire.OpenDir{Path: tt.dir})
+		names, ok := s.send(&sftpwire.ReadDir{Handle: handle}).(*sftpwire.NameReply)
+		if !ok || len(names.Entries) != 3 {
+			t.Fatalf("READDIR %s = %#v, want three entries", tt.dir, names)
+		}
+		for i, want := range []struct {
+			name        string
+			permissions uint32
+		}{{".", permissions(tt.dir)}, {"..", permissions(tt.parent)}, {tt.entry, permissions(path.Join(tt.dir, tt.entry))}} {
+			if got := names.Entries[i]; got.Filename != want.name || got.Attrs.Permissions != want.permissions {
+				t.Errorf("READDIR %s entry %d = %q with permissions %#o, want %q with %#o", tt.dir, i, got.Filename, got.Attrs.Permissions, want.name, want.permissions)
+			}
+		}
+		s.wantStatus(&sftpwire.Close{Handle: handle}, sftpwire.StatusOK)
 	}
 }
