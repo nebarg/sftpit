@@ -135,7 +135,7 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	srv, err := sshfront.New(sshfront.Config{
 		HostKeys: hostKeys,
 		Users:    cfg.Users,
-		Handler:  runs.Handler(embedded, sftpproxy.Options{Logger: logger}),
+		Handler:  runs.Handler(run, embedded, sftpproxy.Options{Logger: logger}),
 		Logger:   logger,
 	})
 	if err != nil {

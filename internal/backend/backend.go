@@ -10,7 +10,6 @@ package backend
 
 import (
 	"bufio"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -38,7 +37,8 @@ func init() {
 // Embedded serves SFTP sessions from the directory tree under a root. Its
 // methods are safe for concurrent use.
 type Embedded struct {
-	root *os.Root
+	root  *os.Root
+	holds holds
 }
 
 // New returns an Embedded backend that serves the files under root. Every
@@ -56,7 +56,7 @@ func New(root *os.Root) *Embedded {
 // workers, so appends could land out of order and a write could race a later
 // request on the same file.
 func (e *Embedded) Serve(rwc io.ReadWriteCloser, home string) error {
-	h := &handler{root: e.root}
+	h := &handler{root: e.root, holds: &e.holds}
 	conn, serverEnd := net.Pipe()
 	srv := sftp.NewRequestServer(serverEnd,
 		sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h},
@@ -132,23 +132,38 @@ func (e *Embedded) MkdirAll(dir string) error {
 	return e.root.MkdirAll(rootName(dir), 0o755)
 }
 
-// Digest returns the size and SHA-256 of the file at the virtual path name,
-// reading it from the root rather than through a session.
-func (e *Embedded) Digest(name string) (int64, [sha256.Size]byte, error) {
-	var sum [sha256.Size]byte
+// Hold opens the file at the virtual path name for reading, outside any
+// session, and holds back every change to it from every session until the
+// returned file is closed. Changes already under way finish first; reads
+// are never held back.
+func (e *Embedded) Hold(name string) (*Held, error) {
+	release := e.holds.hold(name)
 	f, err := e.root.Open(rootName(name))
 	if err != nil {
-		return 0, sum, fmt.Errorf("backend: digest: %w", err)
+		release()
+		return nil, fmt.Errorf("backend: hold: %w", err)
 	}
-	defer f.Close()
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return 0, sum, fmt.Errorf("backend: digest: %w", err)
-	}
-	h.Sum(sum[:0])
-	return n, sum, nil
+	return &Held{File: f, release: release}, nil
 }
+
+// Held is a file that no session can change until it is closed.
+type Held struct {
+	*os.File
+	release func()
+	once    sync.Once
+}
+
+// Close closes the file and lets changes to it go ahead. Closing it again
+// does nothing more.
+func (h *Held) Close() error {
+	err := h.File.Close()
+	h.once.Do(h.release)
+	return err
+}
+
+// StoredName returns the name, relative to the root and slash-separated,
+// under which the file at the clean virtual path name is stored.
+func StoredName(name string) string { return rootName(name) }
 
 type session struct {
 	net.Conn

@@ -3,8 +3,8 @@ package backend_test
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"maps"
@@ -129,8 +129,17 @@ func TestNamesAreStoredEncoded(t *testing.T) {
 	if want := slices.Sorted(maps.Keys(stored)); !slices.Equal(slices.Sorted(slices.Values(listed)), want) {
 		t.Errorf("listed %q, want %q", listed, want)
 	}
-	if size, _, err := e.Digest("/Incoming/Orders 2026.CSV"); err != nil || size != int64(len("Orders 2026.CSV")) {
-		t.Errorf("Digest = %d, %v; want the size of the file stored under its encoded name", size, err)
+	if got := backend.StoredName("/Incoming/Orders 2026.CSV"); got != "^incoming/^orders%202026.^c^s^v" {
+		t.Errorf("StoredName = %q, want the encoded path", got)
+	}
+	held, err := e.Hold("/Incoming/Orders 2026.CSV")
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	content, err := io.ReadAll(held)
+	held.Close()
+	if err != nil || string(content) != "Orders 2026.CSV" {
+		t.Errorf("Hold read %q, %v; want the file stored under its encoded name", content, err)
 	}
 	if err := e.MkdirAll("/Partner-B/In"); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -423,24 +432,117 @@ func TestListing(t *testing.T) {
 	assertStatus(t, err, sftpwire.StatusNoSuchFile)
 }
 
-func TestDigest(t *testing.T) {
+func TestHoldOpensAFileOutsideAnySession(t *testing.T) {
 	dir, e := newBackend(t)
-	content := "id,total\n1,9.99\n"
-	writeHostFile(t, filepath.Join(dir, "in", "orders.csv"), content)
-
-	size, sum, err := e.Digest("/in/orders.csv")
+	writeHostFile(t, filepath.Join(dir, "in", "orders.csv"), "id,total\n")
+	held, err := e.Hold("/in/orders.csv")
 	if err != nil {
-		t.Fatalf("Digest: %v", err)
+		t.Fatalf("Hold: %v", err)
 	}
-	if size != int64(len(content)) || sum != sha256.Sum256([]byte(content)) {
-		t.Errorf("Digest = %d %x, want %d %x", size, sum, len(content), sha256.Sum256([]byte(content)))
+	content, err := io.ReadAll(held)
+	if err != nil || string(content) != "id,total\n" {
+		t.Errorf("read %q, %v; want the file", content, err)
 	}
+	if err := held.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if _, err := e.Hold("/in/missing.csv"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Hold of a missing file = %v, want it not to exist", err)
+	}
+	// A failed hold holds nothing back.
+	c := newClient(t, e, "/")
+	created := make(chan error, 1)
+	go func() {
+		f, err := c.Create("/in/missing.csv")
+		if err == nil {
+			f.Close()
+		}
+		created <- err
+	}()
+	select {
+	case err := <-created:
+		if err != nil {
+			t.Errorf("Create after a failed hold: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a failed hold still holds back changes")
+	}
+}
 
-	if _, _, err := e.Digest("/in/missing.csv"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("Digest of a missing file = %v, want it not to exist", err)
+// TestHoldKeepsChangesFromEverySessionOut holds a file and checks that each
+// way a session can change it waits until the file is closed, while reads
+// go ahead and see it unchanged.
+func TestHoldKeepsChangesFromEverySessionOut(t *testing.T) {
+	const wait = 100 * time.Millisecond
+	changes := []struct {
+		name   string
+		change func(c *sftp.Client, open *sftp.File) error
+	}{
+		{"truncating open", func(c *sftp.Client, _ *sftp.File) error {
+			f, err := c.OpenFile("/orders.csv", os.O_WRONLY|os.O_TRUNC)
+			if err == nil {
+				f.Close()
+			}
+			return err
+		}},
+		{"write through an open handle", func(_ *sftp.Client, open *sftp.File) error {
+			_, err := open.WriteAt([]byte("X"), 0)
+			return err
+		}},
+		{"setstat of the size", func(c *sftp.Client, _ *sftp.File) error { return c.Truncate("/orders.csv", 1) }},
+		{"chmod", func(c *sftp.Client, _ *sftp.File) error { return c.Chmod("/orders.csv", 0o600) }},
+		{"remove", func(c *sftp.Client, _ *sftp.File) error { return c.Remove("/orders.csv") }},
+		{"rename away", func(c *sftp.Client, _ *sftp.File) error { return c.Rename("/orders.csv", "/moved.csv") }},
+		{"posix-rename onto it", func(c *sftp.Client, _ *sftp.File) error { return c.PosixRename("/retry.csv", "/orders.csv") }},
 	}
-	if _, _, err := e.Digest("/in"); err == nil {
-		t.Error("Digest of a directory succeeded")
+	for _, tt := range changes {
+		t.Run(tt.name, func(t *testing.T) {
+			_, e := newBackend(t)
+			writer := newClient(t, e, "/")
+			writeRemote(t, writer, "/orders.csv", "partial")
+			writeRemote(t, writer, "/retry.csv", "retried")
+			open, err := writer.OpenFile("/orders.csv", os.O_WRONLY)
+			if err != nil {
+				t.Fatalf("OpenFile: %v", err)
+			}
+			defer open.Close()
+
+			held, err := e.Hold("/orders.csv")
+			if err != nil {
+				t.Fatalf("Hold: %v", err)
+			}
+			defer held.Close()
+			changed := make(chan error, 1)
+			go func() { changed <- tt.change(writer, open) }()
+			select {
+			case err := <-changed:
+				t.Fatalf("the change went ahead while the file was held (%v)", err)
+			case <-time.After(wait):
+			}
+
+			reader := newClient(t, e, "/")
+			read := make(chan string, 1)
+			go func() {
+				content, err := readRemote(reader, "/orders.csv")
+				read <- fmt.Sprintf("%q, %v", content, err)
+			}()
+			select {
+			case got := <-read:
+				if want := `"partial", <nil>`; got != want {
+					t.Errorf("read %s while held; want %s, the file unchanged", got, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("a read waited for the hold")
+			}
+			if content, err := io.ReadAll(held); err != nil || string(content) != "partial" {
+				t.Errorf("the held file reads %q, %v; want it unchanged", content, err)
+			}
+
+			held.Close()
+			if err := <-changed; err != nil {
+				t.Errorf("the change failed once the file was closed: %v", err)
+			}
+		})
 	}
 }
 
@@ -568,6 +670,16 @@ func writeRemote(t *testing.T, c *sftp.Client, name, content string) {
 	if err := f.Close(); err != nil {
 		t.Fatalf("close %s: %v", name, err)
 	}
+}
+
+func readRemote(c *sftp.Client, name string) (string, error) {
+	f, err := c.Open(name)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	content, err := io.ReadAll(f)
+	return string(content), err
 }
 
 func mkdirRemote(t *testing.T, c *sftp.Client, name string) {

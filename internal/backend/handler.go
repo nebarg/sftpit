@@ -14,7 +14,8 @@ import (
 // handler implements pkg/sftp's request handlers on top of a root. pkg/sftp
 // passes it absolute virtual paths that it has already cleaned.
 type handler struct {
-	root *os.Root
+	root  *os.Root
+	holds *holds
 }
 
 // pkg/sftp finds the optional interfaces by type assertion and falls back
@@ -63,16 +64,35 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 	if pflags.Excl {
 		flag |= os.O_EXCL
 	}
+	if !pflags.Write {
+		return h.openForReading(r, flag)
+	}
+	defer h.holds.change(r.Filepath)()
 	// pkg/sftp passes the open flags where an OPEN's attribute flags belong,
 	// so the permissions a client sends cannot be told apart from noise.
 	f, err := h.root.OpenFile(rootName(r.Filepath), flag, 0o666)
 	if err != nil {
 		return nil, statusError(err)
 	}
-	return &file{f: f, appending: pflags.Append}, nil
+	return &file{f: f, appending: pflags.Append, name: r.Filepath, holds: h.holds}, nil
+}
+
+// openForReading opens a file that the handle cannot write to, so that
+// neither the open nor the handle waits for a snapshot, unless the flags
+// create or truncate the file.
+func (h *handler) openForReading(r *sftp.Request, flag int) (*file, error) {
+	if flag&(os.O_CREATE|os.O_TRUNC) != 0 {
+		defer h.holds.change(r.Filepath)()
+	}
+	f, err := h.root.OpenFile(rootName(r.Filepath), flag, 0o666)
+	if err != nil {
+		return nil, statusError(err)
+	}
+	return &file{f: f}, nil
 }
 
 func (h *handler) Filecmd(r *sftp.Request) error {
+	defer h.holds.change(r.Filepath, r.Target)()
 	name := rootName(r.Filepath)
 	switch r.Method {
 	case "Setstat":
@@ -91,6 +111,7 @@ func (h *handler) Filecmd(r *sftp.Request) error {
 }
 
 func (h *handler) PosixRename(r *sftp.Request) error {
+	defer h.holds.change(r.Filepath, r.Target)()
 	return statusError(h.root.Rename(rootName(r.Filepath), rootName(r.Target)))
 }
 
@@ -270,6 +291,11 @@ type file struct {
 	f         *os.File
 	appending bool
 	appendMu  sync.Mutex
+
+	// name and holds are set for a handle that can write, whose writes wait
+	// for any snapshot of its file.
+	name  string
+	holds *holds
 }
 
 func (f *file) ReadAt(p []byte, off int64) (int, error) {
@@ -278,6 +304,9 @@ func (f *file) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *file) WriteAt(p []byte, off int64) (int, error) {
+	if f.holds != nil {
+		defer f.holds.change(f.name)()
+	}
 	if f.appending {
 		f.appendMu.Lock()
 		defer f.appendMu.Unlock()

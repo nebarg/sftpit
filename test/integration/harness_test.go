@@ -72,11 +72,12 @@ const (
 
 var routes = []route{direct, proxied}
 
-// server is an SSH server over its own empty backend directory.
+// server is an SSH server over a run of its own, which starts with no files.
 type server struct {
 	addr  string
 	port  string
 	files string
+	run   *runs.Run
 
 	sessions sync.WaitGroup
 }
@@ -90,8 +91,16 @@ func (s *server) waitForSessions() { s.sessions.Wait() }
 // with opts, logging nothing unless opts has a Logger.
 func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
 	t.Helper()
-	files := t.TempDir()
-	root, err := os.OpenRoot(files)
+	workspace, err := runs.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenWorkspace: %v", err)
+	}
+	t.Cleanup(func() { workspace.Close() })
+	run, err := workspace.NewRun()
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	root, err := os.OpenRoot(run.Files)
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
@@ -106,9 +115,9 @@ func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
 		if opts.Logger == nil {
 			opts.Logger = logger
 		}
-		handler = runs.Handler(embedded, opts)
+		handler = runs.Handler(run, embedded, opts)
 	}
-	s := &server{files: files}
+	s := &server{files: run.Files, run: run}
 	serveSession := handler
 	handler = func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		s.sessions.Add(1)

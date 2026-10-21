@@ -118,7 +118,7 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 					if err != nil || !bytes.Equal(got, data[:uploadCutoff]) {
 						t.Errorf("stored %d bytes (%v), want the first %d bytes of the upload", len(got), err, uploadCutoff)
 					}
-					logs.assertSnapshot(t, data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
+					logs.assertSnapshot(t, srv, data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
 				})
 			}
 		}
@@ -161,7 +161,7 @@ func TestRetryLeavesThePartialUploadsSnapshot(t *testing.T) {
 				if err != nil || !bytes.Equal(got, data) {
 					t.Errorf("stored %d bytes (%v) after the retry, want the whole upload", len(got), err)
 				}
-				logs.assertSnapshot(t, data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
+				logs.assertSnapshot(t, srv, data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
 			})
 		}
 	}
@@ -224,9 +224,10 @@ func (l *snapshotLog) logger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(l, nil))
 }
 
-// assertSnapshot checks that the server has logged one snapshot: of
-// /orders.csv holding data, closed as one of closedBy says.
-func (l *snapshotLog) assertSnapshot(t *testing.T, data []byte, closedBy ...string) {
+// assertSnapshot checks that srv has logged one snapshot: of /orders.csv
+// holding data, closed as one of closedBy says, with a copy of data in the
+// run's snapshots directory.
+func (l *snapshotLog) assertSnapshot(t *testing.T, srv *server, data []byte, closedBy ...string) {
 	t.Helper()
 	l.mu.Lock()
 	logs := l.buf.String()
@@ -242,9 +243,13 @@ func (l *snapshotLog) assertSnapshot(t *testing.T, data []byte, closedBy ...stri
 	}
 	var want []string
 	for _, by := range closedBy {
-		want = append(want, fmt.Sprintf("level=INFO msg=snapshot path=/orders.csv closed_by=%s size=%d sha256=%s", by, len(data), digest(data)))
+		want = append(want, fmt.Sprintf("level=INFO msg=snapshot path=/orders.csv closed_by=%s size=%d sha256=%s copy=snapshots/1/orders.csv", by, len(data), digest(data)))
 	}
 	if len(got) != 1 || !slices.Contains(want, got[0]) {
 		t.Errorf("snapshots logged:\n%s\nwant one of:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	copied, err := os.ReadFile(filepath.Join(srv.run.Dir, "snapshots", "1", "orders.csv"))
+	if err != nil || !bytes.Equal(copied, data) {
+		t.Errorf("the snapshot's copy has %d bytes (%v), want the %d snapshotted", len(copied), err, len(data))
 	}
 }

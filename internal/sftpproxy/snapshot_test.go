@@ -356,6 +356,28 @@ func TestSnapshotFailureIsLoggedAndTheCloseSucceeds(t *testing.T) {
 	})
 }
 
+func TestSnapshotLogsWhereItsCopyIs(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs syncBuffer
+		p, fb := startProxyOnFake(t, sftpproxy.Options{
+			Faults: inSequence(failAtCutoff),
+			Snapshot: func(path string) (sftpproxy.Snapshot, error) {
+				snap := snapshotOf(path)
+				snap.Copy = "snapshots/1/f"
+				return snap, nil
+			},
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		})
+		openForUpload(t, p, fb, "h")
+		cutWrite(t, p, fb, "h")
+
+		p.client.send(t, 1, &sftpwire.Close{Handle: "h"})
+		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
+		p.client.assertStatus(t, 1, sftpwire.StatusOK, "Success")
+		assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "client")+" copy=snapshots/1/f")
+	})
+}
+
 // snapshots is a Snapshot hook that records the paths it is called with.
 // Each snapshot takes snapshotTime.
 type snapshots struct {

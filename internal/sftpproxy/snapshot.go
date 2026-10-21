@@ -11,6 +11,10 @@ import (
 type Snapshot struct {
 	Size   int64
 	SHA256 [sha256.Size]byte
+
+	// Copy names the copy of the file kept as evidence, or is empty if none
+	// was.
+	Copy string
 }
 
 // How a faulted handle came to be closed, as its snapshot records it.
@@ -75,5 +79,9 @@ func (s *session) takeSnapshot(path, closedBy string) {
 		s.logger.Error("snapshot failed", "path", path, "closed_by", closedBy, "err", err)
 		return
 	}
-	s.logger.Info("snapshot", "path", path, "closed_by", closedBy, "size", snap.Size, "sha256", hex.EncodeToString(snap.SHA256[:]))
+	attrs := []any{"path", path, "closed_by", closedBy, "size", snap.Size, "sha256", hex.EncodeToString(snap.SHA256[:])}
+	if snap.Copy != "" {
+		attrs = append(attrs, "copy", snap.Copy)
+	}
+	s.logger.Info("snapshot", attrs...)
 }

@@ -9,22 +9,26 @@ package runs
 import (
 	"context"
 	"io"
+	"log/slog"
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// Handler returns an sshfront.Handler that relays each SFTP session through
-// sftpproxy to a new session on embedded, starting in the user's home
-// directory. Each session runs with opts and its own connection as
-// opts.Conn, so a Drop or Freeze acts on the client that caused it, and
-// takes its snapshots from embedded's files.
-func Handler(embedded *backend.Embedded, opts sftpproxy.Options) sshfront.Handler {
-	opts.Snapshot = func(path string) (sftpproxy.Snapshot, error) {
-		size, sum, err := embedded.Digest(path)
-		return sftpproxy.Snapshot{Size: size, SHA256: sum}, err
+// Handler returns an sshfront.Handler that relays each SFTP session of run
+// through sftpproxy to a new session on embedded, which serves the run's
+// files, starting in the user's home directory. Each session runs with opts
+// and its own connection as opts.Conn, so a Drop or Freeze acts on the
+// client that caused it. Snapshots hold back every session's changes to
+// their file, and keep copies in the run's snapshots directory.
+func Handler(run *Run, embedded *backend.Embedded, opts sftpproxy.Options) sshfront.Handler {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
+	snaps := &snapshots{run: run, embedded: embedded, logger: logger, budget: maxCopyBytes}
+	opts.Snapshot = snaps.take
 	return func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		opts := opts
 		opts.Conn = conn
