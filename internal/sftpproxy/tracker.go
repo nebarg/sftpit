@@ -3,6 +3,7 @@ package sftpproxy
 import (
 	"fmt"
 	"path"
+	"slices"
 	"sync"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -35,12 +36,20 @@ type request struct {
 	// target is a rename's canonical destination.
 	target string
 
-	// upload is the cutoff on a WRITE's handle or, for an OPEN, the cutoff
-	// the handle it opens will have.
+	// handle is the open handle a request on a handle uses, if the proxy
+	// knows it.
+	handle *handle
+
+	// upload is the cutoff on the handle a request uses or, for an OPEN, the
+	// cutoff the handle it opens will have.
 	upload *upload
 
 	// cut is set when the cutoff decided the request, rather than Faults.
 	cut bool
+
+	// snapshot is set for the CLOSE of a faulted file handle, and closed
+	// once the session has snapshotted the file.
+	snapshot chan struct{}
 
 	reply slot
 
@@ -58,13 +67,25 @@ type tracker struct {
 	mu      sync.Mutex
 	nextID  uint32
 	pending map[uint32]*request
-	handles map[string]handle
+	handles map[string]*handle
 }
 
-// handle is an open handle as the tracker knows it.
+// handle is an open handle as the tracker knows it. Its fields are guarded
+// by the tracker's mu.
 type handle struct {
 	path   string
 	upload *upload
+
+	// file is set for a handle that OPEN returned, rather than OPENDIR.
+	file bool
+
+	// faulted is set once a fault has acted on the OPEN that returned the
+	// handle or on a request through it.
+	faulted bool
+
+	// snapshotted is set once the session has snapshotted the handle's
+	// file.
+	snapshotted bool
 }
 
 // newTracker returns a tracker for a session whose backend default directory
@@ -74,7 +95,7 @@ func newTracker(dir string, exts []sftpwire.Extension) *tracker {
 		dir:        dir,
 		extensions: make(map[string]bool, len(exts)),
 		pending:    make(map[uint32]*request),
-		handles:    make(map[string]handle),
+		handles:    make(map[string]*handle),
 	}
 	for _, ext := range exts {
 		t.extensions[ext.Name] = true
@@ -148,18 +169,17 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 		p.Path, ok = t.resolve(p.Path)
 		req.path = p.Path
 	case *sftpwire.Close:
-		req.path = t.handles[p.Handle].path
+		t.use(req, p.Handle)
 	case *sftpwire.Read:
-		req.path = t.handles[p.Handle].path
+		t.use(req, p.Handle)
 	case *sftpwire.Write:
-		h := t.handles[p.Handle]
-		req.path, req.upload = h.path, h.upload
+		t.use(req, p.Handle)
 	case *sftpwire.FStat:
-		req.path = t.handles[p.Handle].path
+		t.use(req, p.Handle)
 	case *sftpwire.FSetStat:
-		req.path = t.handles[p.Handle].path
+		t.use(req, p.Handle)
 	case *sftpwire.ReadDir:
-		req.path = t.handles[p.Handle].path
+		t.use(req, p.Handle)
 	default:
 		panic(fmt.Sprintf("sftpproxy: no tracking for %T", p))
 	}
@@ -167,6 +187,73 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 		return req, status(sftpwire.StatusNoSuchFile)
 	}
 	return req, nil
+}
+
+// use attributes req to the open handle id, if the proxy knows it.
+func (t *tracker) use(req *request, id string) {
+	if h := t.handles[id]; h != nil {
+		req.handle, req.path, req.upload = h, h.path, h.upload
+	}
+}
+
+// fault records that a fault acts on req, which marks the handle it uses as
+// faulted.
+func (t *tracker) fault(req *request) {
+	if req.handle == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	req.handle.faulted = true
+}
+
+// faultedFile reports whether h is a file handle that a fault has acted on.
+func (t *tracker) faultedFile(h *handle) bool {
+	if h == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return h.file && h.faulted
+}
+
+// claimSnapshot reports whether the file of h, a faulted file handle, has
+// yet to be snapshotted, and records that it now has been. A client can
+// close a handle twice before the backend has seen either CLOSE.
+func (t *tracker) claimSnapshot(h *handle) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if h.snapshotted {
+		return false
+	}
+	h.snapshotted = true
+	return true
+}
+
+// claimSnapshots returns, in order, the paths of the faulted file handles
+// whose files have yet to be snapshotted, both those still open and those
+// whose CLOSE the backend has not answered, and records that they now have
+// been.
+func (t *tracker) claimSnapshots() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var paths []string
+	claim := func(h *handle) {
+		if h != nil && h.file && h.faulted && !h.snapshotted {
+			h.snapshotted = true
+			paths = append(paths, h.path)
+		}
+	}
+	for _, h := range t.handles {
+		claim(h)
+	}
+	for _, req := range t.pending {
+		if _, ok := req.packet.(*sftpwire.Close); ok {
+			claim(req.handle)
+		}
+	}
+	slices.Sort(paths)
+	return paths
 }
 
 // register records req as pending under a new proxy request ID, just before
@@ -227,7 +314,8 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 		if _, open := t.handles[h.Handle]; open {
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
-		t.handles[h.Handle] = handle{path: req.path, upload: req.upload}
+		_, file := req.packet.(*sftpwire.Open)
+		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, file: file, faulted: req.action != nil}
 	}
 	return req, nil
 }

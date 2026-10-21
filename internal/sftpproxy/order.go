@@ -59,7 +59,7 @@ func (s *session) schedule(req *request) error {
 	}
 	s.mu.Unlock()
 
-	if len(earlier) == 0 && !holdsBefore(req.action) {
+	if len(earlier) == 0 && !req.mayWait() {
 		return s.takeTurn(req)
 	}
 	s.wg.Go(func() {
@@ -105,8 +105,13 @@ func (r *request) files() []string {
 	return names
 }
 
-func holdsBefore(a Action) bool {
-	switch a := a.(type) {
+// mayWait reports whether processing r can wait, for a fault that holds it
+// before the backend or for the snapshot of the handle it closes.
+func (r *request) mayWait() bool {
+	if r.snapshot != nil {
+		return true
+	}
+	switch a := r.action.(type) {
 	case Delay:
 		return a.When == Before
 	case Stall:

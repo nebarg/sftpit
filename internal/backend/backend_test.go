@@ -3,8 +3,10 @@ package backend_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -324,6 +326,27 @@ func TestListing(t *testing.T) {
 
 	_, err = c.ReadDir("/in/a.csv")
 	assertStatus(t, err, sftpwire.StatusNoSuchFile)
+}
+
+func TestDigest(t *testing.T) {
+	dir, e := newBackend(t)
+	content := "id,total\n1,9.99\n"
+	writeHostFile(t, filepath.Join(dir, "in", "orders.csv"), content)
+
+	size, sum, err := e.Digest("/in/orders.csv")
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if size != int64(len(content)) || sum != sha256.Sum256([]byte(content)) {
+		t.Errorf("Digest = %d %x, want %d %x", size, sum, len(content), sha256.Sum256([]byte(content)))
+	}
+
+	if _, _, err := e.Digest("/in/missing.csv"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Digest of a missing file = %v, want it not to exist", err)
+	}
+	if _, _, err := e.Digest("/in"); err == nil {
+		t.Error("Digest of a directory succeeded")
+	}
 }
 
 func TestCloseEndsTheSession(t *testing.T) {

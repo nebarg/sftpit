@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,11 +77,17 @@ type server struct {
 	addr  string
 	port  string
 	files string
+
+	sessions sync.WaitGroup
 }
+
+// waitForSessions waits until the server has finished every session it has
+// started, so that everything they log has been logged.
+func (s *server) waitForSessions() { s.sessions.Wait() }
 
 // startServer starts a server that routes each session as via says. A
 // proxied session goes through the same handler as sftpit serve and runs
-// with opts, given a logger that discards everything.
+// with opts, logging nothing unless opts has a Logger.
 func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
 	t.Helper()
 	files := t.TempDir()
@@ -96,8 +103,17 @@ func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
 		return embedded.Serve(channel, conn.Home())
 	}
 	if via == proxied {
-		opts.Logger = logger
+		if opts.Logger == nil {
+			opts.Logger = logger
+		}
 		handler = runs.Handler(embedded, opts)
+	}
+	s := &server{files: files}
+	serveSession := handler
+	handler = func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
+		s.sessions.Add(1)
+		defer s.sessions.Done()
+		return serveSession(ctx, conn, channel)
 	}
 	signer, err := ssh.NewSignerFromKey(clientKey)
 	if err != nil {
@@ -129,12 +145,12 @@ func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
 		}
 	})
 
-	addr := ln.Addr().String()
-	_, port, err := net.SplitHostPort(addr)
+	s.addr = ln.Addr().String()
+	_, s.port, err = net.SplitHostPort(s.addr)
 	if err != nil {
 		t.Fatalf("SplitHostPort: %v", err)
 	}
-	return &server{addr: addr, port: port, files: files}
+	return s
 }
 
 // treeEntry describes one file or directory under a backend directory.

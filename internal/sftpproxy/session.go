@@ -5,7 +5,8 @@
 // each open handle refers to, so every request can be attributed to a file.
 // It can inject a fault into any request it forwards: delay, stall or fail
 // the request, or drop or freeze the connection, before or after the backend
-// acts. It can also cut off an upload at a byte offset.
+// acts. It can also cut off an upload at a byte offset, and snapshot the
+// file that a faulted handle leaves behind before anything else can change it.
 package sftpproxy
 
 import (
@@ -65,8 +66,23 @@ type Options struct {
 	// value is RequestOrder.
 	ReplyOrder ReplyOrder
 
-	// Logger receives injected faults and, at debug level, every request.
-	// Nil means slog.Default().
+	// Snapshot describes the file that a faulted file handle leaves behind,
+	// which the session logs as evidence that a later request, such as a
+	// retry that truncates the file, cannot destroy. A file handle is
+	// faulted once a fault acts on the OPEN that returned it or on a request
+	// through it, including a write that reaches a PartialUpload's cutoff.
+	//
+	// The session calls Snapshot with the handle's path once nothing more
+	// can be written through the handle: when the backend has answered the
+	// handle's CLOSE, before the client gets that reply; when a Drop or
+	// Freeze ends the session, before the connection is closed or frozen;
+	// or else once the session has closed the backend stream. No later
+	// request on the file reaches the backend until it returns. It is
+	// called once per faulted handle. A nil Snapshot records nothing.
+	Snapshot func(path string) (Snapshot, error)
+
+	// Logger receives injected faults, snapshots and, at debug level, every
+	// request. Nil means slog.Default().
 	Logger *slog.Logger
 }
 
@@ -101,6 +117,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		faults:    opts.Faults,
 		conn:      opts.Conn,
 		order:     opts.ReplyOrder,
+		snapshot:  opts.Snapshot,
 		logger:    opts.Logger,
 		replies:   make(chan slot, maxQueuedReplies),
 		done:      make(chan struct{}),
@@ -125,6 +142,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 	s.wg.Go(func() { s.stop(s.writeReplies()) })
 	s.stop(s.relayRequests())
 	s.wg.Wait()
+	s.snapshotRest(closedBySessionEnd)
 	return s.result()
 }
 
@@ -136,6 +154,7 @@ type session struct {
 	faults    func(Request) Action
 	conn      Conn
 	order     ReplyOrder
+	snapshot  func(string) (Snapshot, error)
 	logger    *slog.Logger
 	tracker   *tracker
 
@@ -325,6 +344,7 @@ func (s *session) handleRequest(b []byte) error {
 	if err := s.decide(req); err != nil {
 		return err
 	}
+	s.prepareSnapshot(req)
 	req.reply = make(slot, 1)
 	if s.order == CompletionOrder {
 		return s.schedule(req)
@@ -338,15 +358,20 @@ func (s *session) handleRequest(b []byte) error {
 // decide chooses req's fault: the cutoff's, if req is a write that reaches
 // the cutoff on its handle, or else whatever Faults chooses.
 func (s *session) decide(req *request) error {
-	if s.faults == nil || s.cut(req) {
+	if s.faults == nil {
 		return nil
 	}
-	req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
-	if err := s.checkFault(req.packet, req.action); err != nil {
-		return err
+	if !s.cut(req) {
+		req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
+		if err := s.checkFault(req.packet, req.action); err != nil {
+			return err
+		}
+		if u, ok := req.action.(PartialUpload); ok {
+			req.action, req.upload = nil, &upload{PartialUpload: u}
+		}
 	}
-	if u, ok := req.action.(PartialUpload); ok {
-		req.action, req.upload = nil, &upload{PartialUpload: u}
+	if req.action != nil {
+		s.tracker.fault(req)
 	}
 	return nil
 }
@@ -373,8 +398,8 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 
 // process applies req's fault if that acts before the backend, then
 // forwards req unless the fault answered it or a drop has stopped
-// forwarding. In request order it runs on the request goroutine, so a held
-// request holds back every later one.
+// forwarding, and waits for any snapshot it needs. In request order it runs
+// on the request goroutine, so a held request holds back every later one.
 func (s *session) process(req *request) error {
 	if s.isHalted() {
 		return nil
@@ -399,7 +424,10 @@ func (s *session) process(req *request) error {
 			return nil
 		}
 	}
-	return s.send(req)
+	if err := s.send(req); err != nil {
+		return err
+	}
+	return s.awaitSnapshot(req)
 }
 
 // send forwards req to the backend unless a drop has stopped forwarding.
@@ -549,6 +577,7 @@ func (s *session) relayReplies() error {
 			return err
 		}
 		s.logRequest(req, p)
+		s.snapshotClosed(req)
 		s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
 		s.answered()
 	}
@@ -610,7 +639,11 @@ func (s *session) writeReplies() error {
 
 // drop ends the session at req's Drop or Freeze. The connection goes first,
 // so the client sees it fail rather than the session close in an orderly way.
+// The backend has answered every request it was sent, so the files of the
+// faulted handles still open are snapshotted first: a client that reconnects
+// to retry must not change them before then.
 func (s *session) drop(req *request) error {
+	s.snapshotRest(closedByFault)
 	var err error
 	switch a := req.action.(type) {
 	case Drop:

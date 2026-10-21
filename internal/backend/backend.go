@@ -10,8 +10,10 @@ package backend
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -128,6 +130,24 @@ func (e *Embedded) Open(home string) io.ReadWriteCloser {
 // missing parents.
 func (e *Embedded) MkdirAll(dir string) error {
 	return e.root.MkdirAll(rootName(dir), 0o755)
+}
+
+// Digest returns the size and SHA-256 of the file at the virtual path name,
+// reading it from the root rather than through a session.
+func (e *Embedded) Digest(name string) (int64, [sha256.Size]byte, error) {
+	var sum [sha256.Size]byte
+	f, err := e.root.Open(rootName(name))
+	if err != nil {
+		return 0, sum, fmt.Errorf("backend: digest: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return 0, sum, fmt.Errorf("backend: digest: %w", err)
+	}
+	h.Sum(sum[:0])
+	return n, sum, nil
 }
 
 type session struct {
