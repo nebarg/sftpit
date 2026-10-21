@@ -59,6 +59,9 @@ type request struct {
 	// second backend read it becomes.
 	split *split
 
+	// wrongSize is the size to misreport in the reply.
+	wrongSize *WrongSize
+
 	// snapshot is set for the CLOSE of a faulted file handle, and closed
 	// once the session has snapshotted the file.
 	snapshot chan struct{}

@@ -416,6 +416,12 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 			action:  sftpproxy.CorruptDownload{Corruption: 7},
 			err:     "unknown CorruptDownload corruption Corruption(7)",
 		},
+		{
+			name:    "wrong size on a request other than a stat",
+			request: open,
+			action:  sftpproxy.WrongSize{Size: 1},
+			err:     "a WrongSize fault is for STAT, LSTAT, FSTAT or a READDIR entry, not SSH_FXP_OPEN",
+		},
 	}
 
 	for _, tt := range tests {

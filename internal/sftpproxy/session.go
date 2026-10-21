@@ -6,8 +6,8 @@
 // It can inject a fault into any request it forwards: delay, stall or fail
 // the request, or drop or freeze the connection, before or after the backend
 // acts. It can also cut off an upload at a byte offset, corrupt what a
-// download reads, and snapshot the file that a faulted handle leaves behind
-// before anything else can change it.
+// download reads, misreport sizes, and snapshot the file that a faulted
+// handle leaves behind before anything else can change it.
 package sftpproxy
 
 import (
@@ -54,10 +54,12 @@ var (
 // Options configures a session.
 type Options struct {
 	// Faults chooses the fault, if any, for each request the proxy would
-	// forward. It is called once per request, in request order, and must not
-	// block. A nil Faults, or a nil Action, lets requests through unchanged.
-	// It is not called for a write that reaches a PartialUpload's cutoff, or
-	// a read that a CorruptDownload changes, which decide those requests
+	// forward, and for each entry of a READDIR reply. It is called once per
+	// request, in request order, and once per entry as each READDIR reply
+	// arrives, so it must be safe for concurrent use. It must not block. A
+	// nil Faults, or a nil Action, lets requests through unchanged. It is
+	// not called for a write that reaches a PartialUpload's cutoff, or a read
+	// that a CorruptDownload changes, which decide those requests
 	// themselves.
 	Faults func(Request) Action
 
@@ -75,8 +77,8 @@ type Options struct {
 	// faulted once a fault acts on the OPEN that returned it or on a request
 	// through it, including a write that reaches a PartialUpload's cutoff.
 	// Choosing a PartialUpload or CorruptDownload for the OPEN does not
-	// count, and a CorruptDownload never faults its handle, since it changes
-	// no file.
+	// count, and neither a CorruptDownload nor a WrongSize ever faults a
+	// handle, since neither changes a file.
 	//
 	// The session calls Snapshot with the handle's path once nothing more
 	// can be written through the handle: when the backend has answered the
@@ -383,6 +385,8 @@ func (s *session) decide(req *request) error {
 			req.action, req.upload = nil, &upload{PartialUpload: a}
 		case CorruptDownload:
 			req.action, req.download = nil, &download{CorruptDownload: a}
+		case WrongSize:
+			req.action, req.wrongSize = nil, &a
 		}
 	}
 	if req.action != nil {
@@ -419,6 +423,12 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 			}
 		default:
 			return fmt.Errorf("sftpproxy: unknown CorruptDownload corruption %v", a.Corruption)
+		}
+	case WrongSize:
+		switch p.(type) {
+		case *sftpwire.Stat, *sftpwire.LStat, *sftpwire.FStat:
+		default:
+			return fmt.Errorf("sftpproxy: a WrongSize fault is for STAT, LSTAT, FSTAT or a READDIR entry, not %v", operation(p))
 		}
 	}
 	return nil
@@ -597,8 +607,8 @@ func (s *session) answer(reply slot, out outcome) {
 }
 
 // relayReplies hands each backend reply to the slot of its request, with
-// the corruption on the request's handle applied, re-encoded with the
-// client's request ID.
+// any corruption or wrong sizes applied, re-encoded with the client's
+// request ID.
 func (s *session) relayReplies() error {
 	for {
 		b, err := s.readBackend()
@@ -616,6 +626,9 @@ func (s *session) relayReplies() error {
 		s.logRequest(req, p)
 		if req, p = joinReads(req, p); req != nil {
 			flipBytes(req, p)
+			if err := s.misreport(req, p); err != nil {
+				return err
+			}
 			s.snapshotClosed(req)
 			s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
 		}

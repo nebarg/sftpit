@@ -2,6 +2,7 @@ package sftpproxy
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -20,6 +21,11 @@ type Request struct {
 
 	// Target is a rename's canonical destination.
 	Target string
+
+	// Entry is set when Faults is asked about one entry of a READDIR reply
+	// rather than about a request: Packet is then the READDIR, and Path is
+	// the entry's path. Only a WrongSize applies to an entry.
+	Entry bool
 }
 
 // When says whether a fault takes effect before or after the backend acts on
@@ -44,8 +50,9 @@ func (w When) String() string {
 }
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop or Freeze,
-// or for an OPEN, a PartialUpload or CorruptDownload. What else an action
-// holds back depends on the session's ReplyOrder.
+// for an OPEN, a PartialUpload or CorruptDownload, or for a STAT, LSTAT,
+// FSTAT or READDIR entry, a WrongSize. What else an action holds back
+// depends on the session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -158,13 +165,37 @@ func (c Corruption) String() string {
 	return fmt.Sprintf("Corruption(%d)", int(c))
 }
 
+// WrongSize, chosen for a STAT, LSTAT or FSTAT, or for an entry of a
+// READDIR reply, misreports the size in the backend's reply: as Size or, if
+// Delta is not zero, as the true size plus Delta, but never below 0 or above
+// the largest uint64. In a READDIR entry, the size in the longname changes
+// too, if the longname shows the true size where ls -l does. The file itself
+// is unchanged.
+type WrongSize struct {
+	Size  uint64
+	Delta int64
+}
+
+// reported returns the size to report for a file of size actual.
+func (a WrongSize) reported(actual uint64) uint64 {
+	switch {
+	case a.Delta > 0:
+		return actual + min(uint64(a.Delta), math.MaxUint64-actual)
+	case a.Delta < 0:
+		// Negating in uint64 gives the magnitude even of math.MinInt64.
+		return actual - min(-uint64(a.Delta), actual)
+	}
+	return a.Size
+}
+
 func (a Delay) when() When  { return a.When }
 func (a Stall) when() When  { return a.When }
 func (a Fail) when() When   { return a.When }
 func (a Drop) when() When   { return a.When }
 func (a Freeze) when() When { return a.When }
 
-// A session takes a PartialUpload or CorruptDownload off its OPEN before
-// acting on either, so their when is never asked.
+// A session takes a PartialUpload, CorruptDownload or WrongSize off its
+// request before acting on any, so their when is never asked.
 func (a PartialUpload) when() When   { return Before }
 func (a CorruptDownload) when() When { return Before }
+func (a WrongSize) when() When       { return Before }

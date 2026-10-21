@@ -230,6 +230,7 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 		faults func(sftpproxy.Request) sftpproxy.Action
 		dir    bool
 		read   bool
+		fstat  bool
 		noHook bool
 		// closedBy holds how each snapshot logged says its handle was
 		// closed.
@@ -272,6 +273,11 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 			read:   true,
 		},
 		{
+			name:   "wrong size",
+			faults: on[*sftpwire.FStat](sftpproxy.WrongSize{Delta: 1}),
+			fstat:  true,
+		},
+		{
 			name: "directory",
 			dir:  true,
 			faults: func(sftpproxy.Request) sftpproxy.Action {
@@ -307,6 +313,8 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 					open, use = &sftpwire.OpenDir{Path: "/f"}, &sftpwire.ReadDir{Handle: "h"}
 				case tt.read:
 					open, use = &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenRead}, &sftpwire.Read{Handle: "h", Length: 10}
+				case tt.fstat:
+					use = &sftpwire.FStat{Handle: "h"}
 				}
 				for i, req := range []sftpwire.Packet{open, use, &sftpwire.Close{Handle: "h"}} {
 					p.client.send(t, uint32(i), req)
@@ -417,6 +425,8 @@ func (fb *fakeBackend) answerAll() {
 			reply = &sftpwire.HandleReply{Handle: "h"}
 		case *sftpwire.ReadDir:
 			reply = status(sftpwire.StatusEOF)
+		case *sftpwire.Stat, *sftpwire.LStat, *sftpwire.FStat:
+			reply = &sftpwire.AttrsReply{Attrs: sftpwire.Attrs{Flags: sftpwire.AttrSize, Size: 10}}
 		}
 		if _, err := fb.conn.Write(sftpwire.AppendPacket(nil, req.id, reply)); err != nil {
 			return
