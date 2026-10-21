@@ -88,7 +88,7 @@ func (s *server) waitForSessions() { s.sessions.Wait() }
 // startServer starts a server that routes each session as via says. A
 // proxied session goes through the same handler as sftpit serve and runs
 // with opts, logging nothing unless opts has a Logger.
-func startServer(t *testing.T, via route, opts sftpproxy.Options) *server {
+func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
 	t.Helper()
 	files := t.TempDir()
 	root, err := os.OpenRoot(files)
@@ -249,14 +249,14 @@ func assertFiles(t *testing.T, tree []treeEntry, want map[string][]byte) {
 	}
 }
 
-func writeFile(t *testing.T, name string, data []byte) {
+func writeFile(t testing.TB, name string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(name, data, 0o600); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 }
 
-func writeClientKey(t *testing.T, dir string) string {
+func writeClientKey(t testing.TB, dir string) string {
 	t.Helper()
 	block, err := ssh.MarshalPrivateKey(clientKey, "")
 	if err != nil {

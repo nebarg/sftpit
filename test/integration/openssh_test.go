@@ -102,7 +102,7 @@ func TestOpenSSHTransparency(t *testing.T) {
 
 // openSSHOrSkip returns the path of OpenSSH's sftp client, or skips the test
 // if it cannot run.
-func openSSHOrSkip(t *testing.T) string {
+func openSSHOrSkip(t testing.TB) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("runs the OpenSSH sftp client")
@@ -125,7 +125,7 @@ func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line 
 
 // openSSH runs batch with the OpenSSH sftp client in work, adding options to
 // its command line, and returns everything it printed.
-func openSSH(t *testing.T, sftpPath string, srv *server, work, batch string, options ...string) ([]byte, error) {
+func openSSH(t testing.TB, sftpPath string, srv *server, work, batch string, options ...string) ([]byte, error) {
 	t.Helper()
 	dir := t.TempDir()
 	keyFile := writeClientKey(t, dir)
