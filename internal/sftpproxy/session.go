@@ -5,8 +5,9 @@
 // each open handle refers to, so every request can be attributed to a file.
 // It can inject a fault into any request it forwards: delay, stall or fail
 // the request, or drop or freeze the connection, before or after the backend
-// acts. It can also cut off an upload at a byte offset, and snapshot the
-// file that a faulted handle leaves behind before anything else can change it.
+// acts. It can also cut off an upload at a byte offset, corrupt what a
+// download reads, and snapshot the file that a faulted handle leaves behind
+// before anything else can change it.
 package sftpproxy
 
 import (
@@ -16,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"path"
 	"slices"
 	"sync"
@@ -54,8 +56,9 @@ type Options struct {
 	// Faults chooses the fault, if any, for each request the proxy would
 	// forward. It is called once per request, in request order, and must not
 	// block. A nil Faults, or a nil Action, lets requests through unchanged.
-	// It is not called for a write that reaches a PartialUpload's cutoff,
-	// which decides that write itself.
+	// It is not called for a write that reaches a PartialUpload's cutoff, or
+	// a read that a CorruptDownload changes, which decide those requests
+	// themselves.
 	Faults func(Request) Action
 
 	// Conn is the client's connection, which Drop and Freeze act on. It is
@@ -71,6 +74,9 @@ type Options struct {
 	// retry that truncates the file, cannot destroy. A file handle is
 	// faulted once a fault acts on the OPEN that returned it or on a request
 	// through it, including a write that reaches a PartialUpload's cutoff.
+	// Choosing a PartialUpload or CorruptDownload for the OPEN does not
+	// count, and a CorruptDownload never faults its handle, since it changes
+	// no file.
 	//
 	// The session calls Snapshot with the handle's path once nothing more
 	// can be written through the handle: when the backend has answered the
@@ -344,6 +350,11 @@ func (s *session) handleRequest(b []byte) error {
 	if err := s.decide(req); err != nil {
 		return err
 	}
+	if req.eof {
+		eof := status(sftpwire.StatusEOF)
+		s.logRequest(req, eof)
+		return s.replyNow(sftpwire.AppendPacket(nil, clientID, eof))
+	}
 	s.prepareSnapshot(req)
 	req.reply = make(slot, 1)
 	if s.order == CompletionOrder {
@@ -356,18 +367,22 @@ func (s *session) handleRequest(b []byte) error {
 }
 
 // decide chooses req's fault: the cutoff's, if req is a write that reaches
-// the cutoff on its handle, or else whatever Faults chooses.
+// the cutoff on its handle, the corruption's, if req is a read that the
+// corruption on its handle changes, or else whatever Faults chooses.
 func (s *session) decide(req *request) error {
 	if s.faults == nil {
 		return nil
 	}
-	if !s.cut(req) {
+	if !s.cut(req) && !s.corrupt(req) {
 		req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
 		if err := s.checkFault(req.packet, req.action); err != nil {
 			return err
 		}
-		if u, ok := req.action.(PartialUpload); ok {
-			req.action, req.upload = nil, &upload{PartialUpload: u}
+		switch a := req.action.(type) {
+		case PartialUpload:
+			req.action, req.upload = nil, &upload{PartialUpload: a}
+		case CorruptDownload:
+			req.action, req.download = nil, &download{CorruptDownload: a}
 		}
 	}
 	if req.action != nil {
@@ -392,6 +407,19 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 			return s.checkFault(p, a.Result)
 		}
 		return fmt.Errorf("sftpproxy: a PartialUpload result must be a Fail, Drop or Freeze, not %T", a.Result)
+	case CorruptDownload:
+		if _, ok := p.(*sftpwire.Open); !ok {
+			return fmt.Errorf("sftpproxy: a CorruptDownload fault is for OPEN, not %v", operation(p))
+		}
+		switch a.Corruption {
+		case Truncate:
+		case OmitRange, FlipBytes:
+			if a.Length == 0 || a.Length > math.MaxUint64-a.Offset {
+				return fmt.Errorf("sftpproxy: a CorruptDownload %v of %d bytes at %d does not fit a file", a.Corruption, a.Length, a.Offset)
+			}
+		default:
+			return fmt.Errorf("sftpproxy: unknown CorruptDownload corruption %v", a.Corruption)
+		}
 	}
 	return nil
 }
@@ -430,8 +458,9 @@ func (s *session) process(req *request) error {
 	return s.awaitSnapshot(req)
 }
 
-// send forwards req to the backend unless a drop has stopped forwarding.
-// Nothing reaches the backend after a request whose drop comes after it.
+// send forwards req to the backend, as two reads if it is a split READ,
+// unless a drop has stopped forwarding. Nothing reaches the backend after a
+// request whose drop comes after it.
 func (s *session) send(req *request) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -442,6 +471,9 @@ func (s *session) send(req *request) error {
 		return nil
 	}
 	s.unanswered++
+	if req.split != nil {
+		s.unanswered++
+	}
 	switch req.action.(type) {
 	case Drop, Freeze:
 		s.halted = true
@@ -449,7 +481,11 @@ func (s *session) send(req *request) error {
 	s.mu.Unlock()
 
 	s.tracker.register(req)
-	if _, err := s.backend.Write(sftpwire.AppendPacket(nil, req.proxyID, req.packet)); err != nil {
+	b := sftpwire.AppendPacket(nil, req.proxyID, req.packet)
+	if req.split != nil {
+		b = sftpwire.AppendPacket(b, req.split.rest.proxyID, req.split.rest.packet)
+	}
+	if _, err := s.backend.Write(b); err != nil {
 		return fmt.Errorf("sftpproxy: write backend request: %w", err)
 	}
 	return nil
@@ -560,8 +596,9 @@ func (s *session) answer(reply slot, out outcome) {
 	}
 }
 
-// relayReplies hands each backend reply to the slot of its request,
-// re-encoded with the client's request ID.
+// relayReplies hands each backend reply to the slot of its request, with
+// the corruption on the request's handle applied, re-encoded with the
+// client's request ID.
 func (s *session) relayReplies() error {
 	for {
 		b, err := s.readBackend()
@@ -577,8 +614,11 @@ func (s *session) relayReplies() error {
 			return err
 		}
 		s.logRequest(req, p)
-		s.snapshotClosed(req)
-		s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
+		if req, p = joinReads(req, p); req != nil {
+			flipBytes(req, p)
+			s.snapshotClosed(req)
+			s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
+		}
 		s.answered()
 	}
 }

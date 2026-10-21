@@ -47,6 +47,18 @@ type request struct {
 	// cut is set when the cutoff decided the request, rather than Faults.
 	cut bool
 
+	// download is the corruption on the handle a request uses or, for an
+	// OPEN, the corruption the handle it opens will have.
+	download *download
+
+	// eof is set for a read that the corruption on its handle answers with
+	// EOF itself.
+	eof bool
+
+	// split is set for a READ that crosses an omitted range, and for the
+	// second backend read it becomes.
+	split *split
+
 	// snapshot is set for the CLOSE of a faulted file handle, and closed
 	// once the session has snapshotted the file.
 	snapshot chan struct{}
@@ -73,8 +85,9 @@ type tracker struct {
 // handle is an open handle as the tracker knows it. Its fields are guarded
 // by the tracker's mu.
 type handle struct {
-	path   string
-	upload *upload
+	path     string
+	upload   *upload
+	download *download
 
 	// file is set for a handle that OPEN returned, rather than OPENDIR.
 	file bool
@@ -192,7 +205,7 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 // use attributes req to the open handle id, if the proxy knows it.
 func (t *tracker) use(req *request, id string) {
 	if h := t.handles[id]; h != nil {
-		req.handle, req.path, req.upload = h, h.path, h.upload
+		req.handle, req.path, req.upload, req.download = h, h.path, h.upload, h.download
 	}
 }
 
@@ -256,8 +269,9 @@ func (t *tracker) claimSnapshots() []string {
 	return paths
 }
 
-// register records req as pending under a new proxy request ID, just before
-// it is forwarded. A request the proxy answers itself is never registered,
+// register records req as pending under a new proxy request ID, and the
+// second backend read of a split READ under another, just before they are
+// forwarded. A request the proxy answers itself is never registered,
 // so it leaves no trace: a CLOSE that fails before the backend sees it keeps
 // its handle known, as the backend still has it open.
 func (t *tracker) register(req *request) {
@@ -266,6 +280,11 @@ func (t *tracker) register(req *request) {
 
 	req.proxyID = t.newID()
 	t.pending[req.proxyID] = req
+	if req.split != nil {
+		rest := req.split.rest
+		rest.proxyID = t.newID()
+		t.pending[rest.proxyID] = rest
+	}
 	if c, ok := req.packet.(*sftpwire.Close); ok {
 		// The draft makes a handle invalid as soon as CLOSE is sent, even if
 		// the close then fails.
@@ -315,7 +334,7 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
 		_, file := req.packet.(*sftpwire.Open)
-		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, file: file, faulted: req.action != nil}
+		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, download: req.download, file: file, faulted: req.action != nil}
 	}
 	return req, nil
 }

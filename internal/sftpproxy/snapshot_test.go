@@ -229,6 +229,7 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 		name   string
 		faults func(sftpproxy.Request) sftpproxy.Action
 		dir    bool
+		read   bool
 		noHook bool
 		// closedBy holds how each snapshot logged says its handle was
 		// closed.
@@ -266,6 +267,11 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 			closedBy: []string{`"session end"`},
 		},
 		{
+			name:   "corrupted download",
+			faults: on[*sftpwire.Open](sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 10}),
+			read:   true,
+		},
+		{
 			name: "directory",
 			dir:  true,
 			faults: func(sftpproxy.Request) sftpproxy.Action {
@@ -296,8 +302,11 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 				go fb.answerAll()
 
 				var open, use sftpwire.Packet = &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate}, write("h", 0, 10)
-				if tt.dir {
+				switch {
+				case tt.dir:
 					open, use = &sftpwire.OpenDir{Path: "/f"}, &sftpwire.ReadDir{Handle: "h"}
+				case tt.read:
+					open, use = &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenRead}, &sftpwire.Read{Handle: "h", Length: 10}
 				}
 				for i, req := range []sftpwire.Packet{open, use, &sftpwire.Close{Handle: "h"}} {
 					p.client.send(t, uint32(i), req)

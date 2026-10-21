@@ -392,6 +392,30 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 			action:  sftpproxy.PartialUpload{Cutoff: 100, Result: sftpproxy.Drop{}},
 			err:     "a sftpproxy.Drop fault needs Options.Conn",
 		},
+		{
+			name:    "corrupt download on a request other than OPEN",
+			request: &sftpwire.Stat{Path: "/a"},
+			action:  sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate},
+			err:     "a CorruptDownload fault is for OPEN, not SSH_FXP_STAT",
+		},
+		{
+			name:    "omitting nothing",
+			request: open,
+			action:  sftpproxy.CorruptDownload{Corruption: sftpproxy.OmitRange, Offset: 100},
+			err:     "a CorruptDownload omit_range of 0 bytes at 100 does not fit a file",
+		},
+		{
+			name:    "flipping bytes beyond any file",
+			request: open,
+			action:  sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Offset: 1 << 63, Length: 1 << 63},
+			err:     "a CorruptDownload flip_bytes of 9223372036854775808 bytes at 9223372036854775808 does not fit a file",
+		},
+		{
+			name:    "unknown corruption",
+			request: open,
+			action:  sftpproxy.CorruptDownload{Corruption: 7},
+			err:     "unknown CorruptDownload corruption Corruption(7)",
+		},
 	}
 
 	for _, tt := range tests {

@@ -1,6 +1,7 @@
 package sftpproxy
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -43,8 +44,8 @@ func (w When) String() string {
 }
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop or Freeze,
-// or for an OPEN, a PartialUpload. What else an action holds back depends on
-// the session's ReplyOrder.
+// or for an OPEN, a PartialUpload or CorruptDownload. What else an action
+// holds back depends on the session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -111,12 +112,59 @@ type PartialUpload struct {
 	Result Action
 }
 
+// CorruptDownload, chosen for an OPEN, corrupts what reads through the
+// handle it opens return, while the file stays unchanged and every reply
+// reports success. What a read returns depends only on the file and the
+// read's own offset and length, so a client gets the same corrupted file
+// however it splits and pipelines its reads.
+type CorruptDownload struct {
+	Corruption Corruption
+	Offset     uint64
+
+	// Length is how many bytes OmitRange or FlipBytes acts on.
+	Length uint64
+}
+
+// Corruption is what a CorruptDownload does to a file's reads.
+type Corruption int
+
+const (
+	// Truncate serves the file as if it ended at Offset. A read at or beyond
+	// Offset gets EOF without reaching the backend, and a read that crosses
+	// it ends there.
+	Truncate Corruption = iota
+
+	// OmitRange serves the file without the Length bytes at Offset, so that
+	// every later byte comes Length bytes earlier. A read that crosses
+	// Offset becomes two backend reads, of the bytes on either side, whose
+	// data is joined, because a client that does not expect a short read
+	// before the end of a file may skip bytes after one.
+	OmitRange
+
+	// FlipBytes flips the lowest bit of each of the Length bytes at Offset,
+	// so that each one changes and text stays mostly printable.
+	FlipBytes
+)
+
+func (c Corruption) String() string {
+	switch c {
+	case Truncate:
+		return "truncate"
+	case OmitRange:
+		return "omit_range"
+	case FlipBytes:
+		return "flip_bytes"
+	}
+	return fmt.Sprintf("Corruption(%d)", int(c))
+}
+
 func (a Delay) when() When  { return a.When }
 func (a Stall) when() When  { return a.When }
 func (a Fail) when() When   { return a.When }
 func (a Drop) when() When   { return a.When }
 func (a Freeze) when() When { return a.When }
 
-// A session takes a PartialUpload off its OPEN before acting on either, so
-// its when is never asked.
-func (a PartialUpload) when() When { return Before }
+// A session takes a PartialUpload or CorruptDownload off its OPEN before
+// acting on either, so their when is never asked.
+func (a PartialUpload) when() When   { return Before }
+func (a CorruptDownload) when() When { return Before }
