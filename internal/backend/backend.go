@@ -6,6 +6,11 @@
 // refuses an existing target while posix-rename replaces it, appends ignore
 // the client's offset, and errors map to the same statuses and messages.
 // Links are unsupported, and ownership cannot be changed.
+//
+// The files stay within the backend's Limits. A request that would take them
+// past one is refused with SSH_FX_FAILURE, as OpenSSH's sftp-server refuses
+// a write to a full disk, and statvfs@openssh.com reports the limits as the
+// size of the filesystem.
 package backend
 
 import (
@@ -14,8 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
+	"path"
+	"strings"
 	"sync"
 
 	"github.com/pkg/sftp"
@@ -27,9 +35,9 @@ import (
 const maxPacketLength = 256 * 1024
 
 func init() {
-	// pkg/sftp's advertised extensions are process-global. Only posix-rename
-	// is implemented: links are unsupported, and the handler has no statvfs.
-	if err := sftp.SetSFTPExtensions(sftpwire.ExtPosixRename); err != nil {
+	// pkg/sftp's advertised extensions are process-global. Links are
+	// unsupported, so hardlink@openssh.com is left out.
+	if err := sftp.SetSFTPExtensions(sftpwire.ExtPosixRename, sftpwire.ExtStatVFS); err != nil {
 		panic(err)
 	}
 }
@@ -39,12 +47,32 @@ func init() {
 type Embedded struct {
 	root  *os.Root
 	holds holds
+	usage *usage
 }
 
-// New returns an Embedded backend that serves the files under root. Every
-// virtual path is resolved inside root and cannot escape it.
-func New(root *os.Root) *Embedded {
-	return &Embedded{root: root}
+// Options configure an Embedded backend.
+type Options struct {
+	// Limits bound the files and the handles open on them.
+	Limits Limits
+
+	// Logger records each request refused at a limit. Nil means
+	// slog.Default().
+	Logger *slog.Logger
+}
+
+// New returns an Embedded backend that serves the files under root, which
+// count towards the limits from the start. Every virtual path is resolved
+// inside root and cannot escape it.
+func New(root *os.Root, opts Options) (*Embedded, error) {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	u, err := newUsage(root, opts.Limits, logger)
+	if err != nil {
+		return nil, err
+	}
+	return &Embedded{root: root, usage: u}, nil
 }
 
 // Serve serves one SFTP session on rwc until the client ends it or rwc is
@@ -56,7 +84,7 @@ func New(root *os.Root) *Embedded {
 // workers, so appends could land out of order and a write could race a later
 // request on the same file.
 func (e *Embedded) Serve(rwc io.ReadWriteCloser, home string) error {
-	h := &handler{root: e.root, holds: &e.holds}
+	h := &handler{root: e.root, holds: &e.holds, usage: e.usage}
 	conn, serverEnd := net.Pipe()
 	srv := sftp.NewRequestServer(serverEnd,
 		sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h},
@@ -126,10 +154,28 @@ func (e *Embedded) Open(home string) io.ReadWriteCloser {
 	return s
 }
 
-// MkdirAll creates the directory at the virtual path dir, along with any
-// missing parents.
+// MkdirAll creates the directory at the clean virtual path dir, along with
+// any missing parents, unless that would take the files past a limit.
 func (e *Embedded) MkdirAll(dir string) error {
-	return e.root.MkdirAll(rootName(dir), 0o755)
+	var parent string
+	for _, segment := range strings.Split(strings.TrimPrefix(dir, "/"), "/") {
+		parent = path.Join("/", parent, segment)
+		if err := e.mkdir(parent); err != nil {
+			return fmt.Errorf("backend: %w", err)
+		}
+	}
+	return nil
+}
+
+func (e *Embedded) mkdir(dir string) error {
+	defer e.usage.change(dir)()
+	if info, err := e.root.Stat(rootName(dir)); err == nil && info.IsDir() {
+		return nil
+	}
+	if limit := e.usage.limitOnCreate(dir); limit != nil {
+		return limit
+	}
+	return e.root.Mkdir(rootName(dir), 0o755)
 }
 
 // Hold opens the file at the virtual path name for reading, outside any

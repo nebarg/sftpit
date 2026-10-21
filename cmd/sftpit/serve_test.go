@@ -196,6 +196,16 @@ func TestServeRejectsUnusableSeeds(t *testing.T) {
 		t.Errorf("seed with a symlink: exit %d, stderr %q", code, stderr.String())
 	}
 
+	tooBig := t.TempDir()
+	writeTestFile(t, filepath.Join(tooBig, "orders.csv"), "data!")
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeTestFile(t, config, "schema_version: 1\nstorage:\n  max_file_bytes: 4\n")
+	stderr = syncBuffer{}
+	code = run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--config", config, "--seed-dir", tooBig}, &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "orders.csv: storage limit reached: max_file_bytes is 4") {
+		t.Errorf("seed past a limit: exit %d, stderr %q", code, stderr.String())
+	}
+
 	if runtime.GOOS == "windows" {
 		return
 	}

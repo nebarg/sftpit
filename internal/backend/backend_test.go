@@ -323,6 +323,24 @@ func TestExclusiveCreateRefusesAnExistingFile(t *testing.T) {
 	assertStatus(t, err, sftpwire.StatusFailure)
 }
 
+func TestAWriteThroughAHandleThatCannotWriteFails(t *testing.T) {
+	e := newBackendIn(t, t.TempDir(), backend.Options{Limits: tight})
+	s := startRaw(t, e)
+	s.nextID++
+	open := &sftpwire.Open{Path: "/orders.csv", Flags: sftpwire.OpenCreate}
+	if _, err := s.conn.Write(sftpwire.AppendPacket(nil, s.nextID, open)); err != nil {
+		t.Fatalf("write OPEN: %v", err)
+	}
+	_, reply, err := sftpwire.DecodeReply(s.read())
+	handle, ok := reply.(*sftpwire.HandleReply)
+	if err != nil || !ok {
+		t.Fatalf("OPEN reply = %#v, %v; want a handle", reply, err)
+	}
+	// OpenSSH's sftp-server answers the EBADF from a read-only descriptor
+	// the same way, and gets it before any check of the space left.
+	s.wantStatus(&sftpwire.Write{Handle: handle.Handle, Data: []byte("past max_file_bytes")}, sftpwire.StatusNoSuchFile)
+}
+
 func TestSetstat(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows has no Unix permission bits")
@@ -384,11 +402,11 @@ func TestLinksAreUnsupported(t *testing.T) {
 	assertMissing(t, filepath.Join(dir, "link.csv"))
 }
 
-func TestVersionAdvertisesOnlyPosixRename(t *testing.T) {
+func TestVersionAdvertisesNoLinks(t *testing.T) {
 	_, e := newBackend(t)
 	s := startRaw(t, e)
 
-	want := []sftpwire.Extension{{Name: sftpwire.ExtPosixRename, Data: "1"}}
+	want := []sftpwire.Extension{{Name: sftpwire.ExtPosixRename, Data: "1"}, {Name: sftpwire.ExtStatVFS, Data: "2"}}
 	if !slices.Equal(s.version.Extensions, want) {
 		t.Errorf("extensions = %v, want %v", s.version.Extensions, want)
 	}
@@ -534,6 +552,16 @@ func TestHoldKeepsChangesFromEverySessionOut(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("a read waited for the hold")
 			}
+			other := make(chan error, 1)
+			go func() { other <- writeAt(reader, "/other.csv", "other", 0, os.O_CREATE) }()
+			select {
+			case err := <-other:
+				if err != nil {
+					t.Errorf("a change to another file failed while the file was held: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("a change to another file waited for the hold")
+			}
 			if content, err := io.ReadAll(held); err != nil || string(content) != "partial" {
 				t.Errorf("the held file reads %q, %v; want it unchanged", content, err)
 			}
@@ -557,15 +585,28 @@ func TestCloseEndsTheSession(t *testing.T) {
 	}
 }
 
+// roomy are limits that no test reaches unless it means to.
+var roomy = backend.Limits{MaxFileBytes: 1 << 30, MaxTotalBytes: 1 << 32, MaxFiles: 1 << 20, MaxOpenFiles: 1 << 10}
+
 func newBackend(t *testing.T) (string, *backend.Embedded) {
 	t.Helper()
 	dir := t.TempDir()
+	return dir, newBackendIn(t, dir, backend.Options{Limits: roomy})
+}
+
+// newBackendIn returns a backend with opts that serves the files in dir.
+func newBackendIn(t *testing.T, dir string, opts backend.Options) *backend.Embedded {
+	t.Helper()
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
 	t.Cleanup(func() { root.Close() })
-	return dir, backend.New(root)
+	e, err := backend.New(root, opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e
 }
 
 func newClient(t *testing.T, e *backend.Embedded, home string) *sftp.Client {

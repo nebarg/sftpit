@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/nebarg/sftpit/internal/backend"
 )
 
 func TestLoadWithoutAConfigFileUsesTheDefaults(t *testing.T) {
@@ -21,6 +23,39 @@ func TestLoadWithoutAConfigFileUsesTheDefaults(t *testing.T) {
 	}
 	if len(cfg.Users) != 1 || cfg.Users[0].Name != "test" || cfg.Users[0].Password != "test" || cfg.Users[0].Home != "/" {
 		t.Errorf("users = %+v, want test/test", cfg.Users)
+	}
+	want := backend.Limits{MaxFileBytes: 1 << 30, MaxTotalBytes: 4 << 30, MaxFiles: 10000, MaxOpenFiles: 256}
+	if cfg.Limits != want {
+		t.Errorf("Limits = %+v, want %+v", cfg.Limits, want)
+	}
+}
+
+func TestLoadReadsEachStorageLimit(t *testing.T) {
+	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `
+schema_version: 1
+storage:
+  max_file_bytes: 16777216
+  max_total_bytes: 67108864
+  max_files: 1
+  max_open_files: 2
+`, 0o600)
+	cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := backend.Limits{MaxFileBytes: 16777216, MaxTotalBytes: 67108864, MaxFiles: 1, MaxOpenFiles: 2}
+	if cfg.Limits != want {
+		t.Errorf("Limits = %+v, want %+v", cfg.Limits, want)
+	}
+
+	config = writeTestFile(t, config, "schema_version: 1\nstorage:\n  max_files: 1\n", 0o600)
+	cfg, err = Load(Options{ConfigFile: config, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want = backend.Limits{MaxFileBytes: DefaultMaxFileBytes, MaxTotalBytes: DefaultMaxTotalBytes, MaxFiles: 1, MaxOpenFiles: DefaultMaxOpenFiles}
+	if cfg.Limits != want {
+		t.Errorf("Limits with one set = %+v, want the defaults for the others, %+v", cfg.Limits, want)
 	}
 }
 
@@ -212,6 +247,9 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{"wrong type", "schema_version: \"1\"\n", "cannot unmarshal"},
 		{"env_file mapping", "schema_version: 1\nenv_file: {a: b}\n", "a path or a list of paths"},
 		{"non-loopback listen", "schema_version: 1\nserver:\n  sftp_listen: \"0.0.0.0:2122\"\n", "not a loopback address"},
+		{"limit turned off", "schema_version: 1\nstorage:\n  max_files: 0\n", "max_files is 0; storage limits must be at least 1"},
+		{"negative limit", "schema_version: 1\nstorage:\n  max_open_files: -1\n", "max_open_files is -1"},
+		{"limit with a unit", "schema_version: 1\nstorage:\n  max_total_bytes: 64MiB\n", "cannot unmarshal"},
 		{"user without a name", "schema_version: 1\nusers:\n  - password_env: P\n", "users[0]: name is required"},
 		{"duplicate user", "schema_version: 1\nusers:\n  - {name: a, password_env: P}\n  - {name: a, password_env: P}\n", "users[1] (a): users[0] has the same name"},
 		{"user without credentials", "schema_version: 1\nusers:\n  - name: a\n", "set password_env, authorized_keys or both"},

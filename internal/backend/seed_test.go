@@ -100,6 +100,37 @@ func TestSeedRejectsSymlinks(t *testing.T) {
 	}
 }
 
+func TestSeedStopsAtTheLimits(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		// entry is the first entry past the limit, in the order the seed is
+		// copied.
+		entry string
+		limit string
+	}{
+		{name: "a file past max_file_bytes", files: map[string]string{"big.csv": "0123456789!"}, entry: "big.csv", limit: "max_file_bytes is 10"},
+		{name: "files past max_total_bytes", files: map[string]string{"a": "0123456789", "b": "0123456789", "c": "012345"}, entry: "c", limit: "max_total_bytes is 25"},
+		{name: "a file past max_files", files: map[string]string{"d/": "", "d/a": "", "d/b": "", "d/c": "", "e": ""}, entry: "e", limit: "max_files is 4"},
+		{name: "a directory past max_files", files: map[string]string{"d/": "", "d/a": "", "d/b": "", "d/c": "", "e/": ""}, entry: "e", limit: "max_files is 4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seed := t.TempDir()
+			writeTree(t, seed, tt.files)
+			dir := t.TempDir()
+			e := newBackendIn(t, dir, backend.Options{Limits: tight})
+
+			err := e.Seed(seed)
+			want := filepath.Join(seed, tt.entry) + ": storage limit reached: " + tt.limit
+			if !errors.Is(err, backend.ErrLimit) || !strings.Contains(err.Error(), want) {
+				t.Errorf("Seed error = %v, want ErrLimit saying %q", err, want)
+			}
+			assertMissing(t, filepath.Join(dir, tt.entry))
+		})
+	}
+}
+
 func TestSeedReportsAMissingDirectory(t *testing.T) {
 	_, e := newBackend(t)
 	if err := e.Seed(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, os.ErrNotExist) {

@@ -26,6 +26,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -86,10 +87,24 @@ type server struct {
 // started, so that everything they log has been logged.
 func (s *server) waitForSessions() { s.sessions.Wait() }
 
+// defaultLimits are the storage limits sftpit serve has by default.
+var defaultLimits = backend.Limits{
+	MaxFileBytes:  config.DefaultMaxFileBytes,
+	MaxTotalBytes: config.DefaultMaxTotalBytes,
+	MaxFiles:      config.DefaultMaxFiles,
+	MaxOpenFiles:  config.DefaultMaxOpenFiles,
+}
+
 // startServer starts a server that routes each session as via says. A
 // proxied session goes through the same handler as sftpit serve and runs
 // with opts, logging nothing unless opts has a Logger.
 func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
+	t.Helper()
+	return startLimitedServer(t, via, opts, defaultLimits)
+}
+
+// startLimitedServer is startServer with limits on the run's files.
+func startLimitedServer(t testing.TB, via route, opts sftpproxy.Options, limits backend.Limits) *server {
 	t.Helper()
 	workspace, err := runs.OpenWorkspace(t.TempDir())
 	if err != nil {
@@ -105,8 +120,11 @@ func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
 		t.Fatalf("OpenRoot: %v", err)
 	}
 	t.Cleanup(func() { root.Close() })
-	embedded := backend.New(root)
 	logger := slog.New(slog.DiscardHandler)
+	embedded, err := backend.New(root, backend.Options{Limits: limits, Logger: logger})
+	if err != nil {
+		t.Fatalf("backend.New: %v", err)
+	}
 
 	handler := func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		return embedded.Serve(channel, conn.Home())

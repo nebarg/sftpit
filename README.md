@@ -50,6 +50,11 @@ server:
 storage:
   data_dir: "./sandbox-data" # a workspace to keep; temporary by default
   seed_dir: "./seed" # copied into the workspace at every start
+  # Limits on each run's files, shown with their defaults:
+  max_file_bytes: 1073741824 # 1 GiB
+  max_total_bytes: 4294967296 # 4 GiB
+  max_files: 10000 # files and directories
+  max_open_files: 256
 
 users:
   - name: "test"
@@ -65,6 +70,8 @@ users:
 - With no `users`, the `test`/`test` login is used.
 - A `host_key` directory gets an Ed25519 and an RSA key the first time it is used. Commit them so a team shares one fingerprint.
 
+The storage limits keep a runaway client from filling the disk. A file counts at its logical size, so a sparse write or a truncate that extends a file counts in full, and only file handles count as open files. A request that would take the files past a limit changes nothing and fails with `SSH_FX_FAILURE`, as a write to a full disk fails on OpenSSH's server, and sftpit logs it as `storage limit reached`, naming the setting. The seed counts too, and sftpit refuses to start with one that does not fit. A limit can be raised but not turned off.
+
 Passwords never appear in the config file. `password_env` names an environment variable, which is read from the process environment first and then from the env files named by `env_file` and `--env-file`. A later file overrides an earlier one, and a missing env file is skipped.
 
 sftpit never reads a `.env` it was not told about. It never copies env-file values into its own environment, and it keeps only the variables the config references. Env files accept the following:
@@ -78,7 +85,8 @@ Expansion such as `${OTHER}`, escapes and multi-line values are rejected for ref
 ## Behavior
 
 With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The main differences:
-- symlinks, hard links and `statvfs` are not supported;
+- symlinks and hard links are not supported;
+- `statvfs@openssh.com`, which `df` uses, reports the storage limits instead of the host's disk;
 - ownership cannot be changed;
 - new files are created with mode 0666 and new directories with 0777, less the umask, whatever permissions the client sends with them.
 

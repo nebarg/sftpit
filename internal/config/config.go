@@ -28,6 +28,7 @@ import (
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
@@ -40,6 +41,11 @@ const (
 	DefaultSFTPListen = "127.0.0.1:2122"
 	DefaultUser       = "test"
 	DefaultPassword   = "test"
+
+	DefaultMaxFileBytes  = 1 << 30
+	DefaultMaxTotalBytes = 4 << 30
+	DefaultMaxFiles      = 10000
+	DefaultMaxOpenFiles  = 256
 )
 
 // hostKeyWorkspace selects the host keys kept in the workspace.
@@ -61,6 +67,9 @@ type Config struct {
 	// DataDir is the absolute path of the workspace to keep, or "" for a
 	// temporary one.
 	DataDir string
+
+	// Limits bound each run's files and the handles open on them.
+	Limits backend.Limits
 
 	Users []sshfront.User
 
@@ -104,8 +113,12 @@ type fileConfig struct {
 }
 
 type storageConfig struct {
-	DataDir string `yaml:"data_dir"`
-	SeedDir string `yaml:"seed_dir"`
+	DataDir       string `yaml:"data_dir"`
+	SeedDir       string `yaml:"seed_dir"`
+	MaxFileBytes  *int64 `yaml:"max_file_bytes"`
+	MaxTotalBytes *int64 `yaml:"max_total_bytes"`
+	MaxFiles      *int64 `yaml:"max_files"`
+	MaxOpenFiles  *int64 `yaml:"max_open_files"`
 }
 
 type serverConfig struct {
@@ -198,6 +211,11 @@ func Load(opts Options) (*Config, error) {
 		}
 		cfg.DataDir = resolved
 	}
+	limits, err := f.Storage.limits()
+	if err != nil {
+		return nil, err
+	}
+	cfg.Limits = limits
 
 	if err := validateUsers(f.Users); err != nil {
 		return nil, err
@@ -322,6 +340,37 @@ func checkDataDir(name, seedDir string) (string, error) {
 		}
 	}
 	return abs, nil
+}
+
+// limits returns the configured storage limits, with the default for each
+// one left unset. A limit cannot be turned off, only raised.
+func (s storageConfig) limits() (backend.Limits, error) {
+	limits := backend.Limits{
+		MaxFileBytes:  DefaultMaxFileBytes,
+		MaxTotalBytes: DefaultMaxTotalBytes,
+		MaxFiles:      DefaultMaxFiles,
+		MaxOpenFiles:  DefaultMaxOpenFiles,
+	}
+	settings := []struct {
+		name  string
+		value *int64
+		limit *int64
+	}{
+		{"max_file_bytes", s.MaxFileBytes, &limits.MaxFileBytes},
+		{"max_total_bytes", s.MaxTotalBytes, &limits.MaxTotalBytes},
+		{"max_files", s.MaxFiles, &limits.MaxFiles},
+		{"max_open_files", s.MaxOpenFiles, &limits.MaxOpenFiles},
+	}
+	for _, setting := range settings {
+		if setting.value == nil {
+			continue
+		}
+		if *setting.value < 1 {
+			return backend.Limits{}, fmt.Errorf("%s is %d; storage limits must be at least 1 and cannot be turned off", setting.name, *setting.value)
+		}
+		*setting.limit = *setting.value
+	}
+	return limits, nil
 }
 
 func sameFile(a, b string) bool {

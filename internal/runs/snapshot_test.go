@@ -41,7 +41,11 @@ func TestSnapshotsCopyFilesWithinTheBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	embedded := backend.New(root)
+	limits := backend.Limits{MaxFileBytes: 100, MaxTotalBytes: 100, MaxFiles: 10, MaxOpenFiles: 10}
+	embedded, err := backend.New(root, backend.Options{Limits: limits})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := embedded.Seed(seed); err != nil {
 		t.Fatal(err)
 	}

@@ -73,7 +73,8 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if err := runServer(ctx, cfg, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n", err)
-		if errors.Is(err, backend.ErrUnsupportedFile) || errors.Is(err, errSeedHoldsWorkspace) || errors.Is(err, runs.ErrNotWorkspace) {
+		if errors.Is(err, backend.ErrUnsupportedFile) || errors.Is(err, backend.ErrLimit) ||
+			errors.Is(err, errSeedHoldsWorkspace) || errors.Is(err, runs.ErrNotWorkspace) {
 			return exitUsage
 		}
 		return exitFailure
@@ -120,7 +121,10 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 		return fmt.Errorf("open run files: %w", err)
 	}
 	defer root.Close()
-	embedded := backend.New(root)
+	embedded, err := backend.New(root, backend.Options{Limits: cfg.Limits, Logger: logger})
+	if err != nil {
+		return err
+	}
 	if cfg.SeedDir != "" {
 		if err := embedded.Seed(cfg.SeedDir); err != nil {
 			return err

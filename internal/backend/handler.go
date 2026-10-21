@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 type handler struct {
 	root  *os.Root
 	holds *holds
+	usage *usage
 }
 
 // pkg/sftp finds the optional interfaces by type assertion and falls back
@@ -25,15 +25,16 @@ var (
 	_ sftp.FileReader           = (*handler)(nil)
 	_ sftp.OpenFileWriter       = (*handler)(nil)
 	_ sftp.PosixRenameFileCmder = (*handler)(nil)
+	_ sftp.StatVFSFileCmder     = (*handler)(nil)
 	_ sftp.LstatFileLister      = (*handler)(nil)
 )
 
 func (h *handler) Fileread(r *sftp.Request) (io.ReaderAt, error) {
-	f, err := h.root.Open(rootName(r.Filepath))
+	f, err := h.open(r.Filepath, os.O_RDONLY)
 	if err != nil {
-		return nil, statusError(err)
+		return nil, err
 	}
-	return &file{f: f}, nil
+	return &file{f: f, usage: h.usage}, nil
 }
 
 func (h *handler) Filewrite(r *sftp.Request) (io.WriterAt, error) {
@@ -64,35 +65,57 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 	if pflags.Excl {
 		flag |= os.O_EXCL
 	}
-	if !pflags.Write {
-		return h.openForReading(r, flag)
+	// An open that cannot write neither waits for a snapshot nor holds back
+	// other changes, unless it creates or truncates the file.
+	if pflags.Write || flag&(os.O_CREATE|os.O_TRUNC) != 0 {
+		defer h.changing(r.Filepath)()
+		if flag&os.O_CREATE != 0 {
+			if limit := h.usage.limitOnCreate(r.Filepath); limit != nil {
+				return nil, h.usage.refuse(r.Filepath, limit)
+			}
+		}
 	}
-	defer h.holds.change(r.Filepath)()
-	// pkg/sftp passes the open flags where an OPEN's attribute flags belong,
-	// so the permissions a client sends cannot be told apart from noise.
-	f, err := h.root.OpenFile(rootName(r.Filepath), flag, 0o666)
+	f, err := h.open(r.Filepath, flag)
 	if err != nil {
-		return nil, statusError(err)
+		return nil, err
 	}
-	return &file{f: f, appending: pflags.Append, name: r.Filepath, holds: h.holds}, nil
+	if !pflags.Write {
+		return &file{f: f, usage: h.usage}, nil
+	}
+	return &file{f: f, usage: h.usage, appending: pflags.Append, name: r.Filepath, holds: h.holds}, nil
 }
 
-// openForReading opens a file that the handle cannot write to, so that
-// neither the open nor the handle waits for a snapshot, unless the flags
-// create or truncate the file.
-func (h *handler) openForReading(r *sftp.Request, flag int) (*file, error) {
-	if flag&(os.O_CREATE|os.O_TRUNC) != 0 {
-		defer h.holds.change(r.Filepath)()
+// open opens the file at the virtual path name with flag, as long as another
+// file handle can be open.
+func (h *handler) open(name string, flag int) (*os.File, error) {
+	if limit := h.usage.openHandle(); limit != nil {
+		return nil, h.usage.refuse(name, limit)
 	}
-	f, err := h.root.OpenFile(rootName(r.Filepath), flag, 0o666)
+	// pkg/sftp passes the open flags where an OPEN's attribute flags belong,
+	// so the permissions a client sends cannot be told apart from noise.
+	f, err := h.root.OpenFile(rootName(name), flag, 0o666)
 	if err != nil {
+		h.usage.closeHandle()
 		return nil, statusError(err)
 	}
-	return &file{f: f}, nil
+	return f, nil
+}
+
+// changing waits until no snapshot holds any of the virtual paths names,
+// and then keeps every other change to the tree waiting until the returned
+// function is called, counting what the caller changes at names. Empty names
+// are ignored.
+func (h *handler) changing(names ...string) (done func()) {
+	released := h.holds.change(names...)
+	counted := h.usage.change(names...)
+	return func() {
+		counted()
+		released()
+	}
 }
 
 func (h *handler) Filecmd(r *sftp.Request) error {
-	defer h.holds.change(r.Filepath, r.Target)()
+	defer h.changing(r.Filepath, r.Target)()
 	name := rootName(r.Filepath)
 	switch r.Method {
 	case "Setstat":
@@ -100,6 +123,9 @@ func (h *handler) Filecmd(r *sftp.Request) error {
 	case "Rename":
 		return h.rename(name, rootName(r.Target))
 	case "Mkdir":
+		if limit := h.usage.limitOnCreate(r.Filepath); limit != nil {
+			return h.usage.refuse(r.Filepath, limit)
+		}
 		// pkg/sftp drops the attributes a MKDIR carries.
 		return statusError(h.root.Mkdir(name, 0o777))
 	case "Rmdir":
@@ -111,8 +137,16 @@ func (h *handler) Filecmd(r *sftp.Request) error {
 }
 
 func (h *handler) PosixRename(r *sftp.Request) error {
-	defer h.holds.change(r.Filepath, r.Target)()
+	defer h.changing(r.Filepath, r.Target)()
 	return statusError(h.root.Rename(rootName(r.Filepath), rootName(r.Target)))
+}
+
+// StatVFS describes the limits as the filesystem holding every path.
+func (h *handler) StatVFS(r *sftp.Request) (*sftp.StatVFS, error) {
+	if _, err := h.root.Stat(rootName(r.Filepath)); err != nil {
+		return nil, statusError(err)
+	}
+	return h.usage.statVFS(), nil
 }
 
 // setstat applies each attribute in turn and, like OpenSSH, attempts every
@@ -122,7 +156,7 @@ func (h *handler) setstat(name string, r *sftp.Request) error {
 	attrs := r.Attributes()
 	var err error
 	if flags.Size {
-		if truncErr := h.truncate(name, int64(attrs.Size)); truncErr != nil {
+		if truncErr := h.truncate(r.Filepath, int64(attrs.Size)); truncErr != nil {
 			err = truncErr
 		}
 	}
@@ -144,16 +178,25 @@ func (h *handler) setstat(name string, r *sftp.Request) error {
 	return statusError(err)
 }
 
+// truncate sets the size of the file at the virtual path name, unless that
+// would take the files past a limit.
 func (h *handler) truncate(name string, size int64) error {
-	f, err := h.root.OpenFile(name, os.O_WRONLY, 0)
+	f, err := h.root.OpenFile(rootName(name), os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
-	err = f.Truncate(size)
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
 	}
-	return err
+	if limit := h.usage.limitOnGrowth(info.Size(), size); limit != nil {
+		return h.usage.refuse(name, limit)
+	}
+	if err := f.Truncate(size); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // rename implements the standard rename, which fails when the target exists.
@@ -288,14 +331,14 @@ func (l listerAt) ListAt(dst []os.FileInfo, offset int64) (int, error) {
 // O_APPEND handles; they are positional writes at the current size rather
 // than writes on an O_APPEND descriptor, which os.File.WriteAt refuses.
 type file struct {
-	f         *os.File
-	appending bool
-	appendMu  sync.Mutex
+	f     *os.File
+	usage *usage
 
-	// name and holds are set for a handle that can write, whose writes wait
-	// for any snapshot of its file.
-	name  string
-	holds *holds
+	// appending, name and holds are set for a handle that can write, whose
+	// writes wait for any snapshot of its file.
+	appending bool
+	name      string
+	holds     *holds
 }
 
 func (f *file) ReadAt(p []byte, off int64) (int, error) {
@@ -304,22 +347,33 @@ func (f *file) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *file) WriteAt(p []byte, off int64) (int, error) {
-	if f.holds != nil {
-		defer f.holds.change(f.name)()
+	if f.holds == nil {
+		// The descriptor is read-only, so the write fails.
+		n, err := f.f.WriteAt(p, off)
+		return n, statusError(err)
 	}
+	defer f.holds.change(f.name)()
+	// Under the lock the size cannot change between the check and the write,
+	// so appends through several handles land one after another.
+	defer f.usage.lock()()
+	info, err := f.f.Stat()
+	if err != nil {
+		return 0, statusError(err)
+	}
+	size := info.Size()
 	if f.appending {
-		f.appendMu.Lock()
-		defer f.appendMu.Unlock()
-		info, err := f.f.Stat()
-		if err != nil {
-			return 0, statusError(err)
-		}
-		off = info.Size()
+		off = size
+	}
+	if limit := f.usage.limitOnGrowth(size, writeEnd(off, len(p))); limit != nil {
+		return 0, f.usage.refuse(f.name, limit)
 	}
 	n, err := f.f.WriteAt(p, off)
+	f.usage.grew(max(0, off+int64(n)-size))
 	return n, statusError(err)
 }
 
 func (f *file) Close() error {
-	return statusError(f.f.Close())
+	err := f.f.Close()
+	f.usage.closeHandle()
+	return statusError(err)
 }
