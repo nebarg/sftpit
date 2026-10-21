@@ -38,7 +38,7 @@ func TestServeTransfersFilesAndCleansUp(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	f.Close()
-	stored, err := os.ReadFile(filepath.Join(s.workspace, "fs", "orders.csv"))
+	stored, err := os.ReadFile(filepath.Join(s.files(), "orders.csv"))
 	if err != nil || !bytes.Equal(stored, want) {
 		t.Fatalf("stored file: %d bytes, %v; want the %d uploaded", len(stored), err, len(want))
 	}
@@ -86,6 +86,60 @@ users:
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hostkeys", "ssh_host_ed25519_key")); err != nil {
 		t.Errorf("host key not kept in the configured directory: %v", err)
+	}
+}
+
+func TestServeKeepsADataDirectory(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "sandbox-data")
+
+	first := startServe(t, "--sftp-listen", "127.0.0.1:0", "--data-dir", dataDir)
+	if !strings.Contains(first.stdout.String(), "workspace: "+dataDir+" (kept, with its last five runs)") {
+		t.Errorf("banner does not say the workspace is kept:\n%s", first.stdout.String())
+	}
+	c := first.dial(t, "test", "test")
+	f, err := c.Create("/orders.csv")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write([]byte("id,total\n")); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	f.Close()
+	if code := first.stop(t); code != exitOK {
+		t.Fatalf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, first.stderr.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(first.files(), "orders.csv")); err != nil || string(got) != "id,total\n" {
+		t.Errorf("the first run's upload is %q (%v) after it stopped, want it kept", got, err)
+	}
+
+	second := startServe(t, "--sftp-listen", "127.0.0.1:0", "--data-dir", dataDir)
+	if second.run == first.run {
+		t.Errorf("both starts ran %s, want a new run each time", first.run)
+	}
+	if _, err := second.dial(t, "test", "test").Stat("/orders.csv"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the second run sees the first run's upload (%v), want it to start empty", err)
+	}
+	second.stop(t)
+	if a, b := fingerprints(first.stdout.String()), fingerprints(second.stdout.String()); a != b {
+		t.Errorf("host keys changed between runs: %v then %v", a, b)
+	}
+}
+
+func TestServeRefusesUnusableDataDirectories(t *testing.T) {
+	notEmpty := t.TempDir()
+	writeTestFile(t, filepath.Join(notEmpty, "notes.txt"), "keep me")
+	var stdout, stderr syncBuffer
+	code := run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--data-dir", notEmpty}, &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "is not empty: not an sftpit workspace") {
+		t.Errorf("a directory with other files: exit %d, stderr %q", code, stderr.String())
+	}
+
+	inUse := t.TempDir()
+	startServe(t, "--sftp-listen", "127.0.0.1:0", "--data-dir", inUse)
+	stderr = syncBuffer{}
+	code = run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--data-dir", inUse}, &stdout, &stderr)
+	if code != exitFailure || !strings.Contains(stderr.String(), "workspace in use by another sftpit process") {
+		t.Errorf("a workspace in use: exit %d, stderr %q", code, stderr.String())
 	}
 }
 
@@ -222,13 +276,15 @@ type running struct {
 	stdout, stderr *syncBuffer
 	addr           string
 	workspace      string
+	run            string
 	cancel         context.CancelFunc
 	code           chan int
 }
 
 var (
 	addrLine      = regexp.MustCompile(`serving SFTP on (\S+)`)
-	workspaceLine = regexp.MustCompile(`workspace: (.+) \(deleted`)
+	workspaceLine = regexp.MustCompile(`workspace: (.+) \((?:deleted|kept)`)
+	runLine       = regexp.MustCompile(`run: (\S+)`)
 )
 
 func startServe(t *testing.T, args ...string) *running {
@@ -252,7 +308,13 @@ func startServe(t *testing.T, args ...string) *running {
 	out := s.stdout.String()
 	s.addr = addrLine.FindStringSubmatch(out)[1]
 	s.workspace = workspaceLine.FindStringSubmatch(out)[1]
+	s.run = runLine.FindStringSubmatch(out)[1]
 	return s
+}
+
+// files returns the directory of the run's files.
+func (s *running) files() string {
+	return filepath.Join(s.workspace, "runs", s.run, "fs")
 }
 
 // stop cancels the command and returns its exit code. It can be called

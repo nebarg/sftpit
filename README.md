@@ -10,7 +10,7 @@ Mailpit for SFTP: a local SFTP server for developing and testing file integratio
 go run ./cmd/sftpit serve
 ```
 
-sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. At startup it prints the address, its host-key fingerprints and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
+sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
 
 `--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces.
 
@@ -21,6 +21,14 @@ go run ./cmd/sftpit serve --seed-dir ./tests/sftpit/seed
 ```
 
 The directory is copied into the workspace at every start, keeping permissions and modification times, so each run begins with the same files and nothing a client does changes the originals. It may contain only directories and regular files. An empty directory has to hold something, such as a `.gitkeep`, before git will commit it, and SFTP clients see that file too.
+
+To keep the workspace after sftpit stops, name a directory for it:
+
+```bash
+go run ./cmd/sftpit serve --data-dir ./sandbox-data
+```
+
+The directory must be empty or already an sftpit workspace, and only one sftpit can use it at a time. It keeps the host keys, so clients see the same fingerprints at every start, and the files of the last five runs, under `runs/<run>/fs/`, so that a failed run can be inspected afterwards. Each start is still a new run, which begins with only the seed's files.
 
 ## Configuration
 
@@ -35,9 +43,10 @@ env_file: ".env" # optional; a path or a list of paths
 
 server:
   sftp_listen: "127.0.0.1:2122"
-  host_key: "./hostkeys" # or "workspace" (the default) for keys that change every run
+  host_key: "./hostkeys" # or "workspace" (the default) for the workspace's own keys
 
 storage:
+  data_dir: "./sandbox-data" # a workspace to keep; temporary by default
   seed_dir: "./seed" # copied into the workspace at every start
 
 users:

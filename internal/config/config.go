@@ -58,6 +58,10 @@ type Config struct {
 	// workspace at startup, or "" for an empty workspace.
 	SeedDir string
 
+	// DataDir is the absolute path of the workspace to keep, or "" for a
+	// temporary one.
+	DataDir string
+
 	Users []sshfront.User
 
 	// DefaultCredentials reports whether Users is the built-in test user,
@@ -80,6 +84,9 @@ type Options struct {
 	// SeedDir overrides the configured seed directory when non-empty.
 	SeedDir string
 
+	// DataDir overrides the configured workspace directory when non-empty.
+	DataDir string
+
 	// EnvFiles are read after the configuration's env files, so their
 	// values override those.
 	EnvFiles []string
@@ -97,6 +104,7 @@ type fileConfig struct {
 }
 
 type storageConfig struct {
+	DataDir string `yaml:"data_dir"`
 	SeedDir string `yaml:"seed_dir"`
 }
 
@@ -178,6 +186,17 @@ func Load(opts Options) (*Config, error) {
 			return nil, err
 		}
 		cfg.SeedDir = resolved
+	}
+	dataDir := opts.DataDir
+	if dataDir == "" && f.Storage.DataDir != "" {
+		dataDir = resolvePath(dir, f.Storage.DataDir)
+	}
+	if dataDir != "" {
+		resolved, err := checkDataDir(dataDir, cfg.SeedDir)
+		if err != nil {
+			return nil, err
+		}
+		cfg.DataDir = resolved
 	}
 
 	if err := validateUsers(f.Users); err != nil {
@@ -281,6 +300,26 @@ func checkSeedDir(name string) (string, error) {
 	home, err := os.UserHomeDir()
 	if filepath.Dir(abs) == abs || (err == nil && sameFile(abs, home)) {
 		return "", fmt.Errorf("seed_dir %s would copy the whole tree under it; use a directory of test fixtures", abs)
+	}
+	return abs, nil
+}
+
+// checkDataDir refuses the filesystem root, the home directory and a
+// directory inside the seed directory, which would be copied into itself.
+// The directory need not exist yet.
+func checkDataDir(name, seedDir string) (string, error) {
+	abs, err := filepath.Abs(name)
+	if err != nil {
+		return "", fmt.Errorf("data_dir: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if filepath.Dir(abs) == abs || (err == nil && sameFile(abs, home)) {
+		return "", fmt.Errorf("data_dir %s is the filesystem root or the home directory; use a directory of its own", abs)
+	}
+	if seedDir != "" {
+		if rel, err := filepath.Rel(seedDir, abs); err == nil && filepath.IsLocal(rel) {
+			return "", fmt.Errorf("data_dir %s is inside seed_dir %s, which would be copied into itself", abs, seedDir)
+		}
 	}
 	return abs, nil
 }

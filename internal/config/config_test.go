@@ -125,6 +125,50 @@ func TestLoadRejectsUnsuitableSeedDirectories(t *testing.T) {
 	}
 }
 
+func TestLoadResolvesTheDataDirectory(t *testing.T) {
+	dir := t.TempDir()
+	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nstorage:\n  data_dir: sandbox-data\n", 0o600)
+
+	cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join(dir, "sandbox-data"); cfg.DataDir != want {
+		t.Errorf("DataDir = %q, want %q, which need not exist yet", cfg.DataDir, want)
+	}
+
+	override := t.TempDir()
+	cfg, err = Load(Options{ConfigFile: config, DataDir: override, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load with --data-dir: %v", err)
+	}
+	if cfg.DataDir != override {
+		t.Errorf("DataDir = %q, want the flag's %q", cfg.DataDir, override)
+	}
+}
+
+func TestLoadRejectsUnsuitableDataDirectories(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory: %v", err)
+	}
+	seed := t.TempDir()
+	tests := []struct {
+		dataDir string
+		want    string
+	}{
+		{dataDir: home, want: "is the filesystem root or the home directory"},
+		{dataDir: string(filepath.Separator), want: "is the filesystem root or the home directory"},
+		{dataDir: seed, want: "is inside seed_dir"},
+		{dataDir: filepath.Join(seed, "sandbox-data"), want: "is inside seed_dir"},
+	}
+	for _, tt := range tests {
+		if _, err := Load(Options{DataDir: tt.dataDir, SeedDir: seed, LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: error = %v, want %q", tt.dataDir, err, tt.want)
+		}
+	}
+}
+
 func TestLoadAcceptsOnlyLoopbackAddresses(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:2122", "127.0.0.2:22", "[::1]:0", "localhost:2122"} {
 		if _, err := Load(Options{SFTPListen: addr, LookupEnv: noEnv}); err != nil {

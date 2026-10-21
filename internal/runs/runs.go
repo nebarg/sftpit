@@ -1,7 +1,9 @@
 // Package runs connects the SFTP sessions of a run to the workspace it
 // serves: each session passes through the proxy, which can inject faults,
 // on its way to the embedded backend, and the files that faulted handles
-// leave behind are snapshotted from the workspace.
+// leave behind are snapshotted from the workspace. It also keeps the
+// workspace itself: a directory that one process at a time locks, holding
+// the host keys and the files of each run.
 package runs
 
 import (
