@@ -37,7 +37,8 @@ func TestSeedCopiesFilesAndDirectories(t *testing.T) {
 
 	assertFile(t, filepath.Join(dir, "outgoing", "orders.csv"), "id,total\n1,9.99\n")
 	assertFile(t, filepath.Join(dir, "outgoing", "2026", "archive.csv"), "old")
-	assertFile(t, filepath.Join(dir, "README"), "top level")
+	// Seeded names are encoded on the host like any others.
+	assertFile(t, filepath.Join(dir, "^r^e^a^d^m^e"), "top level")
 	if info, err := os.Stat(filepath.Join(dir, "incoming")); err != nil || !info.IsDir() {
 		t.Errorf("empty directory not copied: %v", err)
 	}
@@ -59,11 +60,13 @@ func TestSeedCopiesFilesAndDirectories(t *testing.T) {
 	}
 
 	c := newClient(t, e, "/")
-	f, err := c.Open("/outgoing/orders.csv")
-	if err != nil {
-		t.Fatalf("Open a seeded file: %v", err)
+	for _, name := range []string{"/outgoing/orders.csv", "/README"} {
+		f, err := c.Open(name)
+		if err != nil {
+			t.Fatalf("Open the seeded %s: %v", name, err)
+		}
+		f.Close()
 	}
-	f.Close()
 }
 
 func TestSeedIsACopy(t *testing.T) {

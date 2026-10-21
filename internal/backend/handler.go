@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,15 +26,6 @@ var (
 	_ sftp.PosixRenameFileCmder = (*handler)(nil)
 	_ sftp.LstatFileLister      = (*handler)(nil)
 )
-
-// rootName converts a clean absolute virtual path into a name relative to
-// the root.
-func rootName(virtual string) string {
-	if virtual == "/" {
-		return "."
-	}
-	return strings.TrimPrefix(virtual, "/")
-}
 
 func (h *handler) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	f, err := h.root.Open(rootName(r.Filepath))
@@ -222,6 +212,9 @@ func (h *handler) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
 	return listerAt{info}, nil
 }
 
+// list lists the directory name under the virtual names of its entries,
+// leaving out any entry whose name sftpit cannot have given it, such as a
+// file copied into the root by hand.
 func (h *handler) list(name string) (sftp.ListerAt, error) {
 	dir, err := h.root.Open(name)
 	if err != nil {
@@ -232,8 +225,22 @@ func (h *handler) list(name string) (sftp.ListerAt, error) {
 	if err != nil {
 		return nil, statusError(err)
 	}
-	return listerAt(entries), nil
+	var list listerAt
+	for _, e := range entries {
+		if virtual, ok := decodeName(e.Name()); ok {
+			list = append(list, namedInfo{FileInfo: e, name: virtual})
+		}
+	}
+	return list, nil
 }
+
+// namedInfo is a FileInfo under another name.
+type namedInfo struct {
+	os.FileInfo
+	name string
+}
+
+func (i namedInfo) Name() string { return i.name }
 
 // permissions converts SFTP permission bits into a file mode. The setuid,
 // setgid and sticky bits are dropped, so a client cannot leave a setuid

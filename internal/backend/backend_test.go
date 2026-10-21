@@ -7,11 +7,13 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +100,99 @@ func TestPathsStayInsideTheRoot(t *testing.T) {
 		t.Fatal("OpenFile followed a symlink out of the root")
 	}
 	assertFile(t, outside, "outside the root")
+}
+
+func TestNamesAreStoredEncoded(t *testing.T) {
+	dir, e := newBackend(t)
+	c := newClient(t, e, "/")
+	mkdirRemote(t, c, "/Incoming")
+	stored := map[string]string{
+		"Orders 2026.CSV": "^orders%202026.^c^s^v",
+		"café.csv":        "caf%c3%a9.csv",
+		"con.txt":         "%63on.txt",
+		"orders.csv.":     "orders.csv%2e",
+		"orders.csv":      "orders.csv",
+	}
+	for name, host := range stored {
+		writeRemote(t, c, "/Incoming/"+name, name)
+		assertFile(t, filepath.Join(dir, "^incoming", host), name)
+	}
+
+	entries, err := c.ReadDir("/Incoming")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var listed []string
+	for _, entry := range entries {
+		listed = append(listed, entry.Name())
+	}
+	if want := slices.Sorted(maps.Keys(stored)); !slices.Equal(slices.Sorted(slices.Values(listed)), want) {
+		t.Errorf("listed %q, want %q", listed, want)
+	}
+	if size, _, err := e.Digest("/Incoming/Orders 2026.CSV"); err != nil || size != int64(len("Orders 2026.CSV")) {
+		t.Errorf("Digest = %d, %v; want the size of the file stored under its encoded name", size, err)
+	}
+	if err := e.MkdirAll("/Partner-B/In"); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "^partner-^b", "^in")); err != nil || !info.IsDir() {
+		t.Errorf("MkdirAll did not encode the directories' names: %v", err)
+	}
+}
+
+func TestNamesThatDifferOnlyInCaseAreDifferentFiles(t *testing.T) {
+	_, e := newBackend(t)
+	c := newClient(t, e, "/")
+	writeRemote(t, c, "/orders.csv", "lower")
+	writeRemote(t, c, "/Orders.csv", "capital")
+	f, err := c.OpenFile("/ORDERS.CSV", os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+	if err != nil {
+		t.Fatalf("exclusive create of a third spelling: %v", err)
+	}
+	f.Close()
+
+	if err := c.Rename("/Orders.csv", "/OrderS.csv"); err != nil {
+		t.Fatalf("rename that changes only case: %v", err)
+	}
+	for name, want := range map[string]string{"/orders.csv": "lower", "/OrderS.csv": "capital", "/ORDERS.CSV": ""} {
+		f, err := c.Open(name)
+		if err != nil {
+			t.Fatalf("Open %s: %v", name, err)
+		}
+		got, err := io.ReadAll(f)
+		f.Close()
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := c.Stat("/Orders.csv"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat of the renamed file = %v, want it gone", err)
+	}
+}
+
+func TestListingsLeaveOutNamesSftpitCannotHaveWritten(t *testing.T) {
+	dir, e := newBackend(t)
+	for _, name := range []string{"plain.txt", "Notes.txt", "%61", "con"} {
+		writeHostFile(t, filepath.Join(dir, name), "copied in by hand")
+	}
+	entries, err := newClient(t, e, "/").ReadDir("/")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "plain.txt" {
+		t.Errorf("listed %v, want only plain.txt, whose name is its own encoding", entries)
+	}
+}
+
+func TestNamesTooLongToStoreAreABadMessage(t *testing.T) {
+	_, e := newBackend(t)
+	c := newClient(t, e, "/")
+	// A host name holds at most 255 bytes, and a capital takes two of them.
+	writeRemote(t, c, "/"+strings.Repeat("A", 127), "fits")
+	tooLong := "/" + strings.Repeat("A", 128)
+	_, err := c.Create(tooLong)
+	assertStatus(t, err, sftpwire.StatusBadMessage)
+	assertStatus(t, c.Mkdir(tooLong), sftpwire.StatusBadMessage)
 }
 
 func TestStandardRenameRefusesAnExistingTarget(t *testing.T) {
