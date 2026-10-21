@@ -16,7 +16,9 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
-const phpseclibDir = "phpseclib"
+// phpDir holds the PHP clients: phpseclib, and Laravel's filesystem on top
+// of it.
+const phpDir = "php"
 
 func TestPhpseclibTransparency(t *testing.T) {
 	php := phpseclibOrSkip(t)
@@ -68,8 +70,8 @@ func phpseclibOrSkip(t *testing.T) string {
 	if err != nil {
 		t.Skip("php not installed")
 	}
-	if _, err := os.Stat(filepath.Join(phpseclibDir, "vendor", "autoload.php")); err != nil {
-		t.Skipf("phpseclib not installed; run composer install in test/integration/%s", phpseclibDir)
+	if _, err := os.Stat(filepath.Join(phpDir, "vendor", "autoload.php")); err != nil {
+		t.Skip("the PHP clients are not installed; run make integration-deps")
 	}
 	return php
 }
@@ -87,7 +89,7 @@ func runPhpseclib(t *testing.T, php string, srv *server, script, work string, ar
 
 	ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, php, append([]string{filepath.Join(phpseclibDir, script),
+	cmd := exec.CommandContext(ctx, php, append([]string{filepath.Join(phpDir, script),
 		"127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

@@ -34,4 +34,4 @@ linux-check:
 		sftpit-linux-check make check
 
 integration-deps:
-	composer install --working-dir=test/integration/phpseclib
+	composer install --working-dir=test/integration/php

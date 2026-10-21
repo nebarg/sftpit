@@ -2,7 +2,7 @@
 /dist/
 /sandbox-data/
 /work/
-/test/integration/phpseclib/vendor/
+/test/integration/php/vendor/
 
 .env
 .env.*

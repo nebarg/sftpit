@@ -106,13 +106,13 @@ make check
 
 `make check` runs the gofmt check, a check that `go.mod` is tidy, `go vet`, staticcheck and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
 
-The integration tests in `test/integration` drive the OpenSSH `sftp` client and phpseclib against sftpit, and are skipped when a client is missing. The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there. phpseclib needs PHP 8.1 or later and Composer:
+The integration tests in `test/integration` drive the OpenSSH `sftp` client, phpseclib, and a Laravel application that publishes through Laravel's filesystem against sftpit, and are skipped when a client is missing. The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there. The PHP clients need PHP 8.3 or later and Composer:
 
 ```bash
 make integration-deps
 ```
 
-`make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the phpseclib that `make integration-deps` installed.
+`make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the PHP clients that `make integration-deps` installed.
 
 ## License
 

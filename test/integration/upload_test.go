@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
@@ -37,12 +38,15 @@ var uploadClients = []struct {
 		name:         "phpseclib",
 		failedUpload: failedPhpseclibUpload,
 		transfer:     transferWithPhpseclib,
-		// phpseclib takes the reply to its first WRITE for its CLOSE's, so
-		// it disconnects without waiting for its CLOSE to be answered. The
-		// session can end before then, and the end closes the handle.
-		closedBy: []string{"client", `"session end"`},
+		closedBy:     phpseclibClosedBy,
 	},
 }
+
+// phpseclibClosedBy holds how a snapshot may say phpseclib closed a handle
+// whose upload failed. phpseclib takes the reply to its first WRITE for its
+// CLOSE's, so it disconnects without waiting for its CLOSE to be answered.
+// The session can end before then, and the end closes the handle.
+var phpseclibClosedBy = []string{"client", `"session end"`}
 
 // TestPartialUploadsKeepTheBytesBelowTheCutoff cuts off each client's
 // pipelined upload, in both reply orders, and checks that exactly the bytes
@@ -118,7 +122,7 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 					if err != nil || !bytes.Equal(got, data[:uploadCutoff]) {
 						t.Errorf("stored %d bytes (%v), want the first %d bytes of the upload", len(got), err, uploadCutoff)
 					}
-					logs.assertSnapshot(t, srv, data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
+					logs.assertSnapshot(t, srv, "/orders.csv", data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
 				})
 			}
 		}
@@ -161,7 +165,7 @@ func TestRetryLeavesThePartialUploadsSnapshot(t *testing.T) {
 				if err != nil || !bytes.Equal(got, data) {
 					t.Errorf("stored %d bytes (%v) after the retry, want the whole upload", len(got), err)
 				}
-				logs.assertSnapshot(t, srv, data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
+				logs.assertSnapshot(t, srv, "/orders.csv", data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
 			})
 		}
 	}
@@ -224,31 +228,34 @@ func (l *snapshotLog) logger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(l, nil))
 }
 
-// assertSnapshot checks that srv has logged one snapshot: of /orders.csv
-// holding data, closed as one of closedBy says, with a copy of data in the
-// run's snapshots directory.
-func (l *snapshotLog) assertSnapshot(t *testing.T, srv *server, data []byte, closedBy ...string) {
-	t.Helper()
+func (l *snapshotLog) text() string {
 	l.mu.Lock()
-	logs := l.buf.String()
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
 
+// assertSnapshot checks that srv has logged one snapshot: of the file at the
+// virtual path name holding data, closed as one of closedBy says, with a copy
+// of data in the run's snapshots directory.
+func (l *snapshotLog) assertSnapshot(t *testing.T, srv *server, name string, data []byte, closedBy ...string) {
+	t.Helper()
 	var got []string
-	for line := range strings.Lines(logs) {
+	for line := range strings.Lines(l.text()) {
 		if strings.Contains(line, "msg=snapshot") {
 			// Leave out the time.
 			_, rest, _ := strings.Cut(strings.TrimSpace(line), " ")
 			got = append(got, rest)
 		}
 	}
+	stored := backend.StoredName(name)
 	var want []string
 	for _, by := range closedBy {
-		want = append(want, fmt.Sprintf("level=INFO msg=snapshot path=/orders.csv closed_by=%s size=%d sha256=%s copy=snapshots/1/orders.csv", by, len(data), digest(data)))
+		want = append(want, fmt.Sprintf("level=INFO msg=snapshot path=%s closed_by=%s size=%d sha256=%s copy=snapshots/1/%s", name, by, len(data), digest(data), stored))
 	}
 	if len(got) != 1 || !slices.Contains(want, got[0]) {
 		t.Errorf("snapshots logged:\n%s\nwant one of:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	copied, err := os.ReadFile(filepath.Join(srv.run.Dir, "snapshots", "1", "orders.csv"))
+	copied, err := os.ReadFile(filepath.Join(srv.run.Dir, "snapshots", "1", filepath.FromSlash(stored)))
 	if err != nil || !bytes.Equal(copied, data) {
 		t.Errorf("the snapshot's copy has %d bytes (%v), want the %d snapshotted", len(copied), err, len(data))
 	}
