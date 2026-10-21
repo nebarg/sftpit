@@ -2,6 +2,7 @@ package sftpproxy_test
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -100,6 +101,46 @@ func TestPartialUploadAppliesOnlyToItsHandle(t *testing.T) {
 		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 		p.client.assertStatus(t, 3, sftpwire.StatusOK, "Success")
 	})
+}
+
+func TestPartialUploadIsReservedWhereItFirstCuts(t *testing.T) {
+	for _, reserved := range []bool{true, false} {
+		t.Run(fmt.Sprintf("reserved %v", reserved), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var calls int
+				p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: inSequence(sftpproxy.PartialUpload{
+					Cutoff:  cutoff,
+					Result:  sftpproxy.Fail{Status: sftpwire.StatusFailure},
+					Reserve: func() bool { calls++; return reserved },
+				})})
+				openForUpload(t, p, fb, "h")
+
+				p.client.send(t, 2, write("h", 0, cutoff))
+				fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
+				p.client.assertStatus(t, 2, sftpwire.StatusOK, "Success")
+				if calls != 0 {
+					t.Fatalf("Reserve called %d times before a write reached the cutoff", calls)
+				}
+				for id := uint32(3); id <= 4; id++ {
+					w := write("h", cutoff, 10)
+					p.client.send(t, id, w)
+					if reserved {
+						p.client.assertStatus(t, id, sftpwire.StatusFailure, "Failure")
+						continue
+					}
+					if got := fb.next(t); !equalReplies(got.packet, w) {
+						t.Fatalf("backend received %#v, want the whole write, which the declined cutoff leaves alone", got.packet)
+					} else {
+						fb.reply(t, got.id, status(sftpwire.StatusOK))
+					}
+					p.client.assertStatus(t, id, sftpwire.StatusOK, "Success")
+				}
+				if calls != 1 {
+					t.Errorf("Reserve called %d times, want once, at the first write to reach the cutoff", calls)
+				}
+			})
+		})
+	}
 }
 
 func TestPartialUploadDropsAtTheCutoff(t *testing.T) {

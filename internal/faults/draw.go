@@ -1,7 +1,9 @@
-// Package faults decides which faults to inject. Every random decision is
-// drawn from the run's seed and the decision's own key, so a pinned seed
-// gives the same decisions on every run of the same workload, whatever the
-// timing, and no request can change the draw of another.
+// Package faults decides which faults to inject. An Engine applies a
+// scenario's rules to each request, choosing the sftpproxy action of the
+// first rule that selects it. Every random decision is drawn from the run's
+// seed and the decision's own key, so a pinned seed gives the same decisions
+// on every run of the same workload, whatever the timing, and no request can
+// change the draw of another.
 package faults
 
 import (

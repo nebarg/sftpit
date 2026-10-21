@@ -55,6 +55,10 @@ type request struct {
 	// EOF itself.
 	eof bool
 
+	// flip is set for a read whose reply the corruption on its handle
+	// flips bytes in.
+	flip bool
+
 	// split is set for a READ that crosses an omitted range, and for the
 	// second backend read it becomes.
 	split *split

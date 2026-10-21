@@ -274,6 +274,55 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 	}
 }
 
+func TestCorruptDownloadIsReservedBeforeItsFirstChange(t *testing.T) {
+	data := make([]byte, 200)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	const at, length = 100, 50
+	for _, corruption := range []sftpproxy.Corruption{sftpproxy.Truncate, sftpproxy.OmitRange, sftpproxy.FlipBytes} {
+		for _, reserved := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%v/reserved %v", corruption, reserved), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var calls int
+					p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: inSequence(sftpproxy.CorruptDownload{
+						Corruption: corruption,
+						Offset:     at,
+						Length:     length,
+						Reserve:    func() bool { calls++; return reserved },
+					})})
+					openForDownload(t, p, fb, "h")
+
+					for i, r := range []read{{0, 50}, {90, 20}, {110, 20}} {
+						id := uint32(i + 2)
+						p.client.send(t, id, &sftpwire.Read{Handle: "h", Offset: r.offset, Length: r.length})
+						synctest.Wait()
+						if want := min(i, 1); calls != want {
+							t.Fatalf("Reserve called %d times after %d reads, want %d", calls, i+1, want)
+						}
+						if reserved {
+							// Other tests check what the corruption serves.
+							continue
+						}
+						req := fb.next(t)
+						if got := req.packet.(*sftpwire.Read); got.Offset != r.offset || got.Length != r.length {
+							t.Fatalf("backend received %#v, want the read the declined corruption leaves alone", got)
+						}
+						fb.reply(t, req.id, &sftpwire.DataReply{Data: data[r.offset : r.offset+uint64(r.length)]})
+						_, reply := p.client.receiveReply(t)
+						if want := (&sftpwire.DataReply{Data: data[r.offset : r.offset+uint64(r.length)]}); !equalReplies(reply, want) {
+							t.Fatalf("read at %d = %s, want the file as it is", r.offset, describe(reply))
+						}
+					}
+					if calls != 1 {
+						t.Errorf("Reserve called %d times, want once, at the first read the corruption changes", calls)
+					}
+				})
+			})
+		}
+	}
+}
+
 func TestSplitReadJoinsWhatTheBackendReturns(t *testing.T) {
 	// A read of 20 at 90 crosses an omitted range of 50 at 100, so it reaches
 	// the backend as a read of 10 at 90 and one of 10 at 150.

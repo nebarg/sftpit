@@ -62,7 +62,7 @@ func BenchmarkTransfer(b *testing.B) {
 // transferWithPkgSFTP uploads work/bench.bin to /bench.bin, or downloads it
 // back, with pkg/sftp's client and its concurrent requests.
 func transferWithPkgSFTP(b *testing.B, srv *server, work string, upload bool) {
-	c := pkgSFTPClient(b, srv)
+	c := pkgSFTPClient(b, srv, ssh.Password(testPassword))
 	defer c.Close()
 	if upload {
 		local, err := os.Open(filepath.Join(work, "bench.bin"))
@@ -93,13 +93,13 @@ func transferWithPkgSFTP(b *testing.B, srv *server, work string, upload bool) {
 	}
 }
 
-// pkgSFTPClient logs in to srv over SSH with pkg/sftp's client. Closing
-// the client closes the connection too.
-func pkgSFTPClient(b *testing.B, srv *server) *sshSFTPClient {
-	b.Helper()
+// pkgSFTPClient logs in to srv over SSH with pkg/sftp's client, using auth.
+// Closing the client closes the connection too.
+func pkgSFTPClient(tb testing.TB, srv *server, auth ssh.AuthMethod) *sshSFTPClient {
+	tb.Helper()
 	conn, err := ssh.Dial("tcp", srv.addr, &ssh.ClientConfig{
 		User: testUser,
-		Auth: []ssh.AuthMethod{ssh.Password(testPassword)},
+		Auth: []ssh.AuthMethod{auth},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			for _, k := range hostKeys {
 				if bytes.Equal(k.PublicKey().Marshal(), key.Marshal()) {
@@ -110,12 +110,12 @@ func pkgSFTPClient(b *testing.B, srv *server) *sshSFTPClient {
 		},
 	})
 	if err != nil {
-		b.Fatalf("ssh.Dial: %v", err)
+		tb.Fatalf("ssh.Dial: %v", err)
 	}
 	c, err := sftp.NewClient(conn, sftp.UseConcurrentWrites(true))
 	if err != nil {
 		conn.Close()
-		b.Fatalf("sftp.NewClient: %v", err)
+		tb.Fatalf("sftp.NewClient: %v", err)
 	}
 	return &sshSFTPClient{Client: c, conn: conn}
 }

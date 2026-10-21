@@ -89,6 +89,57 @@ users:
 	}
 }
 
+func TestServeInjectsTheSelectedScenariosFaults(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeTestFile(t, config, `schema_version: 1
+scenarios:
+  deny-ack:
+    faults:
+      - id: deny-remove
+        match: {user: test, operation: remove, path_glob: "/outgoing/*.csv"}
+        action: {type: fail, when: before, status: permission_denied}
+`)
+	for _, scenario := range []string{"deny-ack", ""} {
+		args := []string{"--config", config, "--sftp-listen", "127.0.0.1:0"}
+		if scenario != "" {
+			args = append(args, "--scenario", scenario)
+		}
+		s := startServe(t, args...)
+		c := s.dial(t, "test", "test")
+		if err := c.Mkdir("/outgoing"); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		f, err := c.Create("/outgoing/orders.csv")
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		f.Close()
+
+		err = c.Remove("/outgoing/orders.csv")
+		_, statErr := os.Stat(filepath.Join(s.files(), "outgoing", "orders.csv"))
+		c.Close()
+		s.stop(t)
+		if scenario == "" {
+			if err != nil || statErr == nil {
+				t.Errorf("without a scenario, Remove = %v and the file is still there (%v), want it removed", err, statErr)
+			}
+			if strings.Contains(s.stdout.String(), "scenario:") || strings.Contains(s.stderr.String(), "rule") {
+				t.Errorf("without a scenario, sftpit reported one:\n%s%s", s.stdout.String(), s.stderr.String())
+			}
+			continue
+		}
+		if !errors.Is(err, fs.ErrPermission) || statErr != nil {
+			t.Errorf("Remove = %v and the file is gone (%v), want permission denied and the file kept", err, statErr)
+		}
+		if out := s.stdout.String(); !strings.Contains(out, "scenario: deny-ack (1 fault rule)") {
+			t.Errorf("banner does not name the scenario:\n%s", out)
+		}
+		if logs := s.stderr.String(); !strings.Contains(logs, `msg="rule fired" rule=deny-remove request=remove path=/outgoing/orders.csv user=test ordinal=1`) {
+			t.Errorf("stderr does not log the rule firing:\n%s", logs)
+		}
+	}
+}
+
 func TestServeKeepsADataDirectory(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "sandbox-data")
 
@@ -239,6 +290,7 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		{"stray argument", []string{"extra"}, `unexpected arguments ["extra"]`},
 		{"missing config", []string{"--config", "missing.yaml"}, "missing.yaml"},
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
+		{"undefined scenario", []string{"--scenario", "upload-recovery"}, `scenario "upload-recovery" is not defined`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

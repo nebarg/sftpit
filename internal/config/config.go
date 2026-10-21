@@ -29,6 +29,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
@@ -77,6 +78,13 @@ type Config struct {
 	// because no users were configured.
 	DefaultCredentials bool
 
+	// Scenario names the scenario whose rules inject faults, or is "" for
+	// none.
+	Scenario string
+
+	// Rules are the scenario's fault rules.
+	Rules []faults.Rule
+
 	// Warnings describe problems that do not prevent sftpit from starting.
 	Warnings []string
 }
@@ -96,6 +104,10 @@ type Options struct {
 	// DataDir overrides the configured workspace directory when non-empty.
 	DataDir string
 
+	// Scenario names the scenario whose faults to inject, or is "" for no
+	// faults.
+	Scenario string
+
 	// EnvFiles are read after the configuration's env files, so their
 	// values override those.
 	EnvFiles []string
@@ -110,6 +122,8 @@ type fileConfig struct {
 	Server        serverConfig  `yaml:"server"`
 	Storage       storageConfig `yaml:"storage"`
 	Users         []userConfig  `yaml:"users"`
+
+	Scenarios map[string]scenarioConfig `yaml:"scenarios"`
 }
 
 type storageConfig struct {
@@ -234,7 +248,6 @@ func Load(opts Options) (*Config, error) {
 	if len(f.Users) == 0 {
 		cfg.Users = []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}
 		cfg.DefaultCredentials = true
-		return cfg, nil
 	}
 	for i, u := range f.Users {
 		user, err := u.resolve(dir, secrets)
@@ -243,6 +256,12 @@ func Load(opts Options) (*Config, error) {
 		}
 		cfg.Users = append(cfg.Users, user)
 	}
+
+	cfg.Rules, err = scenarios(f.Scenarios, opts.Scenario, cfg.Users)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Scenario = opts.Scenario
 	return cfg, nil
 }
 

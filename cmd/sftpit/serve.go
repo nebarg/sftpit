@@ -16,6 +16,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -28,7 +29,9 @@ temporary workspace that is deleted when sftpit stops, unless --data-dir
 names one to keep.
 
 Flags:
-  --config FILE        read settings and users from FILE
+  --config FILE        read settings, users and scenarios from FILE
+  --scenario NAME      inject the faults of the scenario NAME in the
+                       config; without it, no faults are injected
   --sftp-listen ADDR   listen on ADDR instead of the configured address
                        (default 127.0.0.1:2122; port 0 picks a free port)
   --seed-dir DIR       copy the files under DIR into the workspace at startup
@@ -46,6 +49,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&opts.SFTPListen, "sftp-listen", "", "")
 	flags.StringVar(&opts.SeedDir, "seed-dir", "", "")
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
+	flags.StringVar(&opts.Scenario, "scenario", "", "")
 	flags.Func("env-file", "", func(name string) error {
 		opts.EnvFiles = append(opts.EnvFiles, name)
 		return nil
@@ -136,10 +140,16 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 		}
 	}
 
+	var rules *faults.Engine
+	if cfg.Scenario != "" {
+		if rules, err = faults.New(cfg.Rules, logger); err != nil {
+			return err
+		}
+	}
 	srv, err := sshfront.New(sshfront.Config{
 		HostKeys: hostKeys,
 		Users:    cfg.Users,
-		Handler:  runs.Handler(run, embedded, sftpproxy.Options{Logger: logger}),
+		Handler:  runs.Handler(run, embedded, rules, sftpproxy.Options{Logger: logger}),
 		Logger:   logger,
 	})
 	if err != nil {
@@ -210,6 +220,13 @@ func printBanner(w io.Writer, addr string, workspace *runs.Workspace, run *runs.
 		fmt.Fprintf(w, "  workspace: %s (kept, with its last five runs)\n", workspace.Dir())
 	}
 	fmt.Fprintf(w, "  run: %s\n", run.ID)
+	if cfg.Scenario != "" {
+		rules := "rules"
+		if len(cfg.Rules) == 1 {
+			rules = "rule"
+		}
+		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", cfg.Scenario, len(cfg.Rules), rules)
+	}
 	if cfg.SeedDir != "" {
 		fmt.Fprintf(w, "  seeded from: %s\n", cfg.SeedDir)
 	}

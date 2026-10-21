@@ -117,6 +117,11 @@ type Freeze struct {
 type PartialUpload struct {
 	Cutoff uint64
 	Result Action
+
+	// Reserve, if set, is called when a write on the handle first reaches
+	// Cutoff, before anything is cut. If it returns false, the handle
+	// carries on as if no PartialUpload had been chosen for it.
+	Reserve func() bool
 }
 
 // CorruptDownload, chosen for an OPEN, corrupts what reads through the
@@ -130,6 +135,11 @@ type CorruptDownload struct {
 
 	// Length is how many bytes OmitRange or FlipBytes acts on.
 	Length uint64
+
+	// Reserve, if set, is called when the corruption would first change a
+	// read on the handle, before it does. If it returns false, the handle
+	// carries on as if no CorruptDownload had been chosen for it.
+	Reserve func() bool
 }
 
 // Corruption is what a CorruptDownload does to a file's reads.

@@ -36,7 +36,7 @@ func TestOpenSSHStopsAtStorageLimits(t *testing.T) {
 	transcripts := make(map[route][]line)
 	trees := make(map[route][]treeEntry)
 	for _, via := range routes {
-		srv := startLimitedServer(t, via, sftpproxy.Options{}, limits)
+		srv := startLimitedServer(t, via, nil, sftpproxy.Options{}, limits)
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "big.bin"), big)
 		writeFile(t, filepath.Join(work, "part.bin"), part)

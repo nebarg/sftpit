@@ -2,7 +2,7 @@
 
 Mailpit for SFTP: a local SFTP server for developing and testing file integrations, with faults you can inject on demand — slow responses, dropped connections, random failures and simulated corruption.
 
-**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server with no faults yet.
+**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration.
 
 ## Quickstart
 
@@ -81,6 +81,59 @@ sftpit never reads a `.env` it was not told about. It never copies env-file valu
 - LF or CRLF line endings.
 
 Expansion such as `${OTHER}`, escapes and multi-line values are rejected for referenced variables. Keep env files out of version control.
+
+## Faults
+
+A scenario in the configuration lists fault rules, and `--scenario` chooses the one a run injects. Without it, sftpit injects nothing. Every scenario is checked at startup, whichever one is chosen.
+
+```yaml
+scenarios:
+  upload-recovery:
+    faults:
+      - id: "first-upload-cutoff"
+        match:
+          operation: "write"
+          path: "/incoming/orders.csv.part"
+          attempt:
+            numbers: [1] # the first open for writing, counted per user and path
+        action:
+          type: "partial_upload"
+          cutoff_offset: 1048576
+          result: "status"
+          status: "failure"
+      - id: "lost-publish-reply"
+        max_triggers: 1
+        match:
+          operation: "rename"
+          source: "/incoming/orders.csv.part"
+          target: "/incoming/orders.csv"
+        action:
+          type: "drop"
+          when: "after" # the rename happens, and its reply is lost
+          mode: "fin"
+```
+
+```bash
+sftpit serve --config ./sftpit.yaml --scenario upload-recovery
+```
+
+A rule matches requests by:
+- `operation`, one or a list of: `open_read`, `open_write`, `read`, `write`, `close`, `stat`, `lstat`, `fstat`, `list`, `mkdir`, `rmdir`, `remove`, `rename` (standard and posix), `setstat`, `realpath`, `statvfs`, or `any`;
+- optionally `user`, and `key_fingerprint` for a client that logs in with a key, as ssh-keygen prints it;
+- optionally one of `path`, `path_prefix` (a directory and everything beneath it), `path_glob` (where `*` stays within one directory), `filename` and `filename_glob` (the last segment, in any directory). A rename spells them `source`, `source_prefix` and so on, and matches its destination with the `target` forms. Paths are matched case-sensitively, as clients see them.
+
+Of the requests it matches, a rule selects those whose `attempt` (the open of a transfer's file, counting each user and path separately unless `per` says otherwise) or `occurrence` (the matching request, counting from 1) is listed, or all of them. Rules are tried in order of `priority`, lowest first, and then as listed. The first to select a request applies, but every rule that matches a request counts it. `max_triggers` limits how often a rule takes effect.
+
+| Action | Effect | Fields |
+|---|---|---|
+| `delay` | Holds the request before the server acts, or its reply after | `when`, `duration` |
+| `fail` | Answers with `status`. After, the server has acted although the client is told otherwise | `when`, `status` |
+| `drop` | Closes the connection where the reply would be, with a FIN or an RST, or freezes it for at most `max_freeze` | `when`, `mode`, `max_freeze` |
+| `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
+| `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
+| `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
+
+A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault, and keeps the file that each faulted upload leaves behind, logging its size and SHA-256 when its handle closes.
 
 ## Behavior
 

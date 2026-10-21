@@ -13,8 +13,9 @@ import (
 type download struct {
 	CorruptDownload
 
-	// corrupted is set once the corruption has changed a read on the handle.
-	corrupted bool
+	// corrupted is set once the corruption has changed a read on the handle,
+	// and declined if Reserve refused the first change.
+	corrupted, declined bool
 }
 
 // split is a READ that crosses an omitted range, which reaches the backend
@@ -33,20 +34,28 @@ type split struct {
 // logged as a fault; the reads it changes after that are its effects.
 func (s *session) corrupt(req *request) bool {
 	r, ok := req.packet.(*sftpwire.Read)
-	if !ok || req.download == nil {
+	if !ok || req.download == nil || req.download.declined {
 		return false
 	}
 	d := req.download
+	if !d.changes(r) {
+		return false
+	}
+	level := slog.LevelDebug
+	if !d.corrupted {
+		d.corrupted, level = true, slog.LevelInfo
+		if d.Reserve != nil && !d.Reserve() {
+			d.declined = true
+			return false
+		}
+	}
 	offset := r.Offset
 	switch d.Corruption {
 	case Truncate:
-		switch {
-		case r.Offset >= d.Offset:
+		if r.Offset >= d.Offset {
 			req.eof = true
-		case uint64(r.Length) > d.Offset-r.Offset:
+		} else {
 			r.Length = uint32(d.Offset - r.Offset)
-		default:
-			return false
 		}
 	case OmitRange:
 		switch {
@@ -55,7 +64,7 @@ func (s *session) corrupt(req *request) bool {
 			req.eof = true
 		case r.Offset >= d.Offset:
 			r.Offset += d.Length
-		case uint64(r.Length) > d.Offset-r.Offset:
+		default:
 			before := uint32(d.Offset - r.Offset)
 			rest := &request{
 				clientID: req.clientID,
@@ -66,18 +75,9 @@ func (s *session) corrupt(req *request) bool {
 			r.Length = before
 			req.split = &split{whole: req, rest: rest}
 			rest.split = req.split
-		default:
-			return false
 		}
 	case FlipBytes:
-		if r.Offset >= d.Offset+d.Length || r.Offset < d.Offset && uint64(r.Length) <= d.Offset-r.Offset {
-			return false
-		}
-	}
-
-	level := slog.LevelDebug
-	if !d.corrupted {
-		d.corrupted, level = true, slog.LevelInfo
+		req.flip = true
 	}
 	attrs := []any{"request", operation(r), "path", req.path, "fault", "corrupt_download", "corruption", d.Corruption, "at", d.Offset}
 	if d.Corruption != Truncate {
@@ -85,6 +85,17 @@ func (s *session) corrupt(req *request) bool {
 	}
 	s.logger.Log(context.Background(), level, "injected fault", append(attrs, "offset", offset)...)
 	return true
+}
+
+// changes reports whether the corruption changes what r returns. Truncate
+// and OmitRange change every read that reaches Offset, and FlipBytes every
+// read that overlaps the flipped bytes.
+func (d *download) changes(r *sftpwire.Read) bool {
+	reaches := r.Offset >= d.Offset || uint64(r.Length) > d.Offset-r.Offset
+	if d.Corruption == FlipBytes {
+		return reaches && r.Offset < d.Offset+d.Length
+	}
+	return reaches
 }
 
 // joinReads returns the request that req, answered by the backend with p,
@@ -127,7 +138,7 @@ func (sp *split) joined() sftpwire.Packet {
 func flipBytes(req *request, p sftpwire.Packet) {
 	d := req.download
 	data, ok := p.(*sftpwire.DataReply)
-	if d == nil || d.Corruption != FlipBytes || !ok {
+	if !req.flip || !ok {
 		return
 	}
 	offset := req.packet.(*sftpwire.Read).Offset

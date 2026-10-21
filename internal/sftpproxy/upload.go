@@ -12,8 +12,9 @@ import (
 type upload struct {
 	PartialUpload
 
-	// reached is set once a write on the handle has reached the cutoff.
-	reached bool
+	// reached is set once a write on the handle has reached the cutoff, and
+	// declined if Reserve then refused the cutoff.
+	reached, declined bool
 }
 
 // cut applies the cutoff on req's handle if req is a write that reaches it,
@@ -21,25 +22,27 @@ type upload struct {
 // logged as a fault; the writes it cuts off after that are its effects.
 func (s *session) cut(req *request) bool {
 	w, ok := req.packet.(*sftpwire.Write)
-	if !ok || req.upload == nil {
+	if !ok || req.upload == nil || req.upload.declined {
 		return false
 	}
 	u := req.upload
-	when := Before
-	switch {
-	case w.Offset >= u.Cutoff:
-	case uint64(len(w.Data)) > u.Cutoff-w.Offset:
-		w.Data = w.Data[:u.Cutoff-w.Offset]
-		when = After
-	default:
+	if w.Offset < u.Cutoff && uint64(len(w.Data)) <= u.Cutoff-w.Offset {
 		return false
 	}
-	req.action, req.cut = withWhen(u.Result, when), true
-
 	level := slog.LevelDebug
 	if !u.reached {
 		u.reached, level = true, slog.LevelInfo
+		if u.Reserve != nil && !u.Reserve() {
+			u.declined = true
+			return false
+		}
 	}
+	when := Before
+	if w.Offset < u.Cutoff {
+		w.Data = w.Data[:u.Cutoff-w.Offset]
+		when = After
+	}
+	req.action, req.cut = withWhen(u.Result, when), true
 	s.logger.Log(context.Background(), level, "injected fault", s.faultAttrs(req)...)
 	return true
 }

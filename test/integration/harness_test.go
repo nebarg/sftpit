@@ -27,6 +27,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -100,11 +101,17 @@ var defaultLimits = backend.Limits{
 // with opts, logging nothing unless opts has a Logger.
 func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
 	t.Helper()
-	return startLimitedServer(t, via, opts, defaultLimits)
+	return startLimitedServer(t, via, nil, opts, defaultLimits)
+}
+
+// startServerWithRules starts a proxied server whose faults come from rules.
+func startServerWithRules(t testing.TB, rules *faults.Engine, opts sftpproxy.Options) *server {
+	t.Helper()
+	return startLimitedServer(t, proxied, rules, opts, defaultLimits)
 }
 
 // startLimitedServer is startServer with limits on the run's files.
-func startLimitedServer(t testing.TB, via route, opts sftpproxy.Options, limits backend.Limits) *server {
+func startLimitedServer(t testing.TB, via route, rules *faults.Engine, opts sftpproxy.Options, limits backend.Limits) *server {
 	t.Helper()
 	workspace, err := runs.OpenWorkspace(t.TempDir())
 	if err != nil {
@@ -133,7 +140,7 @@ func startLimitedServer(t testing.TB, via route, opts sftpproxy.Options, limits 
 		if opts.Logger == nil {
 			opts.Logger = logger
 		}
-		handler = runs.Handler(run, embedded, opts)
+		handler = runs.Handler(run, embedded, rules, opts)
 	}
 	s := &server{files: run.Files, run: run}
 	serveSession := handler

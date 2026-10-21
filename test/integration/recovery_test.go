@@ -8,12 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
@@ -157,6 +160,71 @@ func TestLaravelUploadRecovery(t *testing.T) {
 			}
 			logs.assertSnapshot(t, srv, temporaryPath, partial, snapshotClosedBy(phpseclibClosedBy, result)...)
 		})
+	}
+}
+
+// TestLaravelUploadRecoveryFromAScenario injects the first upload's cutoff
+// from a scenario in the configuration, as sftpit serve --scenario does, and
+// checks that the recovering uploader publishes the whole file and that the
+// rule took effect once.
+func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
+	php := phpseclibOrSkip(t)
+
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "sftpit.yaml")
+	writeFile(t, configFile, []byte(`schema_version: 1
+users:
+  - name: `+testUser+`
+    password_env: TEST_PASSWORD
+scenarios:
+  upload-recovery:
+    faults:
+      - id: first-upload-cutoff
+        match:
+          user: `+testUser+`
+          operation: write
+          path: `+temporaryPath+`
+          attempt:
+            per: [user, path]
+            numbers: [1]
+        action:
+          type: partial_upload
+          cutoff_offset: `+strconv.Itoa(uploadCutoff)+`
+          result: status
+          status: failure
+`))
+	cfg, err := config.Load(config.Options{
+		ConfigFile: configFile,
+		Scenario:   "upload-recovery",
+		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var logs snapshotLog
+	rules, err := faults.New(cfg.Rules, logs.logger())
+	if err != nil {
+		t.Fatalf("faults.New: %v", err)
+	}
+	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	work := t.TempDir()
+	data := randomBytes(4<<20 + 321)
+	writeFile(t, filepath.Join(work, "orders.csv"), data)
+
+	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	srv.waitForSessions()
+
+	if want := map[string]any{"upload 1": false, "upload 2": true, "move": true}; !maps.Equal(outcomes, want) {
+		t.Errorf("publish.php gave %v, want %v", outcomes, want)
+	}
+	assertHolds(t, srv, publishedPath, data)
+	assertHolds(t, srv, temporaryPath, nil)
+	logs.assertSnapshot(t, srv, temporaryPath, data[:uploadCutoff], phpseclibClosedBy...)
+	if got, want := rules.Counts()["first-upload-cutoff"], (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
+		t.Errorf("counts = %+v, want both opens matched and the first cut off", got)
+	}
+	if fired := `msg="rule fired" rule=first-upload-cutoff request=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1`; !strings.Contains(logs.text(), fired) {
+		t.Errorf("logs lack %s:\n%s", fired, logs.text())
 	}
 }
 

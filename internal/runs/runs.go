@@ -12,6 +12,7 @@ import (
 	"log/slog"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
@@ -20,9 +21,11 @@ import (
 // through sftpproxy to a new session on embedded, which serves the run's
 // files, starting in the user's home directory. Each session runs with opts
 // and its own connection as opts.Conn, so a Drop or Freeze acts on the
-// client that caused it. Snapshots hold back every session's changes to
-// their file, and keep copies in the run's snapshots directory.
-func Handler(run *Run, embedded *backend.Embedded, opts sftpproxy.Options) sshfront.Handler {
+// client that caused it. Its faults come from rules, for the user and key it
+// logged in with, or from opts.Faults if rules is nil. Snapshots hold back
+// every session's changes to their file, and keep copies in the run's
+// snapshots directory.
+func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sftpproxy.Options) sshfront.Handler {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -32,6 +35,9 @@ func Handler(run *Run, embedded *backend.Embedded, opts sftpproxy.Options) sshfr
 	return func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		opts := opts
 		opts.Conn = conn
+		if rules != nil {
+			opts.Faults = rules.Session(conn.User(), conn.KeyFingerprint())
+		}
 		return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), opts)
 	}
 }
