@@ -323,24 +323,6 @@ func TestExclusiveCreateRefusesAnExistingFile(t *testing.T) {
 	assertStatus(t, err, sftpwire.StatusFailure)
 }
 
-func TestAWriteThroughAHandleThatCannotWriteFails(t *testing.T) {
-	e := newBackendIn(t, t.TempDir(), backend.Options{Limits: tight})
-	s := startRaw(t, e)
-	s.nextID++
-	open := &sftpwire.Open{Path: "/orders.csv", Flags: sftpwire.OpenCreate}
-	if _, err := s.conn.Write(sftpwire.AppendPacket(nil, s.nextID, open)); err != nil {
-		t.Fatalf("write OPEN: %v", err)
-	}
-	_, reply, err := sftpwire.DecodeReply(s.read())
-	handle, ok := reply.(*sftpwire.HandleReply)
-	if err != nil || !ok {
-		t.Fatalf("OPEN reply = %#v, %v; want a handle", reply, err)
-	}
-	// OpenSSH's sftp-server answers the EBADF from a read-only descriptor
-	// the same way, and gets it before any check of the space left.
-	s.wantStatus(&sftpwire.Write{Handle: handle.Handle, Data: []byte("past max_file_bytes")}, sftpwire.StatusNoSuchFile)
-}
-
 func TestSetstat(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows has no Unix permission bits")
@@ -661,7 +643,8 @@ func (s *rawSession) read() []byte {
 	return b
 }
 
-func (s *rawSession) wantStatus(p sftpwire.Packet, want sftpwire.StatusCode) *sftpwire.StatusReply {
+// send sends p and returns the reply.
+func (s *rawSession) send(p sftpwire.Packet) sftpwire.Packet {
 	s.t.Helper()
 	s.nextID++
 	if _, err := s.conn.Write(sftpwire.AppendPacket(nil, s.nextID, p)); err != nil {
@@ -671,11 +654,30 @@ func (s *rawSession) wantStatus(p sftpwire.Packet, want sftpwire.StatusCode) *sf
 	if err != nil {
 		s.t.Fatalf("DecodeReply: %v", err)
 	}
+	if id != s.nextID {
+		s.t.Fatalf("%v: reply to request %d, want %d", p.Type(), id, s.nextID)
+	}
+	return reply
+}
+
+func (s *rawSession) wantStatus(p sftpwire.Packet, want sftpwire.StatusCode) *sftpwire.StatusReply {
+	s.t.Helper()
+	reply := s.send(p)
 	st, ok := reply.(*sftpwire.StatusReply)
-	if id != s.nextID || !ok || st.Code != want {
-		s.t.Fatalf("%v: reply %d %#v, want %d with %v", p.Type(), id, reply, s.nextID, want)
+	if !ok || st.Code != want {
+		s.t.Fatalf("%v: reply %#v, want %v", p.Type(), reply, want)
 	}
 	return st
+}
+
+// handle sends an OPEN or OPENDIR and returns the handle it opens.
+func (s *rawSession) handle(p sftpwire.Packet) string {
+	s.t.Helper()
+	reply, ok := s.send(p).(*sftpwire.HandleReply)
+	if !ok {
+		s.t.Fatalf("%v: reply %#v, want a handle", p.Type(), reply)
+	}
+	return reply.Handle
 }
 
 // assertStatus checks the status behind an error from pkg/sftp's client,

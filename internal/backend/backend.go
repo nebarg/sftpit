@@ -14,8 +14,6 @@
 package backend
 
 import (
-	"bufio"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -104,36 +102,6 @@ func (e *Embedded) Serve(rwc io.ReadWriteCloser, home string) error {
 	if isEndOfStream(err) {
 		return nil
 	}
-	return err
-}
-
-var errServerEnded = errors.New("backend: request server ended the session")
-
-// relayInOrder passes each request from client to server and waits for its
-// reply before passing the next. Every request gets exactly one reply.
-func relayInOrder(client, server io.ReadWriter) error {
-	fromClient, fromServer := bufio.NewReader(client), bufio.NewReader(server)
-	for {
-		request, err := sftpwire.ReadPacket(fromClient, maxPacketLength)
-		if err != nil {
-			return err
-		}
-		if err := writePacket(server, request); err != nil {
-			return errServerEnded
-		}
-		reply, err := sftpwire.ReadPacket(fromServer, maxPacketLength)
-		if err != nil {
-			return errServerEnded
-		}
-		if err := writePacket(client, reply); err != nil {
-			return err
-		}
-	}
-}
-
-func writePacket(w io.Writer, body []byte) error {
-	b := binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(body)), uint32(len(body)))
-	_, err := w.Write(append(b, body...))
 	return err
 }
 

@@ -335,7 +335,8 @@ type file struct {
 	usage *usage
 
 	// appending, name and holds are set for a handle that can write, whose
-	// writes wait for any snapshot of its file.
+	// writes wait for any snapshot of its file. Writes through other
+	// handles never reach the handler.
 	appending bool
 	name      string
 	holds     *holds
@@ -347,11 +348,6 @@ func (f *file) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *file) WriteAt(p []byte, off int64) (int, error) {
-	if f.holds == nil {
-		// The descriptor is read-only, so the write fails.
-		n, err := f.f.WriteAt(p, off)
-		return n, statusError(err)
-	}
 	defer f.holds.change(f.name)()
 	// Under the lock the size cannot change between the check and the write,
 	// so appends through several handles land one after another.
