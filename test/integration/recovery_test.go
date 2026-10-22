@@ -334,3 +334,58 @@ scenarios:
 		}
 	}
 }
+
+// TestLaravelReconnectsWhenItsFirstLoginsAreCutOff closes the connection as
+// the server accepts each of the first four logins, before phpseclib hears
+// of it, and checks that Flysystem's own retries, four of them, reconnect
+// and publish the file.
+func TestLaravelReconnectsWhenItsFirstLoginsAreCutOff(t *testing.T) {
+	php := phpseclibOrSkip(t)
+
+	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeFile(t, configFile, []byte(`schema_version: 1
+users:
+  - name: `+testUser+`
+    password_env: TEST_PASSWORD
+scenarios:
+  cut-off-logins:
+    faults:
+      - id: first-logins
+        match: {operation: authenticate, user: `+testUser+`, occurrence: [1, 2, 3, 4]}
+        action: {type: close_connection}
+`))
+	cfg, err := config.Load(config.Options{
+		ConfigFile: configFile,
+		Scenario:   "cut-off-logins",
+		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var logs snapshotLog
+	rules, err := faults.New(cfg.Rules(), 0, logs.logger())
+	if err != nil {
+		t.Fatalf("faults.New: %v", err)
+	}
+	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	work := t.TempDir()
+	data := randomBytes(1<<20 + 321)
+	writeFile(t, filepath.Join(work, "orders.csv"), data)
+
+	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	srv.waitForSessions()
+
+	if want := map[string]any{"upload 1": true, "move": true}; !maps.Equal(outcomes, want) {
+		t.Errorf("publish.php gave %v, want %v", outcomes, want)
+	}
+	assertHolds(t, srv, publishedPath, data)
+	if got, want := rules.Counts()["first-logins"], (faults.Counts{Matched: 5, Selected: 4, Fired: 4}); got != want {
+		t.Errorf("counts = %+v, want five logins matched and the first four cut off", got)
+	}
+	for conn := range 4 {
+		want := `msg="injected fault" conn=` + strconv.Itoa(conn+1) + ` request=authenticate user=` + testUser + ` fault=close_connection mode=fin`
+		if !strings.Contains(logs.text(), want) {
+			t.Errorf("logs lack %s:\n%s", want, logs.text())
+		}
+	}
+}

@@ -91,8 +91,32 @@ func (s *Session) Timers() []sftpproxy.Timer {
 // do not depend on the rules before it. A rule whose trigger is not active
 // does not match.
 func (s *Session) Decide(r sftpproxy.Request) sftpproxy.Action {
+	return s.decide(operationOf(r), r)
+}
+
+// Connect returns the action of the first rule that selects a connection of
+// c as it is accepted, before the SSH handshake, if any: a Delay, Drop or
+// Freeze. The client has not logged in yet, so c has only its Connection.
+func (e *Engine) Connect(c Client) sftpproxy.Action {
+	return e.event(Connect, c)
+}
+
+// Authenticate returns the action of the first rule that selects c's login
+// as the server accepts it, before telling the client, if any: a Delay, Drop
+// or Freeze.
+func (e *Engine) Authenticate(c Client) sftpproxy.Action {
+	return e.event(Authenticate, c)
+}
+
+// event decides the connection event op of c, which no rule times from the
+// connection, so it needs none of a session's moments.
+func (e *Engine) event(op Operation, c Client) sftpproxy.Action {
+	s := &Session{e: e, client: c}
+	return s.decide(op, sftpproxy.Request{})
+}
+
+func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
 	e := s.e
-	op := operationOf(r)
 	now := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -117,7 +141,14 @@ func (s *Session) Decide(r sftpproxy.Request) sftpproxy.Action {
 	}
 	chosen.counts.Selected++
 	action, drawn := e.action(chosen, key)
-	fired := append([]any{"rule", chosen.ID, "request", op, "path", r.Path, "user", s.client.User, "ordinal", ordinal}, drawn...)
+	fired := []any{"rule", chosen.ID, "request", op}
+	if !isEvent(op) {
+		fired = append(fired, "path", r.Path)
+	}
+	if s.client.User != "" {
+		fired = append(fired, "user", s.client.User)
+	}
+	fired = append(append(fired, "ordinal", ordinal), drawn...)
 	switch a := action.(type) {
 	case sftpproxy.PartialUpload:
 		a.Reserve = e.reserve(chosen, fired, nil)

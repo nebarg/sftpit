@@ -6,11 +6,13 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Conn is an authenticated client connection. Its methods are safe for
-// concurrent use.
+// Conn is a client connection. Its methods are safe for concurrent use. Its
+// user, home and key fingerprint are set once the client has logged in, so
+// a Handler sees them but Hooks.Connect does not.
 type Conn struct {
 	id             uint64
 	user           string
@@ -33,7 +35,8 @@ func (c *Conn) Home() string { return c.home }
 // authenticated with, or "" if it logged in with a password.
 func (c *Conn) KeyFingerprint() string { return c.keyFingerprint }
 
-// Authenticated returns when the client finished authenticating.
+// Authenticated returns when the client finished logging in: when the
+// server, any Hooks.Authenticate having returned, went on to tell it.
 func (c *Conn) Authenticated() time.Time { return c.authenticated }
 
 // Close closes the connection normally, so the client sees a TCP FIN. The
@@ -72,6 +75,11 @@ type gate struct {
 
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	// deliberate is set when the server closes the connection on purpose,
+	// through Conn or as it shuts down, rather than the SSH layer closing it
+	// on a failure.
+	deliberate atomic.Bool
 }
 
 func newGate(c net.Conn) *gate {
@@ -113,6 +121,7 @@ func (g *gate) Close() error {
 
 // abort closes the connection at once, cutting any drain short.
 func (g *gate) abort() error {
+	g.deliberate.Store(true)
 	g.closeOnce.Do(func() { close(g.closed) })
 	return g.Conn.Close()
 }
@@ -121,6 +130,7 @@ func (g *gate) abort() error {
 // a FIN, leaving the connection to be drained and closed once the SSH layer
 // has ended. A connection other than TCP is closed at once.
 func (g *gate) closeNormally() error {
+	g.deliberate.Store(true)
 	tcp, ok := g.Conn.(*net.TCPConn)
 	if !ok {
 		return g.Close()
@@ -185,6 +195,7 @@ func (g *gate) wait() error {
 }
 
 func (g *gate) reset() error {
+	g.deliberate.Store(true)
 	tcp, ok := g.Conn.(*net.TCPConn)
 	if !ok {
 		return errors.New("sshfront: reset needs a TCP connection")

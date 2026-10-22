@@ -136,11 +136,13 @@ func startLimitedServer(t testing.TB, via route, rules *faults.Engine, opts sftp
 	handler := func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		return embedded.Serve(channel, conn.Home())
 	}
+	var hooks sshfront.Hooks
 	if via == proxied {
 		if opts.Logger == nil {
 			opts.Logger = logger
 		}
 		handler = runs.Handler(run, embedded, rules, opts)
+		hooks = runs.Hooks(rules, opts.Logger)
 	}
 	s := &server{files: run.Files, run: run}
 	serveSession := handler
@@ -161,6 +163,7 @@ func startLimitedServer(t testing.TB, via route, rules *faults.Engine, opts sftp
 			AuthorizedKeys: []ssh.PublicKey{signer.PublicKey()},
 		}},
 		Handler: handler,
+		Hooks:   hooks,
 		Logger:  logger,
 	})
 	if err != nil {

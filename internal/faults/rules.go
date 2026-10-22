@@ -123,8 +123,8 @@ type Match struct {
 	// in with, as ssh-keygen prints it.
 	KeyFingerprint string
 
-	// Operations are the kinds of request the rule matches. At least one is
-	// required.
+	// Operations are the kinds of request the rule matches, or the
+	// connection events Connect and Authenticate. At least one is required.
 	Operations []Operation
 
 	// Path is where the request acts, which for a rename is its source.
@@ -164,9 +164,18 @@ const (
 
 	// Any is every operation above.
 	Any Operation = "any"
+
+	// Connect is a connection being accepted, before the SSH handshake.
+	Connect Operation = "connect"
+
+	// Authenticate is the server accepting a client's login, before it
+	// tells the client.
+	Authenticate Operation = "authenticate"
 )
 
 var operations = []Operation{OpenRead, OpenWrite, Read, Write, Close, Stat, LStat, FStat, List, Mkdir, Rmdir, Remove, Rename, SetStat, RealPath, StatVFS}
+
+func isEvent(op Operation) bool { return op == Connect || op == Authenticate }
 
 // listEntry is the operation of one entry of a list's reply, which only a
 // WrongSize applies to.
@@ -324,7 +333,7 @@ func (r Rule) check() error {
 		return errors.New("needs at least one operation")
 	}
 	for i, op := range m.Operations {
-		if op != Any && !slices.Contains(operations, op) {
+		if op != Any && !isEvent(op) && !slices.Contains(operations, op) {
 			return fmt.Errorf("unknown operation %q", op)
 		}
 		if slices.Contains(m.Operations[:i], op) {
@@ -346,6 +355,9 @@ func (r Rule) check() error {
 	if p := r.Probability; p != nil && !(*p >= 0 && *p <= 1) {
 		return fmt.Errorf("probability %v is not from 0 to 1", *p)
 	}
+	if err := r.checkEvents(); err != nil {
+		return err
+	}
 	if err := r.checkAction(); err != nil {
 		return err
 	}
@@ -356,6 +368,33 @@ func (r Rule) check() error {
 		return err
 	}
 	return r.checkSelection()
+}
+
+// checkEvents reports a rule for the connection events that cannot apply to
+// them: they have no path, and connect comes before the client logs in.
+func (r Rule) checkEvents() error {
+	m := r.Match
+	if !slices.ContainsFunc(m.Operations, isEvent) {
+		return nil
+	}
+	if slices.ContainsFunc(m.Operations, func(op Operation) bool { return !isEvent(op) }) {
+		return errors.New("connect and authenticate cannot share a rule with file operations")
+	}
+	if m.Path.Kind != Anywhere {
+		return errors.New("connect and authenticate have no path")
+	}
+	if slices.Contains(m.Operations, Connect) && (m.User != "" || m.KeyFingerprint != "") {
+		return errors.New("connect comes before the client logs in, so it has no user or key")
+	}
+	switch r.Action.(type) {
+	case sftpproxy.Delay, sftpproxy.Drop, sftpproxy.Freeze:
+	default:
+		return fmt.Errorf("connect and authenticate take a delay, close_connection or freeze_connection, not %T", r.Action)
+	}
+	if t := r.Trigger; t != nil && (t.Anchor == Connection || t.Anchor == Transfer) {
+		return fmt.Errorf("connect and authenticate are timed from the run, not the %s", t.Anchor)
+	}
+	return nil
 }
 
 func (r Rule) checkAction() error {

@@ -174,6 +174,7 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 		HostKeys: hostKeys,
 		Users:    cfg.Users,
 		Handler:  runs.Handler(run, embedded, rules, sftpproxy.Options{Logger: logger}),
+		Hooks:    runs.Hooks(rules, logger),
 		Logger:   logger,
 	})
 	if err != nil {

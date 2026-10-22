@@ -184,7 +184,7 @@ func setLocation(l faults.Location, exactly, under, glob, named, namedGlob *stri
 func longAction(r faults.Rule) actionConfig {
 	switch a := r.Action.(type) {
 	case sftpproxy.Delay:
-		ac := actionConfig{Type: "delay", When: whenName(a.When), Duration: &valueRange[string]{Min: a.Duration.String(), Max: a.Duration.String()}}
+		ac := actionConfig{Type: "delay", When: actionWhen(r, a.When), Duration: &valueRange[string]{Min: a.Duration.String(), Max: a.Duration.String()}}
 		if d := r.Duration; d != nil {
 			ac.Duration = &valueRange[string]{Min: d.Min.String(), Max: d.Max.String(), ranged: true}
 		}
@@ -233,13 +233,22 @@ func longAction(r faults.Rule) actionConfig {
 	panic(fmt.Sprintf("config: no long form for %T", r.Action))
 }
 
+// actionWhen returns the when of r's action, which has none at connect or
+// authenticate.
+func actionWhen(r faults.Rule, w sftpproxy.When) string {
+	if slices.ContainsFunc(r.Match.Operations, func(op faults.Operation) bool { return op == faults.Connect || op == faults.Authenticate }) {
+		return ""
+	}
+	return whenName(w)
+}
+
 // connectionWhen returns the when of r's connection action, which has none
-// at a moment.
+// at a moment either.
 func connectionWhen(r faults.Rule, w sftpproxy.When) string {
 	if r.Trigger != nil && r.Trigger.At != nil {
 		return ""
 	}
-	return whenName(w)
+	return actionWhen(r, w)
 }
 
 func whenName(w sftpproxy.When) string {

@@ -127,7 +127,7 @@ sftpit serve --config ./sftpit.yaml --scenario upload-recovery
 ```
 
 A rule matches requests by:
-- `operation`, one or a list of: `open_read`, `open_write`, `read`, `write`, `close`, `stat`, `lstat`, `fstat`, `list`, `mkdir`, `rmdir`, `remove`, `rename` (standard and posix), `setstat`, `realpath`, `statvfs`, or `any`;
+- `operation`, one or a list of: `open_read`, `open_write`, `read`, `write`, `close`, `stat`, `lstat`, `fstat`, `list`, `mkdir`, `rmdir`, `remove`, `rename` (standard and posix), `setstat`, `realpath`, `statvfs`, or `any`; or of the [connection events](#connection-events) `connect` and `authenticate`;
 - optionally `user`, and `key_fingerprint` for a client that logs in with a key, as ssh-keygen prints it;
 - optionally one of `path`, `path_prefix` (a directory and everything beneath it), `path_glob` (where `*` stays within one directory), `filename` and `filename_glob` (the last segment, in any directory). A rename spells them `source`, `source_prefix` and so on, and matches its destination with the `target` forms. Paths are matched case-sensitively, as clients see them.
 
@@ -222,6 +222,30 @@ faults:
 Time triggers suit tests of timeouts, keepalives and reconnects. A test of file contents should cut at a byte offset instead, because how far a client gets in two seconds depends on the machine.
 
 Every draw depends only on the run's seed and on the request: its rule, user, path and operation, and how many requests of that user, path and operation the rule has matched before it. Requests for other files never change one. So a pinned seed, from the scenario's `seed` or `--seed`, gives a test the same faults on every run of the same workload. Without one, each run draws a fresh seed, so chaos differs from run to run. The banner shows the seed, and a kept workspace records it in `runs/<run>/run.json`, so `--seed` can repeat a run's decisions.
+
+### Connection events
+
+Two operations come before any request:
+- **`connect`:** the server accepting a connection, before the SSH handshake.
+- **`authenticate`:** the server accepting a login, before it tells the client.
+
+```yaml
+faults:
+  - id: "slow-banner" # the server's SSH version arrives 3 s late
+    match: { operation: "connect" }
+    action: { type: "delay", duration: "3s" }
+  - id: "first-logins" # the first two logins fail just as they succeed
+    match: { operation: "authenticate", user: "test", occurrence: [1, 2] }
+    action: { type: "close_connection" }
+```
+
+- **Actions:** `delay`, `close_connection` and `freeze_connection`, without `when`.
+- **Matching:** neither event has a path. `connect` comes before the login, so it has no `user` or `key_fingerprint` either.
+- **Counting:** `occurrence` counts connections or logins. A trigger measures from the run.
+- **Limit:** a fault ends with the handshake, which the server gives up after 2 minutes, as OpenSSH's `LoginGraceTime` does.
+- **What clients see:**
+  - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, and a close or reset as the server closing or resetting the connection.
+  - Flysystem's SFTP adapter retries a failed connection 4 times at once, so a Laravel upload rides out four cut-off logins in a row, and fails after five.
 
 ## Behavior
 

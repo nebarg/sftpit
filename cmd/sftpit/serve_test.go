@@ -144,6 +144,33 @@ scenarios:
 	}
 }
 
+func TestServeInjectsFaultsAtLogin(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeTestFile(t, config, `schema_version: 1
+scenarios:
+  cut-first-login:
+    faults:
+      - id: first-login
+        match: {operation: authenticate, occurrence: [1]}
+        action: {type: close_connection}
+`)
+	s := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", "cut-first-login")
+	if conn, err := ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
+		User:            "test",
+		Auth:            []ssh.AuthMethod{ssh.Password("test")},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         startTimeout,
+	}); err == nil {
+		conn.Close()
+		t.Error("the first login succeeded, want it cut off")
+	}
+	s.dial(t, "test", "test").Close()
+	s.stop(t)
+	if logs := s.stderr.String(); !strings.Contains(logs, `msg="injected fault" conn=1 request=authenticate user=test fault=close_connection mode=fin`) {
+		t.Errorf("stderr does not log the fault at the first login:\n%s", logs)
+	}
+}
+
 func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	slowStat := `

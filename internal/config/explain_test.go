@@ -56,6 +56,9 @@ scenarios:
       - {id: random-freeze, match: {user: partner-b}, trigger: {at: {min: 1s, max: 5s}, anchor: connection}, action: {type: freeze_connection, max_freeze: 1m}}
       - {id: idle, trigger: {at: 5m, anchor: run}, action: {type: close_subsystem}}
       - {id: end-at-remove, match: {operation: remove}, action: {type: close_subsystem, when: after}}
+      - {id: slow-connect, match: {operation: connect}, decision: {probability: 0.5}, action: {type: delay, duration: {min: 1s, max: 3s}}}
+      - {id: first-login, max_triggers: 1, match: {operation: authenticate, user: partner-b, occurrence: [1]}, action: {type: close_connection, mode: rst}}
+      - {id: outage, match: {operation: [connect, authenticate]}, trigger: {window: {from: 10s, until: 15s}, anchor: run}, action: {type: freeze_connection, max_freeze: 5s}}
       - id: first-upload-cutoff
         fail_upload: {path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576}
       - id: random-failures

@@ -63,6 +63,10 @@ var anchors = map[string]faults.Anchor{
 // connection or session, and so can fire at a moment.
 var connectionActions = []string{"close_connection", "freeze_connection", "close_subsystem"}
 
+// eventActions are the action types that apply to the connection events,
+// connect and authenticate.
+var eventActions = []string{"delay", "close_connection", "freeze_connection"}
+
 type decisionConfig struct {
 	Probability *float64 `yaml:"probability,omitempty"`
 	Scope       string   `yaml:"scope,omitempty"`
@@ -245,7 +249,17 @@ func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 			return r, fmt.Errorf("trigger: %w", err)
 		}
 	}
-	if err := rc.Action.apply(&r, moment); err != nil {
+	var noWhen string
+	switch {
+	case moment:
+		noWhen = "at a moment, which acts whatever the client is doing"
+	case rc.Match.hasEvent():
+		if !slices.Contains(eventActions, rc.Action.Type) {
+			return r, fmt.Errorf("action: connect and authenticate take a delay, close_connection or freeze_connection, not a %s", rc.Action.Type)
+		}
+		noWhen = "at connect or authenticate, which have no request to act before or after"
+	}
+	if err := rc.Action.apply(&r, noWhen); err != nil {
 		return r, fmt.Errorf("action: %w", err)
 	}
 	if d := rc.Decision; d != nil {
@@ -331,6 +345,14 @@ func (tc triggerConfig) trigger() (*faults.Trigger, error) {
 		return nil, errors.New("at or window is required")
 	}
 	return t, nil
+}
+
+// hasEvent reports whether mc matches a connection event, connect or
+// authenticate.
+func (mc matchConfig) hasEvent() bool {
+	return slices.ContainsFunc(mc.Operation, func(op string) bool {
+		return op == string(faults.Connect) || op == string(faults.Authenticate)
+	})
 }
 
 func (mc matchConfig) match(users []sshfront.User, needsOperation bool) (faults.Match, error) {
@@ -470,10 +492,9 @@ var actionFields = map[string][]string{
 	"wrong_size":        {"size", "size_delta"},
 }
 
-// apply sets the action of r, and the ranges it draws values from. A
-// connection action at a moment acts whatever the client is doing, so it
-// takes no when.
-func (ac actionConfig) apply(r *faults.Rule, moment bool) error {
+// apply sets the action of r, and the ranges it draws values from. If noWhen
+// is set, the action takes no when, for the reason it gives.
+func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 	allowed, ok := actionFields[ac.Type]
 	if !ok {
 		return fmt.Errorf("type %q is not one of %s", ac.Type, strings.Join(slices.Sorted(maps.Keys(actionFields)), ", "))
@@ -486,16 +507,16 @@ func (ac actionConfig) apply(r *faults.Rule, moment bool) error {
 	var err error
 	switch ac.Type {
 	case "delay":
-		r.Action, r.Duration, err = ac.delay()
+		r.Action, r.Duration, err = ac.delay(noWhen)
 	case "fail":
 		r.Action, err = ac.fail()
 	case "close_connection":
-		r.Action, err = ac.closeConnection(moment)
+		r.Action, err = ac.closeConnection(noWhen)
 	case "freeze_connection":
-		r.Action, err = ac.freezeConnection(moment)
+		r.Action, err = ac.freezeConnection(noWhen)
 	case "close_subsystem":
 		var when sftpproxy.When
-		when, err = ac.connectionWhen(moment)
+		when, err = ac.whenUnless(noWhen)
 		r.Action = sftpproxy.EndSession{When: when}
 	case "partial_upload":
 		r.Action, r.Cutoff, err = ac.partialUpload()
@@ -534,8 +555,8 @@ func (ac actionConfig) set() []string {
 
 // delay returns the delay of ac, and the range it draws its duration from
 // if ac gives one.
-func (ac actionConfig) delay() (sftpproxy.Action, *faults.Range[time.Duration], error) {
-	when, err := ac.when()
+func (ac actionConfig) delay(noWhen string) (sftpproxy.Action, *faults.Range[time.Duration], error) {
+	when, err := ac.whenUnless(noWhen)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -580,21 +601,21 @@ func (ac actionConfig) when() (sftpproxy.When, error) {
 	return 0, fmt.Errorf("when %q is not before or after", ac.When)
 }
 
-// connectionWhen returns when a connection action at a request acts, or
-// Before, which is ignored, for one at a moment.
-func (ac actionConfig) connectionWhen(moment bool) (sftpproxy.When, error) {
-	if !moment {
+// whenUnless returns when ac acts, or Before, which is ignored, if noWhen
+// gives a reason it takes no when.
+func (ac actionConfig) whenUnless(noWhen string) (sftpproxy.When, error) {
+	if noWhen == "" {
 		return ac.when()
 	}
 	if ac.When != "" {
-		return 0, fmt.Errorf("when does not apply to a %s at a moment, which acts whatever the client is doing", ac.Type)
+		return 0, fmt.Errorf("when does not apply to a %s %s", ac.Type, noWhen)
 	}
 	return sftpproxy.Before, nil
 }
 
 // closeConnection returns the Drop that ac's mode chooses, fin unless set.
-func (ac actionConfig) closeConnection(moment bool) (sftpproxy.Action, error) {
-	when, err := ac.connectionWhen(moment)
+func (ac actionConfig) closeConnection(noWhen string) (sftpproxy.Action, error) {
+	when, err := ac.whenUnless(noWhen)
 	if err != nil {
 		return nil, err
 	}
@@ -607,8 +628,8 @@ func (ac actionConfig) closeConnection(moment bool) (sftpproxy.Action, error) {
 	return nil, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
 }
 
-func (ac actionConfig) freezeConnection(moment bool) (sftpproxy.Action, error) {
-	when, err := ac.connectionWhen(moment)
+func (ac actionConfig) freezeConnection(noWhen string) (sftpproxy.Action, error) {
+	when, err := ac.whenUnless(noWhen)
 	if err != nil {
 		return nil, err
 	}

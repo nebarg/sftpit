@@ -26,7 +26,6 @@ var ErrServerClosed = errors.New("sshfront: server closed")
 
 const (
 	defaultHandshakeTimeout = 2 * time.Minute
-	extKeyFingerprint       = "sftpit-key-fingerprint"
 	minAcceptRetryDelay     = 5 * time.Millisecond
 	maxAcceptRetryDelay     = time.Second
 )
@@ -57,6 +56,22 @@ type User struct {
 // its stack trace and reported the same way; other connections are unaffected.
 type Handler func(ctx context.Context, conn *Conn, channel io.ReadWriteCloser) error
 
+// Hooks are called at points of each connection's handshake, which waits for
+// them to return. A hook may close, reset or freeze the connection, which
+// ends the handshake. Its ctx is done once the connection is closed or the
+// handshake timeout passes, which bounds the whole handshake, the hooks
+// included. Either hook may be nil.
+type Hooks struct {
+	// Connect is called as a connection is accepted, before the SSH
+	// handshake begins. The client has not logged in yet, so the connection
+	// has only its ID.
+	Connect func(ctx context.Context, conn *Conn)
+
+	// Authenticate is called once the server has verified a client's
+	// credentials, before it tells the client that it has logged in.
+	Authenticate func(ctx context.Context, conn *Conn)
+}
+
 // Config configures a Server.
 type Config struct {
 	// HostKeys identify the server to clients. At least one is required.
@@ -67,6 +82,9 @@ type Config struct {
 
 	// Handler serves each sftp subsystem channel.
 	Handler Handler
+
+	// Hooks are called during each connection's handshake.
+	Hooks Hooks
 
 	// HandshakeTimeout bounds the SSH handshake and authentication.
 	// Zero means 2 minutes, matching OpenSSH's default LoginGraceTime.
@@ -81,6 +99,7 @@ type Config struct {
 // shells, commands, ptys, other subsystems and port forwarding are refused.
 type Server struct {
 	handler          Handler
+	hooks            Hooks
 	handshakeTimeout time.Duration
 	logger           *slog.Logger
 	users            map[string]User
@@ -110,6 +129,7 @@ func New(cfg Config) (*Server, error) {
 
 	s := &Server{
 		handler:          cfg.Handler,
+		hooks:            cfg.Hooks,
 		handshakeTimeout: cfg.HandshakeTimeout,
 		logger:           cfg.Logger,
 		users:            users,
@@ -273,30 +293,10 @@ func (s *Server) serveConn(g *gate) {
 	defer s.untrackConn(g)
 	defer g.Close()
 
-	if err := g.SetDeadline(time.Now().Add(s.handshakeTimeout)); err != nil {
-		s.logger.Warn("setting handshake deadline failed", "remote", g.RemoteAddr(), "err", err)
+	conn := &Conn{id: s.nextConnID.Add(1), gate: g}
+	channels, requests, ok := s.handshake(conn)
+	if !ok {
 		return
-	}
-	sc, channels, requests, err := ssh.NewServerConn(g, s.sshConfig)
-	if err != nil {
-		if !s.isClosed() {
-			s.logger.Info("ssh handshake failed", "remote", g.RemoteAddr(), "err", err)
-		}
-		return
-	}
-	if err := g.SetDeadline(time.Time{}); err != nil {
-		s.logger.Warn("clearing handshake deadline failed", "remote", g.RemoteAddr(), "err", err)
-		return
-	}
-
-	user := s.users[sc.User()]
-	conn := &Conn{
-		id:             s.nextConnID.Add(1),
-		user:           user.Name,
-		home:           user.Home,
-		keyFingerprint: sc.Permissions.Extensions[extKeyFingerprint],
-		authenticated:  time.Now(),
-		gate:           g,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -307,6 +307,75 @@ func (s *Server) serveConn(g *gate) {
 	}
 	cancel()
 	wg.Wait()
+}
+
+// handshake runs conn's SSH handshake, calling the hooks along the way, and
+// returns the connection's channels and requests, or false if it fails.
+func (s *Server) handshake(conn *Conn) (<-chan ssh.NewChannel, <-chan *ssh.Request, bool) {
+	g := conn.gate
+	deadline := time.Now().Add(s.handshakeTimeout)
+	if err := g.SetDeadline(deadline); err != nil {
+		s.logger.Warn("setting handshake deadline failed", "conn", conn.id, "remote", g.RemoteAddr(), "err", err)
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	go func() {
+		select {
+		case <-g.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	if s.hooks.Connect != nil {
+		s.hooks.Connect(ctx, conn)
+	}
+	sc, channels, requests, err := ssh.NewServerConn(g, s.handshakeConfig(ctx, conn))
+	// A connection closed on purpose, by a hook or by Close, has not failed.
+	// The handshake can even seem to succeed: the library reports a failure
+	// to send its last message only to later writes.
+	if g.deliberate.Load() {
+		if err == nil {
+			sc.Close()
+		}
+		s.logger.Debug("ssh handshake ended by the server", "conn", conn.id, "remote", g.RemoteAddr())
+		return nil, nil, false
+	}
+	if err != nil {
+		s.logger.Info("ssh handshake failed", "conn", conn.id, "remote", g.RemoteAddr(), "err", err)
+		return nil, nil, false
+	}
+	if err := g.SetDeadline(time.Time{}); err != nil {
+		s.logger.Warn("clearing handshake deadline failed", "conn", conn.id, "remote", g.RemoteAddr(), "err", err)
+		return nil, nil, false
+	}
+	return channels, requests, true
+}
+
+// handshakeConfig returns the SSH configuration for conn's handshake, which
+// records who the client logs in as and calls the Authenticate hook before
+// telling the client.
+func (s *Server) handshakeConfig(ctx context.Context, conn *Conn) *ssh.ServerConfig {
+	cfg := *s.sshConfig
+	cfg.VerifiedPublicKeyCallback = func(_ ssh.ConnMetadata, key ssh.PublicKey, perms *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+		conn.keyFingerprint = ssh.FingerprintSHA256(key)
+		return perms, nil
+	}
+	// The library calls AuthLogCallback with a nil error once a login has
+	// succeeded, before it tells the client.
+	cfg.AuthLogCallback = func(meta ssh.ConnMetadata, _ string, err error) {
+		if err != nil {
+			return
+		}
+		user := s.users[meta.User()]
+		conn.user, conn.home = user.Name, user.Home
+		if s.hooks.Authenticate != nil {
+			s.hooks.Authenticate(ctx, conn)
+		}
+		conn.authenticated = time.Now()
+	}
+	return &cfg
 }
 
 func (s *Server) serveChannel(ctx context.Context, conn *Conn, nc ssh.NewChannel) {
@@ -419,9 +488,7 @@ func (s *Server) checkPublicKey(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.
 	offered := key.Marshal()
 	for _, authorized := range u.AuthorizedKeys {
 		if bytes.Equal(authorized.Marshal(), offered) {
-			return &ssh.Permissions{
-				Extensions: map[string]string{extKeyFingerprint: ssh.FingerprintSHA256(key)},
-			}, nil
+			return &ssh.Permissions{}, nil
 		}
 	}
 	return nil, errInvalidCredentials
