@@ -19,6 +19,7 @@ type Conn struct {
 	home           string
 	keyFingerprint string
 	authenticated  time.Time
+	server         *Server
 	gate           *gate
 }
 
@@ -38,6 +39,9 @@ func (c *Conn) KeyFingerprint() string { return c.keyFingerprint }
 // Authenticated returns when the client finished logging in: when the
 // server, any Hooks.Authenticate having returned, went on to tell it.
 func (c *Conn) Authenticated() time.Time { return c.authenticated }
+
+// Server returns the server that accepted the connection.
+func (c *Conn) Server() *Server { return c.server }
 
 // Close closes the connection normally, so the client sees a TCP FIN. The
 // server stops reading and writing at once, but discards whatever the client

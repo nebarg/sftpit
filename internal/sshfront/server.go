@@ -33,6 +33,7 @@ const (
 var (
 	errInvalidCredentials = errors.New("sshfront: invalid credentials")
 	errHandlerPanicked    = errors.New("sshfront: handler panicked")
+	errDown               = errors.New("sshfront: server down")
 )
 
 // User is a test account that clients can log in as.
@@ -106,12 +107,24 @@ type Server struct {
 	sshConfig        *ssh.ServerConfig
 	nextConnID       atomic.Uint64
 
-	mu        sync.Mutex
-	closed    bool
-	done      chan struct{}
-	listeners map[net.Listener]struct{}
+	mu     sync.Mutex
+	closed bool
+	done   chan struct{}
+	// listeners maps each listener Serve accepts on to whether an outage
+	// has closed it.
+	listeners map[net.Listener]bool
 	conns     map[*gate]struct{}
-	wg        sync.WaitGroup
+	// outage is set while the server is down.
+	outage *outage
+	wg     sync.WaitGroup
+}
+
+// outage is a span in which a server accepts no connections.
+type outage struct {
+	until time.Time
+	timer *time.Timer
+	// over is closed when the outage ends.
+	over chan struct{}
 }
 
 // New validates cfg and returns a Server ready to Serve.
@@ -134,7 +147,7 @@ func New(cfg Config) (*Server, error) {
 		logger:           cfg.Logger,
 		users:            users,
 		done:             make(chan struct{}),
-		listeners:        make(map[net.Listener]struct{}),
+		listeners:        make(map[net.Listener]bool),
 		conns:            make(map[*gate]struct{}),
 	}
 	if s.handshakeTimeout == 0 {
@@ -185,12 +198,30 @@ func indexUsers(users []User) (map[string]User, error) {
 // Serve accepts connections on ln until Close is called, then returns
 // ErrServerClosed. Accept failures such as running out of file descriptors
 // are logged and retried with a growing delay of up to one second. Serve
-// returns any other error only if ln is closed by someone other than Close.
-// Serve always closes ln before returning.
+// returns any other error only if ln is closed by someone other than Close
+// or Down. When Down closes ln, Serve listens on ln's address again once the
+// outage is over, with a listener of its own, so whatever ln adds to the
+// listener it wraps does not outlast the outage. Serve always closes the
+// listener it accepts on before returning.
 func (s *Server) Serve(ln net.Listener) error {
+	addr := ln.Addr()
+	for {
+		err := s.accept(ln)
+		if !errors.Is(err, errDown) {
+			return err
+		}
+		if ln, err = s.listenAgain(addr); err != nil {
+			return err
+		}
+	}
+}
+
+// accept accepts connections on ln until Close or Down closes it, and
+// returns ErrServerClosed or errDown.
+func (s *Server) accept(ln net.Listener) error {
 	defer ln.Close()
-	if !s.trackListener(ln) {
-		return ErrServerClosed
+	if err := s.trackListener(ln); err != nil {
+		return err
 	}
 	defer s.untrackListener(ln)
 
@@ -200,6 +231,9 @@ func (s *Server) Serve(ln net.Listener) error {
 		if err != nil {
 			if s.isClosed() {
 				return ErrServerClosed
+			}
+			if s.closedByOutage(ln) {
+				return errDown
 			}
 			if errors.Is(err, net.ErrClosed) {
 				return fmt.Errorf("sshfront: accept: %w", err)
@@ -216,12 +250,110 @@ func (s *Server) Serve(ln net.Listener) error {
 		retryDelay = 0
 
 		g := newGate(nc)
-		if !s.trackConn(g) {
+		switch err := s.trackConn(g); {
+		case errors.Is(err, errDown):
+			// The connection came in as the outage began.
 			g.Close()
-			return ErrServerClosed
+			continue
+		case err != nil:
+			g.Close()
+			return err
 		}
 		go s.serveConn(g)
 	}
+}
+
+// listenAgain waits for the outage to end, then listens on addr, retrying
+// with a growing delay of up to one second if that fails.
+func (s *Server) listenAgain(addr net.Addr) (net.Listener, error) {
+	var retryDelay time.Duration
+	for {
+		if over := s.outageOver(); over != nil {
+			select {
+			case <-over:
+			case <-s.done:
+				return nil, ErrServerClosed
+			}
+		}
+		ln, err := net.Listen(addr.Network(), addr.String())
+		if err == nil {
+			s.logger.Info("listening again after an outage", "addr", ln.Addr())
+			return ln, nil
+		}
+		retryDelay = min(max(2*retryDelay, minAcceptRetryDelay), maxAcceptRetryDelay)
+		s.logger.Warn("listening again after an outage failed; retrying", "addr", addr, "err", err, "delay", retryDelay)
+		select {
+		case <-time.After(retryDelay):
+		case <-s.done:
+			return nil, ErrServerClosed
+		}
+	}
+}
+
+// Down takes the server down for d. It closes every listener Serve accepts
+// on, so that new connections are refused, and Serve listens on each one's
+// address again once d has passed. A connection accepted as the outage
+// begins is closed at once. If closeExisting, Down also closes every
+// connection, as Conn.Close does. Down while the server is down extends the
+// outage if it would end later.
+func (s *Server) Down(d time.Duration, closeExisting bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	until := time.Now().Add(d)
+	switch o := s.outage; {
+	case o == nil:
+		o = &outage{until: until, over: make(chan struct{})}
+		o.timer = time.AfterFunc(d, func() { s.endOutage(o) })
+		s.outage = o
+		for ln := range s.listeners {
+			s.listeners[ln] = true
+			if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				s.logger.Warn("closing a listener for an outage failed", "addr", ln.Addr(), "err", err)
+			}
+		}
+	case until.After(o.until):
+		o.until = until
+	}
+	if closeExisting {
+		for g := range s.conns {
+			g.closeNormally()
+		}
+	}
+}
+
+// endOutage ends o, unless Down has since extended it.
+func (s *Server) endOutage(o *outage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outage != o {
+		return
+	}
+	if left := time.Until(o.until); left > 0 {
+		o.timer.Reset(left)
+		return
+	}
+	s.outage = nil
+	close(o.over)
+}
+
+// outageOver returns a channel that is closed when the outage ends, or nil
+// if the server is up.
+func (s *Server) outageOver() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outage == nil {
+		return nil
+	}
+	return s.outage.over
+}
+
+func (s *Server) closedByOutage(ln net.Listener) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listeners[ln]
 }
 
 // Close stops every listener, closes every connection, including those still
@@ -241,20 +373,27 @@ func (s *Server) Close() error {
 	for g := range s.conns {
 		g.abort()
 	}
+	if s.outage != nil {
+		s.outage.timer.Stop()
+	}
 	s.mu.Unlock()
 
 	s.wg.Wait()
 	return errors.Join(errs...)
 }
 
-func (s *Server) trackListener(ln net.Listener) bool {
+// trackListener registers ln, unless the server is closed or down.
+func (s *Server) trackListener(ln net.Listener) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return false
+	switch {
+	case s.closed:
+		return ErrServerClosed
+	case s.outage != nil:
+		return errDown
 	}
-	s.listeners[ln] = struct{}{}
-	return true
+	s.listeners[ln] = false
+	return nil
 }
 
 func (s *Server) untrackListener(ln net.Listener) {
@@ -264,16 +403,20 @@ func (s *Server) untrackListener(ln net.Listener) {
 }
 
 // trackConn registers g with the wait group under the same lock that Close
-// takes, so Close never waits on a group that is still being added to.
-func (s *Server) trackConn(g *gate) bool {
+// takes, so Close never waits on a group that is still being added to. It
+// refuses g if the server is closed or down.
+func (s *Server) trackConn(g *gate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return false
+	switch {
+	case s.closed:
+		return ErrServerClosed
+	case s.outage != nil:
+		return errDown
 	}
 	s.conns[g] = struct{}{}
 	s.wg.Add(1)
-	return true
+	return nil
 }
 
 func (s *Server) untrackConn(g *gate) {
@@ -293,7 +436,7 @@ func (s *Server) serveConn(g *gate) {
 	defer s.untrackConn(g)
 	defer g.Close()
 
-	conn := &Conn{id: s.nextConnID.Add(1), gate: g}
+	conn := &Conn{id: s.nextConnID.Add(1), server: s, gate: g}
 	channels, requests, ok := s.handshake(conn)
 	if !ok {
 		return

@@ -140,9 +140,12 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 | `close_connection` | Closes the connection where the reply would be, with a FIN or, with `mode: rst`, a TCP reset | `when`, `mode` |
 | `freeze_connection` | Stops all traffic where the reply would be, keepalives included, then closes the connection after `max_freeze` | `when`, `max_freeze` |
 | `close_subsystem` | Ends the SFTP session where the reply would be, closing its channel but leaving the connection open, as a server ending an idle session does | `when` |
+| `listener_down` | Takes the server down for `duration` where the reply would be: new connections are refused until it is over. With `close_existing: true`, every connection is closed too, the client's own included; otherwise the client carries on | `when`, `duration`, `close_existing` |
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
 | `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
+
+A `listener_down` closes the listening socket, so connecting clients see a refusal, and the port is free during the outage. Should another process take it, sftpit warns and keeps trying to listen again.
 
 Recipes are shorthands for common faults. A rule gives one in place of `match` and `action`, with the location fields of a match:
 
@@ -177,7 +180,7 @@ faults:
 
 A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault, and keeps the file that each faulted upload leaves behind, logging its size and SHA-256 when its handle closes.
 
-Rules can also fire at random, and draw a delay's `duration` or a partial upload's `cutoff_offset` from a range:
+Rules can also fire at random, and draw a `duration` or a partial upload's `cutoff_offset` from a range:
 
 ```yaml
 scenarios:
@@ -215,7 +218,7 @@ faults:
 - **`window`:** the rule applies only from `from` until `until`.
 - **`at` with a connection action:** the action fires at that moment whatever the client is doing, without a `when`.
   - Anchored to a transfer, it fires only while the file is still open, and selects transfers as their file opens, so `attempt` and `decision` apply to it.
-  - Anchored to the run or the connection, it matches only `user` and `key_fingerprint`, and fires once per connection.
+  - Anchored to the run or the connection, it matches only `user` and `key_fingerprint`, and fires once per connection. A `listener_down` at a moment of the run fires once for the run, whether or not anyone is connected, and matches no user or key.
 - **`at` with any other action:** the rule applies to the first request it selects from that moment on, once per run or connection.
 - `at` takes a `{min, max}` range, drawn once per anchor.
 
@@ -237,15 +240,18 @@ faults:
   - id: "first-logins" # the first two logins fail just as they succeed
     match: { operation: "authenticate", user: "test", occurrence: [1, 2] }
     action: { type: "close_connection" }
+  - id: "outage" # the third login takes the server down for 5 s
+    match: { operation: "authenticate", occurrence: [3] }
+    action: { type: "listener_down", duration: "5s", close_existing: true }
 ```
 
-- **Actions:** `delay`, `close_connection` and `freeze_connection`, without `when`.
+- **Actions:** `delay`, `close_connection`, `freeze_connection` and `listener_down`, without `when`.
 - **Matching:** neither event has a path. `connect` comes before the login, so it has no `user` or `key_fingerprint` either.
 - **Counting:** `occurrence` counts connections or logins. A trigger measures from the run.
 - **Limit:** a fault ends with the handshake, which the server gives up after 2 minutes, as OpenSSH's `LoginGraceTime` does.
 - **What clients see:**
-  - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, and a close or reset as the server closing or resetting the connection.
-  - Flysystem's SFTP adapter retries a failed connection 4 times at once, so a Laravel upload rides out four cut-off logins in a row, and fails after five.
+  - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, a close or reset as the server closing or resetting the connection, and a connection refused during an outage as `connect to host 127.0.0.1 port N: Connection refused`.
+  - Flysystem's SFTP adapter retries a failed connection 4 times at once, so a Laravel upload rides out four cut-off logins in a row, and fails after five. Those retries are all refused during an outage, so only an application that backs off for longer than the outage recovers from it.
 
 ## Behavior
 

@@ -61,11 +61,11 @@ var anchors = map[string]faults.Anchor{
 
 // connectionActions are the action types that act on the client's
 // connection or session, and so can fire at a moment.
-var connectionActions = []string{"close_connection", "freeze_connection", "close_subsystem"}
+var connectionActions = []string{"close_connection", "freeze_connection", "close_subsystem", "listener_down"}
 
 // eventActions are the action types that apply to the connection events,
 // connect and authenticate.
-var eventActions = []string{"delay", "close_connection", "freeze_connection"}
+var eventActions = []string{"delay", "close_connection", "freeze_connection", "listener_down"}
 
 type decisionConfig struct {
 	Probability *float64 `yaml:"probability,omitempty"`
@@ -107,19 +107,20 @@ type attemptConfig struct {
 // actionConfig holds the fields of every action type. Each type allows only
 // its own fields.
 type actionConfig struct {
-	Type         string              `yaml:"type"`
-	When         string              `yaml:"when,omitempty"`
-	Duration     *valueRange[string] `yaml:"duration,omitempty"`
-	CutoffOffset *valueRange[uint64] `yaml:"cutoff_offset,omitempty"`
-	Result       string              `yaml:"result,omitempty"`
-	Status       string              `yaml:"status,omitempty"`
-	Mode         string              `yaml:"mode,omitempty"`
-	MaxFreeze    string              `yaml:"max_freeze,omitempty"`
-	Transform    string              `yaml:"transform,omitempty"`
-	Offset       *uint64             `yaml:"offset,omitempty"`
-	Length       *uint64             `yaml:"length,omitempty"`
-	Size         *uint64             `yaml:"size,omitempty"`
-	SizeDelta    *int64              `yaml:"size_delta,omitempty"`
+	Type          string              `yaml:"type"`
+	When          string              `yaml:"when,omitempty"`
+	Duration      *valueRange[string] `yaml:"duration,omitempty"`
+	CutoffOffset  *valueRange[uint64] `yaml:"cutoff_offset,omitempty"`
+	Result        string              `yaml:"result,omitempty"`
+	Status        string              `yaml:"status,omitempty"`
+	Mode          string              `yaml:"mode,omitempty"`
+	MaxFreeze     string              `yaml:"max_freeze,omitempty"`
+	Transform     string              `yaml:"transform,omitempty"`
+	Offset        *uint64             `yaml:"offset,omitempty"`
+	Length        *uint64             `yaml:"length,omitempty"`
+	Size          *uint64             `yaml:"size,omitempty"`
+	SizeDelta     *int64              `yaml:"size_delta,omitempty"`
+	CloseExisting *bool               `yaml:"close_existing,omitempty"`
 }
 
 // valueRange is a value, such as 2s, or a range to draw one from for each
@@ -255,7 +256,7 @@ func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 		noWhen = "at a moment, which acts whatever the client is doing"
 	case rc.Match.hasEvent():
 		if !slices.Contains(eventActions, rc.Action.Type) {
-			return r, fmt.Errorf("action: connect and authenticate take a delay, close_connection or freeze_connection, not a %s", rc.Action.Type)
+			return r, fmt.Errorf("action: connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not a %s", rc.Action.Type)
 		}
 		noWhen = "at connect or authenticate, which have no request to act before or after"
 	}
@@ -487,6 +488,7 @@ var actionFields = map[string][]string{
 	"close_connection":  {"when", "mode"},
 	"freeze_connection": {"when", "max_freeze"},
 	"close_subsystem":   {"when"},
+	"listener_down":     {"when", "duration", "close_existing"},
 	"partial_upload":    {"cutoff_offset", "result", "status", "mode", "max_freeze"},
 	"corrupt_download":  {"transform", "offset", "length"},
 	"wrong_size":        {"size", "size_delta"},
@@ -518,6 +520,8 @@ func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 		var when sftpproxy.When
 		when, err = ac.whenUnless(noWhen)
 		r.Action = sftpproxy.EndSession{When: when}
+	case "listener_down":
+		r.Action, r.Duration, err = ac.listenerDown(noWhen)
 	case "partial_upload":
 		r.Action, r.Cutoff, err = ac.partialUpload()
 	case "corrupt_download":
@@ -532,18 +536,19 @@ func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 func (ac actionConfig) set() []string {
 	var names []string
 	for name, set := range map[string]bool{
-		"when":          ac.When != "",
-		"duration":      ac.Duration != nil,
-		"status":        ac.Status != "",
-		"mode":          ac.Mode != "",
-		"max_freeze":    ac.MaxFreeze != "",
-		"cutoff_offset": ac.CutoffOffset != nil,
-		"result":        ac.Result != "",
-		"transform":     ac.Transform != "",
-		"offset":        ac.Offset != nil,
-		"length":        ac.Length != nil,
-		"size":          ac.Size != nil,
-		"size_delta":    ac.SizeDelta != nil,
+		"when":           ac.When != "",
+		"duration":       ac.Duration != nil,
+		"status":         ac.Status != "",
+		"mode":           ac.Mode != "",
+		"max_freeze":     ac.MaxFreeze != "",
+		"cutoff_offset":  ac.CutoffOffset != nil,
+		"result":         ac.Result != "",
+		"transform":      ac.Transform != "",
+		"offset":         ac.Offset != nil,
+		"length":         ac.Length != nil,
+		"size":           ac.Size != nil,
+		"size_delta":     ac.SizeDelta != nil,
+		"close_existing": ac.CloseExisting != nil,
 	} {
 		if set {
 			names = append(names, name)
@@ -560,21 +565,47 @@ func (ac actionConfig) delay(noWhen string) (sftpproxy.Action, *faults.Range[tim
 	if err != nil {
 		return nil, nil, err
 	}
+	d, drawn, err := ac.duration()
+	if err != nil {
+		return nil, nil, err
+	}
+	return sftpproxy.Delay{When: when, Duration: d}, drawn, nil
+}
+
+// listenerDown returns the outage of ac, which leaves existing connections
+// open unless close_existing is true, and the range it draws its duration
+// from if ac gives one.
+func (ac actionConfig) listenerDown(noWhen string) (sftpproxy.Action, *faults.Range[time.Duration], error) {
+	when, err := ac.whenUnless(noWhen)
+	if err != nil {
+		return nil, nil, err
+	}
+	d, drawn, err := ac.duration()
+	if err != nil {
+		return nil, nil, err
+	}
+	closeExisting := ac.CloseExisting != nil && *ac.CloseExisting
+	return sftpproxy.ListenerDown{When: when, Duration: d, CloseExisting: closeExisting}, drawn, nil
+}
+
+// duration returns ac's duration, or the range to draw it from if ac gives
+// one.
+func (ac actionConfig) duration() (time.Duration, *faults.Range[time.Duration], error) {
 	if ac.Duration == nil {
-		return nil, nil, errors.New("duration is required")
+		return 0, nil, errors.New("duration is required")
 	}
 	lo, err := positiveDuration("duration", ac.Duration.Min)
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, err
 	}
 	if !ac.Duration.ranged {
-		return sftpproxy.Delay{When: when, Duration: lo}, nil, nil
+		return lo, nil, nil
 	}
 	hi, err := positiveDuration("duration", ac.Duration.Max)
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, err
 	}
-	return sftpproxy.Delay{When: when}, &faults.Range[time.Duration]{Min: lo, Max: hi}, nil
+	return 0, &faults.Range[time.Duration]{Min: lo, Max: hi}, nil
 }
 
 func (ac actionConfig) fail() (sftpproxy.Action, error) {

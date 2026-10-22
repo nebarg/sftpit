@@ -169,6 +169,7 @@ func startLimitedServer(t testing.TB, via route, rules *faults.Engine, opts sftp
 	if err != nil {
 		t.Fatalf("sshfront.New: %v", err)
 	}
+	t.Cleanup(runs.ArmTimers(rules, srv, opts.Logger))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)

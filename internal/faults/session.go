@@ -47,7 +47,7 @@ func (e *Engine) Session(c Client) *Session {
 	defer e.mu.Unlock()
 	for _, ru := range e.rules {
 		t := ru.Trigger
-		if t == nil || t.At == nil || t.Anchor == Transfer || !ru.matchesClient(c) {
+		if t == nil || t.At == nil || t.Anchor == Transfer || ru.timedByRun() || !ru.matchesClient(c) {
 			continue
 		}
 		if t.Anchor == Connection {
@@ -61,8 +61,9 @@ func (e *Engine) Session(c Client) *Session {
 				ru.counts.Matched++
 				ru.counts.Selected++
 			}
-			attrs := []any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", m.at.Sub(c.Authenticated)}
-			s.timers = append(s.timers, sftpproxy.Timer{At: m.at, Action: ru.Action, Reserve: e.reserve(ru, attrs, m)})
+			action, drawn := e.drawn(ru, m.key)
+			attrs := append([]any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", m.at.Sub(c.Authenticated)}, drawn...)
+			s.timers = append(s.timers, sftpproxy.Timer{At: m.at, Action: action, Reserve: e.reserve(ru, attrs, m)})
 			continue
 		}
 		if !ru.timedBySession() {

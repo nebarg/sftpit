@@ -23,6 +23,9 @@ type Engine struct {
 
 	mu    sync.Mutex
 	rules []*rule
+
+	// timers are the faults at moments of the run itself.
+	timers []sftpproxy.Timer
 }
 
 // rule is a Rule with its counts.
@@ -57,6 +60,9 @@ type rule struct {
 type connectionMoment struct {
 	at time.Time
 
+	// key is the key of the decisions about the moment.
+	key Key
+
 	// used is set once a rule for requests has applied at the moment, and
 	// fired once a connection action has.
 	used, fired bool
@@ -72,7 +78,8 @@ type drawKey struct {
 // Counts are what a rule has done in a run. A connection action at a moment
 // of the run or the connection counts sessions rather than requests: those
 // whose client it matched, those it was then timed for, and those it fired
-// in.
+// in. A listener_down at a moment of the run is matched and selected once,
+// for the run.
 type Counts struct {
 	// Matched counts the requests the rule matched.
 	Matched uint64
@@ -114,7 +121,25 @@ func New(rules []Rule, seed Seed, logger *slog.Logger) (*Engine, error) {
 		e.rules = append(e.rules, ru)
 	}
 	slices.SortStableFunc(e.rules, func(a, b *rule) int { return cmp.Compare(a.Priority, b.Priority) })
+	for _, ru := range e.rules {
+		if !ru.timedByRun() {
+			continue
+		}
+		ru.counts.Matched++
+		ru.counts.Selected++
+		after := e.runMoment(ru)
+		action, drawn := e.drawn(ru, Key{Rule: ru.ID, Ordinal: 1})
+		attrs := append([]any{"rule", ru.ID, "anchor", Run, "at", after}, drawn...)
+		e.timers = append(e.timers, sftpproxy.Timer{At: e.start.Add(after), Action: action, Reserve: e.reserve(ru, attrs, nil)})
+	}
 	return e, nil
+}
+
+// Timers returns the faults at moments of the run that act on the listener
+// rather than on a session, ListenerDowns, for the run to take whatever its
+// sessions are doing.
+func (e *Engine) Timers() []sftpproxy.Timer {
+	return e.timers
 }
 
 // Check reports the first of rules that an engine cannot apply as written.
@@ -162,8 +187,24 @@ func (e *Engine) fires(r *rule, k Key) bool {
 // action returns r's action for the request of the decision k, with any
 // value r draws for it, which it also returns as log attributes.
 func (e *Engine) action(r *rule, k Key) (sftpproxy.Action, []any) {
+	a, drawn := e.drawn(r, k)
+	if r.timedByTransfer() {
+		at := e.moment(r, k)
+		return sftpproxy.Timed{After: at, Action: a}, append(drawn, "at", at)
+	}
+	return a, drawn
+}
+
+// drawn returns r's action with the values r draws for the decision k, which
+// it also returns as log attributes.
+func (e *Engine) drawn(r *rule, k Key) (sftpproxy.Action, []any) {
 	switch a := r.Action.(type) {
 	case sftpproxy.Delay:
+		if r.Duration != nil {
+			a.Duration = drawFrom(e, k, "duration", *r.Duration)
+			return a, []any{"duration", a.Duration}
+		}
+	case sftpproxy.ListenerDown:
 		if r.Duration != nil {
 			a.Duration = drawFrom(e, k, "duration", *r.Duration)
 			return a, []any{"duration", a.Duration}
@@ -173,10 +214,6 @@ func (e *Engine) action(r *rule, k Key) (sftpproxy.Action, []any) {
 			a.Cutoff = drawFrom(e, k, "cutoff", *r.Cutoff)
 			return a, []any{"cutoff", a.Cutoff}
 		}
-	}
-	if r.timedByTransfer() {
-		at := e.moment(r, k)
-		return sftpproxy.Timed{After: at, Action: r.Action}, []any{"at", at}
 	}
 	return r.Action, nil
 }
@@ -197,8 +234,8 @@ func (e *Engine) connectionMoment(r *rule, c Client) *connectionMoment {
 	m := r.connections[c.Connection]
 	if m == nil {
 		r.users[c.User]++
-		after := e.moment(r, Key{Rule: r.ID, User: c.User, Ordinal: r.users[c.User]})
-		m = &connectionMoment{at: c.Authenticated.Add(after)}
+		k := Key{Rule: r.ID, User: c.User, Ordinal: r.users[c.User]}
+		m = &connectionMoment{at: c.Authenticated.Add(e.moment(r, k)), key: k}
 		r.connections[c.Connection] = m
 	}
 	return m

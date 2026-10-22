@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -184,11 +185,7 @@ func setLocation(l faults.Location, exactly, under, glob, named, namedGlob *stri
 func longAction(r faults.Rule) actionConfig {
 	switch a := r.Action.(type) {
 	case sftpproxy.Delay:
-		ac := actionConfig{Type: "delay", When: actionWhen(r, a.When), Duration: &valueRange[string]{Min: a.Duration.String(), Max: a.Duration.String()}}
-		if d := r.Duration; d != nil {
-			ac.Duration = &valueRange[string]{Min: d.Min.String(), Max: d.Max.String(), ranged: true}
-		}
-		return ac
+		return actionConfig{Type: "delay", When: actionWhen(r, a.When), Duration: longDuration(r, a.Duration)}
 	case sftpproxy.Fail:
 		return actionConfig{Type: "fail", When: whenName(a.When), Status: statusName(a.Status)}
 	case sftpproxy.Drop:
@@ -197,6 +194,8 @@ func longAction(r faults.Rule) actionConfig {
 		return actionConfig{Type: "freeze_connection", When: connectionWhen(r, a.When), MaxFreeze: a.Limit.String()}
 	case sftpproxy.EndSession:
 		return actionConfig{Type: "close_subsystem", When: connectionWhen(r, a.When)}
+	case sftpproxy.ListenerDown:
+		return actionConfig{Type: "listener_down", When: connectionWhen(r, a.When), Duration: longDuration(r, a.Duration), CloseExisting: &a.CloseExisting}
 	case sftpproxy.PartialUpload:
 		ac := actionConfig{Type: "partial_upload", CutoffOffset: &valueRange[uint64]{Min: a.Cutoff, Max: a.Cutoff}}
 		if c := r.Cutoff; c != nil {
@@ -231,6 +230,14 @@ func longAction(r faults.Rule) actionConfig {
 	// The configuration makes no other action, and faults.Check refuses any
 	// other.
 	panic(fmt.Sprintf("config: no long form for %T", r.Action))
+}
+
+// longDuration returns d, or the range that r draws a duration from.
+func longDuration(r faults.Rule, d time.Duration) *valueRange[string] {
+	if rd := r.Duration; rd != nil {
+		return &valueRange[string]{Min: rd.Min.String(), Max: rd.Max.String(), ranged: true}
+	}
+	return &valueRange[string]{Min: d.String(), Max: d.String()}
 }
 
 // actionWhen returns the when of r's action, which has none at connect or

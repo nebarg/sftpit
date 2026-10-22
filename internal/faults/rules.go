@@ -39,8 +39,8 @@ type Rule struct {
 	// open. When it does not fire, the request goes to the next rule.
 	Probability *float64
 
-	// Duration, if set, is the range that a Delay draws its Duration from
-	// for each request the rule fires for, in place of its own.
+	// Duration, if set, is the range that a Delay or ListenerDown draws its
+	// Duration from each time the rule fires, in place of its own.
 	Duration *Range[time.Duration]
 
 	// Cutoff, if set, is the range that a PartialUpload draws its Cutoff
@@ -48,7 +48,8 @@ type Rule struct {
 	Cutoff *Range[uint64]
 
 	// Action is what the rule does to a request it selects: a Delay or
-	// Fail; a Drop, Freeze or EndSession, which are connection actions; a
+	// Fail; a Drop, Freeze, EndSession or ListenerDown, which are connection
+	// actions; a
 	// PartialUpload for the write operation or a CorruptDownload for the
 	// read operation, chosen when the transfer's file is opened; or a
 	// WrongSize for the stat, lstat, fstat and list operations. The engine
@@ -387,9 +388,9 @@ func (r Rule) checkEvents() error {
 		return errors.New("connect comes before the client logs in, so it has no user or key")
 	}
 	switch r.Action.(type) {
-	case sftpproxy.Delay, sftpproxy.Drop, sftpproxy.Freeze:
+	case sftpproxy.Delay, sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.ListenerDown:
 	default:
-		return fmt.Errorf("connect and authenticate take a delay, close_connection or freeze_connection, not %T", r.Action)
+		return fmt.Errorf("connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not %T", r.Action)
 	}
 	if t := r.Trigger; t != nil && (t.Anchor == Connection || t.Anchor == Transfer) {
 		return fmt.Errorf("connect and authenticate are timed from the run, not the %s", t.Anchor)
@@ -400,7 +401,7 @@ func (r Rule) checkEvents() error {
 func (r Rule) checkAction() error {
 	ops := r.Match.Operations
 	switch a := r.Action.(type) {
-	case sftpproxy.Delay, sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession:
+	case sftpproxy.Delay, sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession, sftpproxy.ListenerDown:
 	case sftpproxy.PartialUpload:
 		if !slices.Equal(ops, []Operation{Write}) {
 			return errors.New("a partial upload needs the rule to match the write operation only")
@@ -427,8 +428,12 @@ func (r Rule) checkAction() error {
 }
 
 func (r Rule) checkRanges() error {
-	if _, ok := r.Action.(sftpproxy.Delay); r.Duration != nil && !ok {
-		return errors.New("a duration range needs a delay")
+	switch r.Action.(type) {
+	case sftpproxy.Delay, sftpproxy.ListenerDown:
+	default:
+		if r.Duration != nil {
+			return errors.New("a duration range needs a delay or listener_down")
+		}
 	}
 	if _, ok := r.Action.(sftpproxy.PartialUpload); r.Cutoff != nil && !ok {
 		return errors.New("a cutoff range needs a partial upload")
@@ -481,6 +486,9 @@ func (r Rule) checkTrigger() error {
 		if len(m.Operations) > 0 || m.Path.Kind != Anywhere || m.Target.Kind != Anywhere || m.Attempt != nil || m.Occurrence != nil {
 			return fmt.Errorf("a connection action at a moment of the %s matches only the user and key, not operations, paths, attempts or occurrences", t.Anchor)
 		}
+		if r.timedByRun() && (m.User != "" || m.KeyFingerprint != "") {
+			return errors.New("a listener_down at a moment of the run takes the listener down for everyone, so it matches no user or key")
+		}
 	}
 	return nil
 }
@@ -528,7 +536,7 @@ func (r Rule) isTransfer() bool {
 
 func (r Rule) isConnectionAction() bool {
 	switch r.Action.(type) {
-	case sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession:
+	case sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession, sftpproxy.ListenerDown:
 		return true
 	}
 	return false
@@ -539,6 +547,13 @@ func (r Rule) isConnectionAction() bool {
 func (r Rule) timedBySession() bool {
 	t := r.Trigger
 	return t != nil && t.At != nil && t.Anchor != Transfer && r.isConnectionAction()
+}
+
+// timedByRun reports whether the rule takes the listener down at a moment
+// of the run, which the run takes once, whatever its sessions are doing.
+func (r Rule) timedByRun() bool {
+	_, down := r.Action.(sftpproxy.ListenerDown)
+	return down && r.timedBySession() && r.Trigger.Anchor == Run
 }
 
 // timedByTransfer reports whether the rule fires at a moment measured from

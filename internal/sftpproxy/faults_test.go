@@ -369,6 +369,12 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 			err:     "a sftpproxy.Drop fault needs Options.Conn",
 		},
 		{
+			name:    "listener down without the listener",
+			request: &sftpwire.Stat{Path: "/a"},
+			action:  sftpproxy.ListenerDown{When: sftpproxy.Before, Duration: time.Second},
+			err:     "a ListenerDown fault needs Options.Listener",
+		},
+		{
 			name:    "partial upload on a request other than OPEN",
 			request: &sftpwire.Stat{Path: "/a"},
 			action:  sftpproxy.PartialUpload{Cutoff: 100, Result: fail},
@@ -426,7 +432,7 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 			name:    "timed failure",
 			request: open,
 			action:  sftpproxy.Timed{After: time.Second, Action: fail},
-			err:     "a fault at a moment must be a Drop, Freeze or EndSession, not sftpproxy.Fail",
+			err:     "a fault at a moment must be a Drop, Freeze, EndSession or ListenerDown, not sftpproxy.Fail",
 		},
 		{
 			name:    "timed drop without the connection",

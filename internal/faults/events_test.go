@@ -142,7 +142,7 @@ func TestRulesForConnectionEventsThatCannotApplyAreRefused(t *testing.T) {
 		{"a path", faults.Rule{Match: faults.Match{Operations: ops(faults.Authenticate), Path: faults.Location{Kind: faults.Under, Pattern: "/in"}}, Action: hangUp}, "connect and authenticate have no path"},
 		{"a user at connect", faults.Rule{Match: faults.Match{Operations: ops(faults.Connect, faults.Authenticate), User: "test"}, Action: hangUp}, "connect comes before the client logs in"},
 		{"a key at connect", faults.Rule{Match: faults.Match{Operations: ops(faults.Connect), KeyFingerprint: "SHA256:k"}, Action: hangUp}, "connect comes before the client logs in"},
-		{"a failure", faults.Rule{Match: login, Action: failure}, "connect and authenticate take a delay, close_connection or freeze_connection, not sftpproxy.Fail"},
+		{"a failure", faults.Rule{Match: login, Action: failure}, "connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not sftpproxy.Fail"},
 		{"an end of session", faults.Rule{Match: connect, Action: sftpproxy.EndSession{}}, "not sftpproxy.EndSession"},
 		{"attempts", faults.Rule{Match: faults.Match{Operations: ops(faults.Authenticate), Attempt: &faults.Attempt{Numbers: []uint64{1}}}, Action: hangUp}, "attempts count opens"},
 		{"a connection's window", faults.Rule{Match: login, Trigger: &faults.Trigger{Anchor: faults.Connection, Window: &faults.Window{Until: time.Second}}, Action: slowLogin}, "connect and authenticate are timed from the run, not the connection"},

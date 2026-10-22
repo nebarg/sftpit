@@ -72,6 +72,11 @@ type Options struct {
 	// required if Faults or Timers can give either.
 	Conn Conn
 
+	// Listener is what the client's connection came in through, which
+	// ListenerDown takes down. It is required if Faults or Timers can give
+	// one.
+	Listener Listener
+
 	// ReplyOrder is the order in which replies reach the client. The zero
 	// value is RequestOrder.
 	ReplyOrder ReplyOrder
@@ -111,12 +116,19 @@ type Conn interface {
 	Freeze()
 }
 
+// Listener accepts clients' connections.
+type Listener interface {
+	// Down refuses new connections for d, and if closeExisting closes
+	// every connection.
+	Down(d time.Duration, closeExisting bool)
+}
+
 // Serve relays one SFTP session from client to backend until either side
 // ends it, a fault drops the connection or ends the session, or ctx is
 // cancelled, and closes both before returning. It returns nil when the
-// client ends the session or a Drop, Freeze or EndSession ends it, or
-// ctx.Err() if ctx is cancelled first. Every fault wait has ended by the time Serve returns, so no request
-// reaches the backend afterwards.
+// client ends the session or a fault ends it, or ctx.Err() if ctx is
+// cancelled first. Every fault wait has ended by the time Serve returns, so
+// no request reaches the backend afterwards.
 //
 // Replies reach the client in the order opts.ReplyOrder sets. A malformed
 // client request ends the session, as it does in OpenSSH's sftp-server, and
@@ -129,6 +141,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		backendIn: bufio.NewReader(backend),
 		faults:    opts.Faults,
 		conn:      opts.Conn,
+		listener:  opts.Listener,
 		order:     opts.ReplyOrder,
 		snapshot:  opts.Snapshot,
 		logger:    opts.Logger,
@@ -174,6 +187,7 @@ type session struct {
 	backendIn *bufio.Reader
 	faults    func(Request) Action
 	conn      Conn
+	listener  Listener
 	order     ReplyOrder
 	snapshot  func(string) (Snapshot, error)
 	logger    *slog.Logger
@@ -427,6 +441,10 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 		if s.conn == nil {
 			return fmt.Errorf("sftpproxy: a %T fault needs Options.Conn", a)
 		}
+	case ListenerDown:
+		if s.listener == nil {
+			return errors.New("sftpproxy: a ListenerDown fault needs Options.Listener")
+		}
 	case PartialUpload:
 		if _, ok := p.(*sftpwire.Open); !ok {
 			return fmt.Errorf("sftpproxy: a PartialUpload fault is for OPEN, not %v", operation(p))
@@ -471,9 +489,13 @@ func (s *session) checkMoment(a Action) error {
 		if s.conn == nil {
 			return fmt.Errorf("sftpproxy: a %T fault needs Options.Conn", a)
 		}
+	case ListenerDown:
+		if s.listener == nil {
+			return errors.New("sftpproxy: a ListenerDown fault needs Options.Listener")
+		}
 	case EndSession:
 	default:
-		return fmt.Errorf("sftpproxy: a fault at a moment must be a Drop, Freeze or EndSession, not %T", a)
+		return fmt.Errorf("sftpproxy: a fault at a moment must be a Drop, Freeze, EndSession or ListenerDown, not %T", a)
 	}
 	return nil
 }
@@ -499,6 +521,14 @@ func (s *session) process(req *request) error {
 			}
 		case Fail:
 			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
+			return nil
+		case ListenerDown:
+			if !a.CloseExisting {
+				s.listener.Down(a.Duration, false)
+				break
+			}
+			s.stopForwarding()
+			s.placeDrop(req)
 			return nil
 		case Drop, Freeze, EndSession:
 			s.stopForwarding()
@@ -528,8 +558,7 @@ func (s *session) send(req *request) error {
 	if req.split != nil {
 		s.unanswered++
 	}
-	switch req.action.(type) {
-	case Drop, Freeze, EndSession:
+	if endsSession(req.action) {
 		s.halted = true
 	}
 	s.mu.Unlock()
@@ -615,16 +644,22 @@ func (s *session) at(after time.Duration, closing <-chan struct{}, m *request, r
 	}
 }
 
-// fire takes m's action, unless reserve declines it. Nothing more reaches
-// the backend, and once the backend has answered every request it was sent,
-// the session ends as the action says, whatever replies are still to be
-// written: a connection that fails at a moment loses them.
+// fire takes m's action, unless reserve declines it. A ListenerDown that
+// leaves connections open is taken at once, and the session carries on.
+// Otherwise nothing more reaches the backend, and once the backend has
+// answered every request it was sent, the session ends as the action says,
+// whatever replies are still to be written: a connection that fails at a
+// moment loses them.
 func (s *session) fire(m *request, reserve func() bool) {
 	if reserve != nil && !reserve() {
 		return
 	}
 	s.tracker.fault(m)
 	s.logFault(m)
+	if !endsSession(m.action) {
+		s.listener.Down(m.action.(ListenerDown).Duration, false)
+		return
+	}
 	s.mu.Lock()
 	s.halted, s.fired = true, true
 	drained := s.drained
@@ -747,9 +782,28 @@ func (s *session) deliver(req *request, packet []byte) {
 		s.wg.Go(func() { s.holdReply(req, a.Limit, a.Release, packet) })
 	case Fail:
 		s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
+	case ListenerDown:
+		if !a.CloseExisting {
+			s.listener.Down(a.Duration, false)
+			s.answer(req.reply, outcome{packet: packet})
+			return
+		}
+		s.placeDrop(req)
 	case Drop, Freeze, EndSession:
 		s.placeDrop(req)
 	}
+}
+
+// endsSession reports whether a ends the session where it acts: a Drop,
+// Freeze or EndSession, or a ListenerDown that closes every connection.
+func endsSession(a Action) bool {
+	switch a := a.(type) {
+	case Drop, Freeze, EndSession:
+		return true
+	case ListenerDown:
+		return a.CloseExisting
+	}
+	return false
 }
 
 // armTimed starts the clock of req's Timed on the handle id that req opened.
@@ -828,6 +882,8 @@ func (s *session) drop(req *request) error {
 	switch a := req.action.(type) {
 	case EndSession:
 		return errEnded
+	case ListenerDown:
+		s.listener.Down(a.Duration, true)
 	case Drop:
 		if a.Reset {
 			err = s.conn.Reset()
@@ -890,6 +946,8 @@ func (s *session) faultAttrs(req *request) []any {
 		attrs = append(attrs, "fault", "freeze_connection", "when", when, "limit", a.Limit)
 	case EndSession:
 		attrs = append(attrs, "fault", "close_subsystem", "when", when)
+	case ListenerDown:
+		attrs = append(attrs, "fault", "listener_down", "when", when, "duration", a.Duration, "close_existing", a.CloseExisting)
 	}
 	if req.cut {
 		attrs = append(attrs, "cutoff", req.upload.Cutoff, "offset", req.packet.(*sftpwire.Write).Offset)

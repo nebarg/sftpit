@@ -49,9 +49,9 @@ func (w When) String() string {
 	return "before"
 }
 
-// Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze or
-// EndSession, for an OPEN, a PartialUpload, CorruptDownload or Timed, or for
-// a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize. What else an action
+// Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze,
+// EndSession or ListenerDown, for an OPEN, a PartialUpload, CorruptDownload
+// or Timed, or for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize. What else an action
 // holds back depends on the session's ReplyOrder.
 type Action interface {
 	when() When
@@ -106,6 +106,17 @@ type Freeze struct {
 	When    When
 	Release <-chan struct{}
 	Limit   time.Duration
+}
+
+// ListenerDown takes down the listener the client's connection came in
+// through for Duration, so that new connections are refused, where Drop
+// would close the connection. If CloseExisting, every connection is closed
+// as well, the client's own included, and the session ends as it does at a
+// Drop. Otherwise the session carries on.
+type ListenerDown struct {
+	When          When
+	Duration      time.Duration
+	CloseExisting bool
 }
 
 // PartialUpload, chosen for an OPEN, cuts off uploads through the handle it
@@ -184,8 +195,8 @@ func (c Corruption) String() string {
 
 // Timed, chosen for an OPEN, takes Action once the handle the OPEN returns
 // has been open for After, unless the handle is closed first, whatever the
-// client is doing then. Action is a Drop, Freeze or EndSession, and its When
-// is ignored. Reserve, if set, is called as the moment comes; if it returns
+// client is doing then. Action is a Drop, Freeze, EndSession or
+// ListenerDown, and its When is ignored. Reserve, if set, is called as the moment comes; if it returns
 // false, nothing happens.
 type Timed struct {
 	After   time.Duration
@@ -194,8 +205,8 @@ type Timed struct {
 }
 
 // Timer is a fault for a moment in a session rather than for a request. At
-// At, whatever the client is doing, the session takes Action, a Drop, Freeze
-// or EndSession, whose When is ignored. Reserve, if set, is called as the
+// At, whatever the client is doing, the session takes Action, a Drop,
+// Freeze, EndSession or ListenerDown, whose When is ignored. Reserve, if set, is called as the
 // moment comes; if it returns false, nothing happens.
 type Timer struct {
 	At      time.Time
@@ -226,12 +237,13 @@ func (a WrongSize) reported(actual uint64) uint64 {
 	return a.Size
 }
 
-func (a Delay) when() When      { return a.When }
-func (a Stall) when() When      { return a.When }
-func (a Fail) when() When       { return a.When }
-func (a Drop) when() When       { return a.When }
-func (a Freeze) when() When     { return a.When }
-func (a EndSession) when() When { return a.When }
+func (a Delay) when() When        { return a.When }
+func (a Stall) when() When        { return a.When }
+func (a Fail) when() When         { return a.When }
+func (a Drop) when() When         { return a.When }
+func (a Freeze) when() When       { return a.When }
+func (a EndSession) when() When   { return a.When }
+func (a ListenerDown) when() When { return a.When }
 
 // A session takes a PartialUpload, CorruptDownload, Timed or WrongSize off
 // its request before acting on any, so their when is never asked.

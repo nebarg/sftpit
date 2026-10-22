@@ -59,6 +59,10 @@ scenarios:
       - {id: slow-connect, match: {operation: connect}, decision: {probability: 0.5}, action: {type: delay, duration: {min: 1s, max: 3s}}}
       - {id: first-login, max_triggers: 1, match: {operation: authenticate, user: partner-b, occurrence: [1]}, action: {type: close_connection, mode: rst}}
       - {id: outage, match: {operation: [connect, authenticate]}, trigger: {window: {from: 10s, until: 15s}, anchor: run}, action: {type: freeze_connection, max_freeze: 5s}}
+      - {id: down-at-login, match: {operation: authenticate}, action: {type: listener_down, duration: 5s, close_existing: true}}
+      - {id: down-in-the-run, trigger: {at: 10s, anchor: run}, action: {type: listener_down, duration: {min: 1s, max: 5s}}}
+      - {id: down-after-publishing, match: {operation: rename}, action: {type: listener_down, when: after, duration: 2s}}
+      - {id: down-into-upload, match: {operation: write}, trigger: {at: 2s, anchor: transfer}, action: {type: listener_down, duration: 3s, close_existing: true}}
       - id: first-upload-cutoff
         fail_upload: {path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576}
       - id: random-failures

@@ -293,7 +293,7 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"an unknown user", rule("{operation: stat, user: nobody}", deny), "", `user "nobody" is not a configured user`},
 		{"an unknown key", rule("{operation: stat, key_fingerprint: \"SHA256:abc\"}", deny), "", `key_fingerprint "SHA256:abc" is not one of the configured users' authorized keys`},
 		{"another user's key", rule("{operation: stat, user: test, key_fingerprint: \"SHA256:abc\"}", deny), "", "is not one of test's authorized keys"},
-		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of close_connection, close_subsystem, corrupt_download, delay, fail, freeze_connection, partial_upload, wrong_size`},
+		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of close_connection, close_subsystem, corrupt_download, delay, fail, freeze_connection, listener_down, partial_upload, wrong_size`},
 		{"a field of another action", rule("{operation: stat}", "{type: fail, when: before, status: failure, duration: 1s}"), "", "action: duration does not apply to a fail"},
 		{"no when", rule("{operation: stat}", "{type: fail, status: failure}"), "", "when is required: before the server acts, or after"},
 		{"a bad when", rule("{operation: stat}", "{type: fail, when: during, status: failure}"), "", `when "during" is not before or after`},

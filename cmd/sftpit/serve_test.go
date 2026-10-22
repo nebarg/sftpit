@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -168,6 +169,32 @@ scenarios:
 	s.stop(t)
 	if logs := s.stderr.String(); !strings.Contains(logs, `msg="injected fault" conn=1 request=authenticate user=test fault=close_connection mode=fin`) {
 		t.Errorf("stderr does not log the fault at the first login:\n%s", logs)
+	}
+}
+
+func TestServeTakesTheListenerDownAtAMomentOfTheRun(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeTestFile(t, config, `schema_version: 1
+scenarios:
+  outage:
+    faults:
+      - id: at-the-start
+        trigger: {at: 0s, anchor: run}
+        action: {type: listener_down, duration: 1m}
+`)
+	s := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", "outage")
+	deadline := time.Now().Add(startTimeout)
+	for !strings.Contains(s.stderr.String(), `msg="injected fault" fault=listener_down when=timer duration=1m0s close_existing=false`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("serve did not take the listener down:\n%s", s.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conn, err := net.Dial("tcp", s.addr); !errors.Is(err, syscall.ECONNREFUSED) {
+		if err == nil {
+			conn.Close()
+		}
+		t.Errorf("Dial during the outage = %v, want the connection refused", err)
 	}
 }
 

@@ -180,6 +180,7 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	if err != nil {
 		return err
 	}
+	defer runs.ArmTimers(rules, srv, logger)()
 	ln, err := listenLoopback(cfg.SFTPListen)
 	if err != nil {
 		return err

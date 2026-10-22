@@ -251,8 +251,9 @@ func TestUnusableTimersEndTheSession(t *testing.T) {
 		conn   bool
 		err    string
 	}{
-		{"a failure", sftpproxy.Fail{Status: sftpwire.StatusFailure}, true, "a fault at a moment must be a Drop, Freeze or EndSession, not sftpproxy.Fail"},
+		{"a failure", sftpproxy.Fail{Status: sftpwire.StatusFailure}, true, "a fault at a moment must be a Drop, Freeze, EndSession or ListenerDown, not sftpproxy.Fail"},
 		{"a drop without the connection", sftpproxy.Drop{}, false, "a sftpproxy.Drop fault needs Options.Conn"},
+		{"a listener down without the listener", sftpproxy.ListenerDown{Duration: time.Second}, true, "a ListenerDown fault needs Options.Listener"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

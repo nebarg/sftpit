@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -41,8 +42,9 @@ type proxy struct {
 }
 
 // startProxy runs Serve with opts between a raw test client and backend
-// until the test ends or p.cancel is called. opts.Conn is set to a fakeConn
-// over the client's pipe, and a nil opts.Logger discards the logs. The
+// until the test ends or p.cancel is called. opts.Conn and opts.Listener are
+// set to a fakeConn over the client's pipe, and a nil opts.Logger discards
+// the logs. The
 // client has not sent INIT.
 func startProxy(t *testing.T, backend net.Conn, opts sftpproxy.Options) *proxy {
 	t.Helper()
@@ -51,7 +53,7 @@ func startProxy(t *testing.T, backend net.Conn, opts sftpproxy.Options) *proxy {
 	}
 	clientEnd, proxyEnd := net.Pipe()
 	conn := &fakeConn{stream: proxyEnd}
-	opts.Conn = conn
+	opts.Conn, opts.Listener = conn, conn
 	ctx, cancel := context.WithCancel(t.Context())
 	result := serveInBackground(ctx, proxyEnd, backend, opts)
 	t.Cleanup(func() {
@@ -97,9 +99,10 @@ func (r *proxyResult) wait(t *testing.T) error {
 	}
 }
 
-// fakeConn stands in for the client's connection and records what faults do
-// to it. Closing or resetting it closes the proxy's end of the client pipe,
-// as closing an SSH connection ends its channels.
+// fakeConn stands in for the client's connection and the listener it came
+// in through, and records what faults do to them. Closing or resetting it,
+// or taking the listener down with every connection, closes the proxy's end
+// of the client pipe, as closing an SSH connection ends its channels.
 type fakeConn struct {
 	stream net.Conn
 
@@ -110,6 +113,15 @@ type fakeConn struct {
 func (c *fakeConn) Close() error { c.record("close"); return c.stream.Close() }
 func (c *fakeConn) Reset() error { c.record("reset"); return c.stream.Close() }
 func (c *fakeConn) Freeze()      { c.record("freeze") }
+
+func (c *fakeConn) Down(d time.Duration, closeExisting bool) {
+	if !closeExisting {
+		c.record(fmt.Sprintf("down %v", d))
+		return
+	}
+	c.record(fmt.Sprintf("down %v, closing every connection", d))
+	c.stream.Close()
+}
 
 func (c *fakeConn) record(event string) {
 	c.mu.Lock()
