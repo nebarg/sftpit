@@ -49,10 +49,10 @@ func (w When) String() string {
 	return "before"
 }
 
-// Action is a fault for one request: a Delay, Stall, Fail, Drop or Freeze,
-// for an OPEN, a PartialUpload or CorruptDownload, or for a STAT, LSTAT,
-// FSTAT or READDIR entry, a WrongSize. What else an action holds back
-// depends on the session's ReplyOrder.
+// Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze or
+// EndSession, for an OPEN, a PartialUpload, CorruptDownload or Timed, or for
+// a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize. What else an action
+// holds back depends on the session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -89,6 +89,13 @@ type Fail struct {
 type Drop struct {
 	When  When
 	Reset bool
+}
+
+// EndSession ends the SFTP session where Drop would close the connection,
+// closing the session's channel but not the connection, as a server does
+// when it ends an idle session in an orderly way.
+type EndSession struct {
+	When When
 }
 
 // Freeze stops all traffic on the client's connection where Drop would close
@@ -175,6 +182,27 @@ func (c Corruption) String() string {
 	return fmt.Sprintf("Corruption(%d)", int(c))
 }
 
+// Timed, chosen for an OPEN, takes Action once the handle the OPEN returns
+// has been open for After, unless the handle is closed first, whatever the
+// client is doing then. Action is a Drop, Freeze or EndSession, and its When
+// is ignored. Reserve, if set, is called as the moment comes; if it returns
+// false, nothing happens.
+type Timed struct {
+	After   time.Duration
+	Action  Action
+	Reserve func() bool
+}
+
+// Timer is a fault for a moment in a session rather than for a request. At
+// At, whatever the client is doing, the session takes Action, a Drop, Freeze
+// or EndSession, whose When is ignored. Reserve, if set, is called as the
+// moment comes; if it returns false, nothing happens.
+type Timer struct {
+	At      time.Time
+	Action  Action
+	Reserve func() bool
+}
+
 // WrongSize, chosen for a STAT, LSTAT or FSTAT, or for an entry of a
 // READDIR reply, misreports the size in the backend's reply: as Size or, if
 // Delta is not zero, as the true size plus Delta, but never below 0 or above
@@ -198,14 +226,16 @@ func (a WrongSize) reported(actual uint64) uint64 {
 	return a.Size
 }
 
-func (a Delay) when() When  { return a.When }
-func (a Stall) when() When  { return a.When }
-func (a Fail) when() When   { return a.When }
-func (a Drop) when() When   { return a.When }
-func (a Freeze) when() When { return a.When }
+func (a Delay) when() When      { return a.When }
+func (a Stall) when() When      { return a.When }
+func (a Fail) when() When       { return a.When }
+func (a Drop) when() When       { return a.When }
+func (a Freeze) when() When     { return a.When }
+func (a EndSession) when() When { return a.When }
 
-// A session takes a PartialUpload, CorruptDownload or WrongSize off its
-// request before acting on any, so their when is never asked.
+// A session takes a PartialUpload, CorruptDownload, Timed or WrongSize off
+// its request before acting on any, so their when is never asked.
 func (a PartialUpload) when() When   { return Before }
 func (a CorruptDownload) when() When { return Before }
+func (a Timed) when() When           { return Before }
 func (a WrongSize) when() When       { return Before }

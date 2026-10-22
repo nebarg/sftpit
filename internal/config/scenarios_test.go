@@ -50,7 +50,7 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
           operation: rename
           source: /incoming/orders.csv.part
           target_glob: /incoming/*.csv
-        action: {type: drop, when: after, mode: rst}
+        action: {type: close_connection, when: after, mode: rst}
       - id: partner-b-orders
         match:
           key_fingerprint: `+ssh.FingerprintSHA256(key)+`
@@ -65,7 +65,7 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
         action: {type: wrong_size, size_delta: -1024}
       - id: dead-reply
         match: {operation: any, path_glob: /dead/*}
-        action: {type: drop, when: before, mode: freeze, max_freeze: 2m}
+        action: {type: freeze_connection, when: before, max_freeze: 2m}
       - id: cut-and-close
         match: {operation: write, path: /in/b.csv}
         action: {type: partial_upload, cutoff_offset: 0, result: close_connection, mode: rst}
@@ -293,7 +293,7 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"an unknown user", rule("{operation: stat, user: nobody}", deny), "", `user "nobody" is not a configured user`},
 		{"an unknown key", rule("{operation: stat, key_fingerprint: \"SHA256:abc\"}", deny), "", `key_fingerprint "SHA256:abc" is not one of the configured users' authorized keys`},
 		{"another user's key", rule("{operation: stat, user: test, key_fingerprint: \"SHA256:abc\"}", deny), "", "is not one of test's authorized keys"},
-		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of corrupt_download, delay, drop, fail, partial_upload, wrong_size`},
+		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of close_connection, close_subsystem, corrupt_download, delay, fail, freeze_connection, partial_upload, wrong_size`},
 		{"a field of another action", rule("{operation: stat}", "{type: fail, when: before, status: failure, duration: 1s}"), "", "action: duration does not apply to a fail"},
 		{"no when", rule("{operation: stat}", "{type: fail, status: failure}"), "", "when is required: before the server acts, or after"},
 		{"a bad when", rule("{operation: stat}", "{type: fail, when: during, status: failure}"), "", `when "during" is not before or after`},
@@ -302,9 +302,11 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"a negative duration", rule("{operation: stat}", "{type: delay, when: after, duration: -1s}"), "", `duration "-1s" is not a positive duration`},
 		{"no status", rule("{operation: stat}", "{type: fail, when: before}"), "", "status is required"},
 		{"a status a server cannot send", rule("{operation: stat}", "{type: fail, when: before, status: connection_lost}"), "", `status "connection_lost" is not one of bad_message, eof, failure, no_such_file, op_unsupported, permission_denied`},
-		{"a bad mode", rule("{operation: stat}", "{type: drop, when: before, mode: hangup}"), "", `mode "hangup" is not fin, rst or freeze`},
-		{"a freeze without a bound", rule("{operation: stat}", "{type: drop, when: before, mode: freeze}"), "", "max_freeze is required"},
-		{"a bound without a freeze", rule("{operation: stat}", "{type: drop, when: before, max_freeze: 1s}"), "", "max_freeze applies only to mode freeze"},
+		{"a bad mode", rule("{operation: stat}", "{type: close_connection, when: before, mode: hangup}"), "", `mode "hangup" is not fin or rst`},
+		{"a freeze without a bound", rule("{operation: stat}", "{type: freeze_connection, when: before}"), "", "max_freeze is required"},
+		{"a bound on a close", rule("{operation: stat}", "{type: close_connection, when: before, max_freeze: 1s}"), "", "max_freeze does not apply to a close_connection"},
+		{"a mode on a freeze", rule("{operation: stat}", "{type: freeze_connection, when: before, mode: rst, max_freeze: 1s}"), "", "mode does not apply to a freeze_connection"},
+		{"a connection action without when", rule("{operation: stat}", "{type: close_subsystem}"), "", "when is required: before the server acts, or after"},
 		{"no cutoff", rule("{operation: write}", "{type: partial_upload, result: status, status: failure}"), "", "cutoff_offset is required"},
 		{"no result", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1}"), "", "result is required"},
 		{"a bad result", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: retry}"), "", `result "retry" is not status`},

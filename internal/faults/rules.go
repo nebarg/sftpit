@@ -30,6 +30,10 @@ type Rule struct {
 
 	Match Match
 
+	// Trigger, if set, limits the rule to a span of time, or makes it fire
+	// at a moment.
+	Trigger *Trigger
+
 	// Probability, if set, is the chance that the rule fires for a request
 	// it selects, drawn for each request, or for a transfer once at its
 	// open. When it does not fire, the request goes to the next rule.
@@ -43,14 +47,61 @@ type Rule struct {
 	// from for each transfer the rule selects, in place of its own.
 	Cutoff *Range[uint64]
 
-	// Action is what the rule does to a request it selects: a Delay, Fail,
-	// Drop or Freeze; a PartialUpload for the write operation or a
-	// CorruptDownload for the read operation, chosen when the transfer's
-	// file is opened; or a WrongSize for the stat, lstat, fstat and list
-	// operations. The engine sets the Reserve of a PartialUpload or
-	// CorruptDownload.
+	// Action is what the rule does to a request it selects: a Delay or
+	// Fail; a Drop, Freeze or EndSession, which are connection actions; a
+	// PartialUpload for the write operation or a CorruptDownload for the
+	// read operation, chosen when the transfer's file is opened; or a
+	// WrongSize for the stat, lstat, fstat and list operations. The engine
+	// sets the Reserve of a PartialUpload or CorruptDownload. A connection
+	// action can also fire at a moment, as Trigger says, whatever the client
+	// is doing then.
 	Action sftpproxy.Action
 }
+
+// Trigger says when a rule applies, measured from its Anchor: once, at a
+// moment, or throughout a window. Exactly one of At and Window is set.
+type Trigger struct {
+	Anchor Anchor
+
+	// At is the moment, drawn once per anchor if its bounds differ. A rule
+	// with a connection action fires at the moment, whatever the client is
+	// doing; any other rule applies to the first request it selects from
+	// the moment on, and to no other.
+	At *Range[time.Duration]
+
+	// Window is the span in which the rule applies.
+	Window *Window
+}
+
+// Anchor is what a trigger measures time from.
+type Anchor int
+
+const (
+	// Run measures from the start of the run.
+	Run Anchor = iota + 1
+
+	// Connection measures from when the client's connection authenticated.
+	Connection
+
+	// Transfer measures from when a transfer's file opened, for a
+	// connection action at a moment.
+	Transfer
+)
+
+func (a Anchor) String() string {
+	switch a {
+	case Run:
+		return "run"
+	case Connection:
+		return "connection"
+	case Transfer:
+		return "transfer"
+	}
+	return fmt.Sprintf("Anchor(%d)", int(a))
+}
+
+// Window is the span from From up to Until after a trigger's anchor.
+type Window struct{ From, Until time.Duration }
 
 // Range is the values from Min to Max, inclusive, that a rule draws one of.
 type Range[T ~int64 | ~uint64] struct{ Min, Max T }
@@ -269,7 +320,7 @@ type Attempt struct {
 // check reports a rule that the engine cannot apply as written.
 func (r Rule) check() error {
 	m := r.Match
-	if len(m.Operations) == 0 {
+	if len(m.Operations) == 0 && !r.timedBySession() {
 		return errors.New("needs at least one operation")
 	}
 	for i, op := range m.Operations {
@@ -301,13 +352,16 @@ func (r Rule) check() error {
 	if err := r.checkRanges(); err != nil {
 		return err
 	}
+	if err := r.checkTrigger(); err != nil {
+		return err
+	}
 	return r.checkSelection()
 }
 
 func (r Rule) checkAction() error {
 	ops := r.Match.Operations
 	switch a := r.Action.(type) {
-	case sftpproxy.Delay, sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze:
+	case sftpproxy.Delay, sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession:
 	case sftpproxy.PartialUpload:
 		if !slices.Equal(ops, []Operation{Write}) {
 			return errors.New("a partial upload needs the rule to match the write operation only")
@@ -344,6 +398,52 @@ func (r Rule) checkRanges() error {
 		return err
 	}
 	return r.Cutoff.check("cutoff_offset")
+}
+
+func (r Rule) checkTrigger() error {
+	t := r.Trigger
+	if t == nil {
+		return nil
+	}
+	switch t.Anchor {
+	case Run, Connection, Transfer:
+	default:
+		return errors.New("a trigger needs an anchor: run, connection or transfer")
+	}
+	switch {
+	case (t.At == nil) == (t.Window == nil):
+		return errors.New("a trigger has either at or window")
+	case t.At != nil && t.At.Min < 0:
+		return fmt.Errorf("at %v is before its anchor", t.At.Min)
+	case t.At != nil:
+		if err := t.At.check("at"); err != nil {
+			return err
+		}
+	case t.Window.From < 0 || t.Window.Until <= t.Window.From:
+		return fmt.Errorf("the window from %v until %v is empty or starts before its anchor", t.Window.From, t.Window.Until)
+	}
+	moment := t.At != nil && r.isConnectionAction()
+	if t.Anchor == Transfer {
+		if !moment {
+			return errors.New("a transfer anchor needs at and a connection action, which fires that long after a transfer's file opens; time a fault on a transfer's requests from the run or the connection")
+		}
+		for _, op := range r.Match.Operations {
+			if !slices.Contains([]Operation{OpenRead, OpenWrite, Read, Write}, op) {
+				return fmt.Errorf("a transfer anchor needs transfer operations, open_read, open_write, read and write, not %s", op)
+			}
+		}
+		return nil
+	}
+	if moment {
+		if r.Probability != nil {
+			return fmt.Errorf("a connection action at a moment of the %s takes no probability", t.Anchor)
+		}
+		m := r.Match
+		if len(m.Operations) > 0 || m.Path.Kind != Anywhere || m.Target.Kind != Anywhere || m.Attempt != nil || m.Occurrence != nil {
+			return fmt.Errorf("a connection action at a moment of the %s matches only the user and key, not operations, paths, attempts or occurrences", t.Anchor)
+		}
+	}
+	return nil
 }
 
 func (r Rule) checkSelection() error {
@@ -384,7 +484,29 @@ func (r Rule) isTransfer() bool {
 	case sftpproxy.PartialUpload, sftpproxy.CorruptDownload:
 		return true
 	}
+	return r.timedByTransfer()
+}
+
+func (r Rule) isConnectionAction() bool {
+	switch r.Action.(type) {
+	case sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession:
+		return true
+	}
 	return false
+}
+
+// timedBySession reports whether the rule fires at a moment measured from
+// the run or the connection, rather than at a request.
+func (r Rule) timedBySession() bool {
+	t := r.Trigger
+	return t != nil && t.At != nil && t.Anchor != Transfer && r.isConnectionAction()
+}
+
+// timedByTransfer reports whether the rule fires at a moment measured from
+// a transfer's open.
+func (r Rule) timedByTransfer() bool {
+	t := r.Trigger
+	return t != nil && t.At != nil && t.Anchor == Transfer && r.isConnectionAction()
 }
 
 // selectedAt returns the operations whose requests the rule is decided at:
@@ -396,6 +518,19 @@ func (r Rule) selectedAt() []Operation {
 		return []Operation{OpenWrite}
 	case sftpproxy.CorruptDownload:
 		return []Operation{OpenRead}
+	}
+	if r.timedByTransfer() {
+		var opens []Operation
+		for _, op := range r.Match.Operations {
+			open := OpenWrite
+			if op == Read || op == OpenRead {
+				open = OpenRead
+			}
+			if !slices.Contains(opens, open) {
+				opens = append(opens, open)
+			}
+		}
+		return opens
 	}
 	var ops []Operation
 	for _, op := range r.Match.Operations {

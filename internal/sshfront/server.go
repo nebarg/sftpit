@@ -295,6 +295,7 @@ func (s *Server) serveConn(g *gate) {
 		user:           user.Name,
 		home:           user.Home,
 		keyFingerprint: sc.Permissions.Extensions[extKeyFingerprint],
+		authenticated:  time.Now(),
 		gate:           g,
 	}
 

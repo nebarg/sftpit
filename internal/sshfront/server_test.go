@@ -198,12 +198,19 @@ func TestPublicKeyLogin(t *testing.T) {
 		Handler: handler,
 	})
 
+	before := time.Now()
 	client, err := dial(addr, "partner-b", ssh.PublicKeys(partnerKey))
 	if err != nil {
 		t.Fatalf("login with authorized key failed: %v", err)
 	}
 	defer client.Close()
 	conn := openSFTP(t, client, conns)
+	// The server serves a channel only once the connection has
+	// authenticated.
+	after := time.Now()
+	if at := conn.Authenticated(); at.Before(before) || at.After(after) {
+		t.Errorf("conn.Authenticated() = %v, want during the login, between %v and %v", at, before, after)
+	}
 	wantFingerprint := ssh.FingerprintSHA256(partnerKey.PublicKey())
 	if conn.User() != "partner-b" || conn.Home() != "/partner-b" || conn.KeyFingerprint() != wantFingerprint {
 		t.Errorf("conn = user %q home %q fingerprint %q, want partner-b, /partner-b, %s",

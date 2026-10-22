@@ -270,3 +270,67 @@ func assertHolds(t *testing.T, srv *server, name string, want []byte) {
 		t.Errorf("%s holds %d bytes with SHA-256 %s (%v), want %d with %s", name, len(got), digest(got), err, len(want), digest(want))
 	}
 }
+
+// TestLaravelUploadRecoveryFromAResetMidUpload resets the connection half a
+// second into the first upload, whatever phpseclib is sending then, and
+// checks that the recovering uploader publishes the whole file. Writes in the
+// first two seconds of the run wait, so that the upload is still under way.
+func TestLaravelUploadRecoveryFromAResetMidUpload(t *testing.T) {
+	php := phpseclibOrSkip(t)
+
+	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeFile(t, configFile, []byte(`schema_version: 1
+users:
+  - name: `+testUser+`
+    password_env: TEST_PASSWORD
+scenarios:
+  reset-mid-upload:
+    faults:
+      - id: slow-start
+        match: {operation: write, path: `+temporaryPath+`}
+        trigger: {window: {from: 0s, until: 2s}, anchor: run}
+        action: {type: delay, when: before, duration: 20ms}
+      - id: reset-into-first-upload
+        match: {operation: write, path: `+temporaryPath+`, attempt: {numbers: [1]}}
+        trigger: {at: 500ms, anchor: transfer}
+        action: {type: close_connection, mode: rst}
+`))
+	cfg, err := config.Load(config.Options{
+		ConfigFile: configFile,
+		Scenario:   "reset-mid-upload",
+		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var logs snapshotLog
+	rules, err := faults.New(cfg.Rules(), 0, logs.logger())
+	if err != nil {
+		t.Fatalf("faults.New: %v", err)
+	}
+	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	work := t.TempDir()
+	data := randomBytes(4<<20 + 321)
+	writeFile(t, filepath.Join(work, "orders.csv"), data)
+
+	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	srv.waitForSessions()
+
+	if want := map[string]any{"upload 1": false, "upload 2": true, "move": true}; !maps.Equal(outcomes, want) {
+		t.Errorf("publish.php gave %v, want %v", outcomes, want)
+	}
+	assertHolds(t, srv, publishedPath, data)
+	assertHolds(t, srv, temporaryPath, nil)
+	if got, want := rules.Counts()["reset-into-first-upload"], (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
+		t.Errorf("counts = %+v, want both opens matched and the first reset", got)
+	}
+	for _, want := range []string{
+		`msg="rule fired" rule=reset-into-first-upload request=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1 at=500ms`,
+		`msg="injected fault" path=` + temporaryPath + ` fault=close_connection when=timer mode=rst`,
+		`msg=snapshot path=` + temporaryPath + ` closed_by=fault`,
+	} {
+		if !strings.Contains(logs.text(), want) {
+			t.Errorf("logs lack %s:\n%s", want, logs.text())
+		}
+	}
+}

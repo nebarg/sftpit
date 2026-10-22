@@ -115,16 +115,33 @@ func (r valueRange[T]) MarshalYAML() (any, error) {
 // longForm returns r as a rule in the long form, with every default
 // spelled out.
 func longForm(r faults.Rule) ruleConfig {
-	rc := ruleConfig{ID: r.ID, Priority: r.Priority, MaxTriggers: r.MaxTriggers, Match: longMatch(r.Match), Action: longAction(r)}
+	rc := ruleConfig{ID: r.ID, Priority: r.Priority, MaxTriggers: r.MaxTriggers, Match: longMatch(r.Match), Trigger: longTrigger(r.Trigger), Action: longAction(r)}
 	if r.Probability != nil {
 		scope := "operation"
 		switch r.Action.(type) {
 		case sftpproxy.PartialUpload, sftpproxy.CorruptDownload:
 			scope = "transfer"
 		}
+		if r.Trigger != nil && r.Trigger.Anchor == faults.Transfer {
+			scope = "transfer"
+		}
 		rc.Decision = &decisionConfig{Probability: r.Probability, Scope: scope}
 	}
 	return rc
+}
+
+func longTrigger(t *faults.Trigger) *triggerConfig {
+	if t == nil {
+		return nil
+	}
+	tc := &triggerConfig{Anchor: t.Anchor.String()}
+	if at := t.At; at != nil {
+		tc.At = &valueRange[string]{Min: at.Min.String(), Max: at.Max.String(), ranged: at.Min != at.Max}
+	}
+	if w := t.Window; w != nil {
+		tc.Window = &windowConfig{From: w.From.String(), Until: w.Until.String()}
+	}
+	return tc
 }
 
 func longMatch(m faults.Match) matchConfig {
@@ -175,9 +192,11 @@ func longAction(r faults.Rule) actionConfig {
 	case sftpproxy.Fail:
 		return actionConfig{Type: "fail", When: whenName(a.When), Status: statusName(a.Status)}
 	case sftpproxy.Drop:
-		return actionConfig{Type: "drop", When: whenName(a.When), Mode: dropMode(a)}
+		return actionConfig{Type: "close_connection", When: connectionWhen(r, a.When), Mode: dropMode(a)}
 	case sftpproxy.Freeze:
-		return actionConfig{Type: "drop", When: whenName(a.When), Mode: "freeze", MaxFreeze: a.Limit.String()}
+		return actionConfig{Type: "freeze_connection", When: connectionWhen(r, a.When), MaxFreeze: a.Limit.String()}
+	case sftpproxy.EndSession:
+		return actionConfig{Type: "close_subsystem", When: connectionWhen(r, a.When)}
 	case sftpproxy.PartialUpload:
 		ac := actionConfig{Type: "partial_upload", CutoffOffset: &valueRange[uint64]{Min: a.Cutoff, Max: a.Cutoff}}
 		if c := r.Cutoff; c != nil {
@@ -212,6 +231,15 @@ func longAction(r faults.Rule) actionConfig {
 	// The configuration makes no other action, and faults.Check refuses any
 	// other.
 	panic(fmt.Sprintf("config: no long form for %T", r.Action))
+}
+
+// connectionWhen returns the when of r's connection action, which has none
+// at a moment.
+func connectionWhen(r faults.Rule, w sftpproxy.When) string {
+	if r.Trigger != nil && r.Trigger.At != nil {
+		return ""
+	}
+	return whenName(w)
 }
 
 func whenName(w sftpproxy.When) string {

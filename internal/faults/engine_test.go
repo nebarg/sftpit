@@ -39,6 +39,12 @@ func newEngine(t *testing.T, rules ...faults.Rule) *faults.Engine {
 	return e
 }
 
+// session returns the faults of a session of user, logged in with key, or
+// with a password if key is "".
+func session(e *faults.Engine, user, key string) func(sftpproxy.Request) sftpproxy.Action {
+	return e.Session(faults.Client{User: user, KeyFingerprint: key}).Decide
+}
+
 func failOn(id string, m faults.Match) faults.Rule {
 	return faults.Rule{ID: id, Match: m, Action: failure}
 }
@@ -75,12 +81,12 @@ func TestRequestsAreNamedByOperation(t *testing.T) {
 	for _, tt := range tests {
 		for _, op := range []faults.Operation{tt.op, faults.Any} {
 			e := newEngine(t, failOn("r", faults.Match{Operations: ops(op)}))
-			if got := e.Session("test", "")(tt.request); got != failure {
+			if got := session(e, "test", "")(tt.request); got != failure {
 				t.Errorf("a rule for %s gave %#v for %T, want its fault", op, got, tt.request.Packet)
 			}
 		}
 		e := newEngine(t, failOn("r", faults.Match{Operations: ops(faults.Mkdir)}))
-		if tt.op != faults.Mkdir && e.Session("test", "")(tt.request) != nil {
+		if tt.op != faults.Mkdir && session(e, "test", "")(tt.request) != nil {
 			t.Errorf("a rule for mkdir matched %T", tt.request.Packet)
 		}
 	}
@@ -103,7 +109,7 @@ func TestLocationsMatchCanonicalPaths(t *testing.T) {
 	}
 	for _, tt := range tests {
 		e := newEngine(t, failOn("r", faults.Match{Operations: ops(faults.Stat), Path: tt.location}))
-		decide := e.Session("test", "")
+		decide := session(e, "test", "")
 		for _, p := range tt.matches {
 			if decide(on(&sftpwire.Stat{}, p)) == nil {
 				t.Errorf("%+v did not match %q", tt.location, p)
@@ -123,7 +129,7 @@ func TestRenamesMatchTheirSourceAndTarget(t *testing.T) {
 		Path:       faults.Location{Kind: faults.NamedGlob, Pattern: "*.part"},
 		Target:     faults.Location{Kind: faults.Exactly, Pattern: "/in/a.csv"},
 	}))
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	rename := func(from, to string) sftpproxy.Request {
 		return sftpproxy.Request{Packet: &sftpwire.Rename{OldPath: from, NewPath: to}, Path: from, Target: to}
 	}
@@ -138,11 +144,11 @@ func TestRenamesMatchTheirSourceAndTarget(t *testing.T) {
 func TestCredentialsNarrowAMatch(t *testing.T) {
 	e := newEngine(t, failOn("r", faults.Match{Operations: ops(faults.Stat), User: "partner-b", KeyFingerprint: "SHA256:abc"}))
 	stat := on(&sftpwire.Stat{}, "/f")
-	if e.Session("partner-b", "SHA256:abc")(stat) == nil {
+	if session(e, "partner-b", "SHA256:abc")(stat) == nil {
 		t.Error("the user's key was not matched")
 	}
 	for _, s := range []struct{ user, key string }{{"partner-b", ""}, {"partner-b", "SHA256:other"}, {"test", "SHA256:abc"}} {
-		if e.Session(s.user, s.key)(stat) != nil {
+		if session(e, s.user, s.key)(stat) != nil {
 			t.Errorf("%q with key %q was matched", s.user, s.key)
 		}
 	}
@@ -155,7 +161,7 @@ func TestTheFirstRuleToSelectARequestWins(t *testing.T) {
 		faults.Rule{ID: "first", Priority: 10, Match: stat, Action: failure},
 		faults.Rule{ID: "tied", Priority: 10, Match: stat, Action: denied},
 	)
-	if got := e.Session("test", "")(on(&sftpwire.Stat{}, "/f")); got != failure {
+	if got := session(e, "test", "")(on(&sftpwire.Stat{}, "/f")); got != failure {
 		t.Errorf("got %#v, want the lowest priority's fault, declared first among ties", got)
 	}
 	counts := e.Counts()
@@ -179,7 +185,7 @@ func TestOccurrencesCountEveryMatch(t *testing.T) {
 		faults.Rule{ID: "first", Priority: 1, Match: first, Action: denied},
 		faults.Rule{ID: "second", Priority: 2, Match: second, Action: failure},
 	)
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	// The second rule counts the first rename although the first rule
 	// takes it.
 	for i, want := range []sftpproxy.Action{denied, failure, nil} {
@@ -209,7 +215,7 @@ func TestAttemptsCountOpensSeparately(t *testing.T) {
 			attempt := tt.attempt
 			e := newEngine(t, failOn("r", faults.Match{Operations: ops(faults.OpenWrite), Attempt: &attempt}))
 			for i, o := range opens {
-				got := e.Session(o.user, "")(openFor(o.path, write)) != nil
+				got := session(e, o.user, "")(openFor(o.path, write)) != nil
 				if got != tt.fails[i] {
 					t.Errorf("open %d (%s %s) failed: %v, want %v", i+1, o.user, o.path, got, tt.fails[i])
 				}
@@ -224,7 +230,7 @@ func TestMaxTriggersLeavesLaterRequestsToOtherRules(t *testing.T) {
 		faults.Rule{ID: "twice", Priority: 1, MaxTriggers: 2, Match: stat, Action: denied},
 		faults.Rule{ID: "then", Priority: 2, Match: stat, Action: failure},
 	)
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	for i, want := range []sftpproxy.Action{denied, denied, failure} {
 		if got := decide(on(&sftpwire.Stat{}, "/f")); got != want {
 			t.Errorf("stat %d got %#v, want %#v", i+1, got, want)
@@ -246,7 +252,7 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	if decide(on(&sftpwire.Write{}, "/in/a.csv")) != nil {
 		t.Error("a write was given the transfer's fault, which belongs to the open")
 	}
@@ -286,7 +292,7 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 func TestDownloadsAreSelectedAtTheirOpenForReading(t *testing.T) {
 	corrupt := sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Offset: 0, Length: 64}
 	e := newEngine(t, faults.Rule{ID: "flip", Match: faults.Match{Operations: ops(faults.Read)}, Action: corrupt})
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	if decide(openFor("/f", sftpwire.OpenWrite)) != nil {
 		t.Error("an open for writing was given a download's fault")
 	}
@@ -301,7 +307,7 @@ func TestWrongSizesApplyToListingEntries(t *testing.T) {
 		faults.Rule{ID: "short", Priority: 1, Match: faults.Match{Operations: ops(faults.Stat, faults.List)}, Action: shrink},
 		faults.Rule{ID: "slow", Priority: 2, Match: faults.Match{Operations: ops(faults.List)}, Action: sftpproxy.Delay{Duration: time.Second}},
 	)
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	entry := sftpproxy.Request{Packet: &sftpwire.ReadDir{}, Path: "/d/a.csv", Entry: true}
 	if got := decide(entry); got != shrink {
 		t.Errorf("a listing entry got %#v, want the wrong size", got)
@@ -313,7 +319,7 @@ func TestWrongSizesApplyToListingEntries(t *testing.T) {
 		t.Error("a READDIR request did not get the listing's delay")
 	}
 	e = newEngine(t, faults.Rule{ID: "slow", Match: faults.Match{Operations: ops(faults.List)}, Action: sftpproxy.Delay{Duration: time.Second}})
-	if e.Session("test", "")(entry) != nil {
+	if session(e, "test", "")(entry) != nil {
 		t.Error("a listing entry got a delay, which only applies to requests")
 	}
 }
@@ -341,7 +347,7 @@ func TestARandomRuleDrawsFromTheKeyOfEachRequest(t *testing.T) {
 		} else {
 			missed++
 		}
-		if got := e.Session(user, "")(openFor(path, write)); got != want {
+		if got := session(e, user, "")(openFor(path, write)); got != want {
 			t.Errorf("open %d (%s %s) got %#v, want %#v", i+1, user, path, got, want)
 		}
 	}
@@ -362,7 +368,7 @@ func TestProbabilitiesOfNoneAndAll(t *testing.T) {
 	for _, p := range []float64{0, 1} {
 		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Probability: probability(p), Action: failure})
 		for range 20 {
-			if got := e.Session("test", "")(on(&sftpwire.Stat{}, "/f")) != nil; got != (p == 1) {
+			if got := session(e, "test", "")(on(&sftpwire.Stat{}, "/f")) != nil; got != (p == 1) {
 				t.Fatalf("with probability %v, a stat got the fault: %v", p, got)
 			}
 		}
@@ -380,7 +386,7 @@ func TestRangesDrawAValueForEachDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	seen := make(map[time.Duration]bool)
 	for i := range uint64(20) {
 		key := faults.Key{Rule: "slow", Choice: "duration", User: "test", Path: "/f", Operation: "stat", Ordinal: i + 1}
@@ -418,7 +424,7 @@ func TestRangesDrawAValueForEachDecision(t *testing.T) {
 func TestEachOperationCountsItsOwnDraws(t *testing.T) {
 	durations := faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Second}
 	e := newEngine(t, faults.Rule{ID: "slow", Match: faults.Match{Operations: ops(faults.Stat, faults.LStat)}, Duration: &durations, Action: sftpproxy.Delay{}})
-	decide := e.Session("test", "")
+	decide := session(e, "test", "")
 	requests := []struct {
 		packet  sftpwire.Packet
 		op      string
@@ -439,7 +445,7 @@ func TestEachOperationCountsItsOwnDraws(t *testing.T) {
 
 func TestARangeOfOneValueDrawsIt(t *testing.T) {
 	e := newEngine(t, faults.Rule{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Cutoff: &faults.Range[uint64]{Min: 10, Max: 10}, Action: cutOff})
-	if a, ok := e.Session("test", "")(openFor("/f", sftpwire.OpenWrite)).(sftpproxy.PartialUpload); !ok || a.Cutoff != 10 {
+	if a, ok := session(e, "test", "")(openFor("/f", sftpwire.OpenWrite)).(sftpproxy.PartialUpload); !ok || a.Cutoff != 10 {
 		t.Errorf("the open got %#v, want a cutoff of 10", a)
 	}
 }
@@ -452,7 +458,7 @@ func TestProbabilityDecisionsAreLogged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.Session("partner-b", "")(on(&sftpwire.Remove{}, "/out/a.csv"))
+	session(e, "partner-b", "")(on(&sftpwire.Remove{}, "/out/a.csv"))
 	key := faults.Key{Rule: "random", Choice: "probability", User: "partner-b", Path: "/out/a.csv", Operation: "remove", Ordinal: 1}
 	draw := testSeed.Draw(key)
 	line := fmt.Sprintf(`level=DEBUG msg=decision key.rule=random key.activation=0 key.choice=probability key.user=partner-b key.path=/out/a.csv key.operation=remove key.ordinal=1 draw=%d probability=0.25 fires=%v`, draw, draw.Fires(0.25))
@@ -463,7 +469,6 @@ func TestProbabilityDecisionsAreLogged(t *testing.T) {
 
 func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 	read := faults.Match{Operations: ops(faults.Read)}
-	stat := faults.Match{Operations: ops(faults.Stat)}
 	write := faults.Match{Operations: ops(faults.Write)}
 	tests := []struct {
 		name  string
@@ -499,6 +504,20 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"a cutoff range off a partial upload", []faults.Rule{{ID: "r", Match: write, Cutoff: &faults.Range[uint64]{Min: 1, Max: 2}, Action: sftpproxy.Delay{}}}, "a cutoff range needs a partial upload"},
 		{"an empty duration range", []faults.Rule{{ID: "r", Match: stat, Duration: &faults.Range[time.Duration]{Min: 3 * time.Second, Max: 200 * time.Millisecond}, Action: sftpproxy.Delay{}}}, "the duration range's min 3s is above its max 200ms"},
 		{"an empty cutoff range", []faults.Rule{{ID: "r", Match: write, Cutoff: &faults.Range[uint64]{Min: 2, Max: 1}, Action: cutOff}}, "the cutoff_offset range's min 2 is above its max 1"},
+		{"a trigger without an anchor", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{At: at(time.Second)}, Action: failure}}, "a trigger needs an anchor"},
+		{"a trigger with neither form", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run}, Action: failure}}, "a trigger has either at or window"},
+		{"a trigger with both forms", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second), Window: &faults.Window{Until: time.Second}}, Action: failure}}, "a trigger has either at or window"},
+		{"a moment before its anchor", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(-time.Second)}, Action: failure}}, "at -1s is before its anchor"},
+		{"an empty range of moments", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: &faults.Range[time.Duration]{Min: 2, Max: 1}}, Action: failure}}, "the at range's min 2ns is above its max 1ns"},
+		{"an empty window", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{From: time.Second, Until: time.Second}}, Action: failure}}, "the window from 1s until 1s is empty"},
+		{"a window before its anchor", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{From: -time.Second, Until: time.Second}}, Action: failure}}, "starts before its anchor"},
+		{"a transfer's moment for a failure", []faults.Rule{{ID: "r", Match: write, Trigger: &faults.Trigger{Anchor: faults.Transfer, At: at(time.Second)}, Action: failure}}, "a transfer anchor needs at and a connection action"},
+		{"a transfer's window", []faults.Rule{{ID: "r", Match: write, Trigger: &faults.Trigger{Anchor: faults.Transfer, Window: &faults.Window{Until: time.Second}}, Action: sftpproxy.Drop{}}}, "a transfer anchor needs at and a connection action"},
+		{"a transfer's moment off transfers", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Transfer, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a transfer anchor needs transfer operations, open_read, open_write, read and write, not stat"},
+		{"a run's moment for operations", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a connection action at a moment of the run matches only the user and key"},
+		{"a connection's moment for a path", []faults.Rule{{ID: "r", Match: faults.Match{Path: faults.Location{Kind: faults.Exactly, Pattern: "/a"}}, Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Second)}, Action: sftpproxy.EndSession{}}}, "a connection action at a moment of the connection matches only the user and key"},
+		{"a connection's moment by chance", []faults.Rule{{ID: "r", Probability: probability(0.5), Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a connection action at a moment of the connection takes no probability"},
+		{"no operation for a request", []faults.Rule{{ID: "r", Trigger: &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{Until: time.Second}}, Action: sftpproxy.Drop{}}}, "needs at least one operation"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

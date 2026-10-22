@@ -16,6 +16,7 @@ type Conn struct {
 	user           string
 	home           string
 	keyFingerprint string
+	authenticated  time.Time
 	gate           *gate
 }
 
@@ -31,6 +32,9 @@ func (c *Conn) Home() string { return c.home }
 // KeyFingerprint returns the SHA256 fingerprint of the public key the client
 // authenticated with, or "" if it logged in with a password.
 func (c *Conn) KeyFingerprint() string { return c.keyFingerprint }
+
+// Authenticated returns when the client finished authenticating.
+func (c *Conn) Authenticated() time.Time { return c.authenticated }
 
 // Close closes the connection normally, so the client sees a TCP FIN. The
 // server stops reading and writing at once, but discards whatever the client

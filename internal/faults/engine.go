@@ -7,16 +7,18 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
-// Engine applies the rules of a scenario to the requests of one run. Each
-// rule counts the requests it matches from the start of the run, and draws
-// its random decisions from the run's seed. Its methods are safe for
-// concurrent use.
+// Engine applies the rules of a scenario to the requests of one run, which
+// starts when the engine is made. Each rule counts the requests it matches
+// from the start of the run, and draws its random decisions from the run's
+// seed. Its methods are safe for concurrent use.
 type Engine struct {
 	seed   Seed
+	start  time.Time
 	logger *slog.Logger
 
 	mu    sync.Mutex
@@ -36,6 +38,28 @@ type rule struct {
 	// draws counts the requests of each user, path and operation, for a
 	// rule that makes random decisions.
 	draws map[drawKey]uint64
+
+	// connections holds the moment of each connection, for a rule with a
+	// moment measured from the connection, and users counts each user's
+	// connections, which draw their moments in turn.
+	connections map[uint64]*connectionMoment
+	users       map[string]uint64
+
+	// runAt is the moment of a rule with a moment measured from the run,
+	// once drawn, and usedRunAt is set once a rule for requests has applied
+	// at it.
+	runAt     *time.Duration
+	usedRunAt bool
+}
+
+// connectionMoment is a connection's moment for a rule. Every session on the
+// connection shares it.
+type connectionMoment struct {
+	at time.Time
+
+	// used is set once a rule for requests has applied at the moment, and
+	// fired once a connection action has.
+	used, fired bool
 }
 
 type attemptKey struct{ user, path string }
@@ -45,7 +69,10 @@ type drawKey struct {
 	op         Operation
 }
 
-// Counts are what a rule has done in a run.
+// Counts are what a rule has done in a run. A connection action at a moment
+// of the run or the connection counts sessions rather than requests: those
+// whose client it matched, those it was then timed for, and those it fired
+// in.
 type Counts struct {
 	// Matched counts the requests the rule matched.
 	Matched uint64
@@ -61,9 +88,10 @@ type Counts struct {
 	Fired uint64
 }
 
-// New returns an engine for rules, which draws its random decisions from
-// seed and logs each fault it injects to logger, or to slog.Default() if
-// logger is nil. It logs each random decision at debug level.
+// New returns an engine for rules, for a run that starts now. It draws its
+// random decisions from seed and logs each fault it injects to logger, or to
+// slog.Default() if logger is nil. It logs each random decision at debug
+// level.
 func New(rules []Rule, seed Seed, logger *slog.Logger) (*Engine, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -71,10 +99,16 @@ func New(rules []Rule, seed Seed, logger *slog.Logger) (*Engine, error) {
 	if err := Check(rules); err != nil {
 		return nil, err
 	}
-	e := &Engine{seed: seed, logger: logger}
+	e := &Engine{seed: seed, start: time.Now(), logger: logger}
 	for _, r := range rules {
-		ru := &rule{Rule: r, ops: r.selectedAt(), attempts: make(map[attemptKey]uint64)}
-		if r.Probability != nil || r.Duration != nil || r.Cutoff != nil {
+		ru := &rule{
+			Rule:        r,
+			ops:         r.selectedAt(),
+			attempts:    make(map[attemptKey]uint64),
+			connections: make(map[uint64]*connectionMoment),
+			users:       make(map[string]uint64),
+		}
+		if r.Probability != nil || r.Duration != nil || r.Cutoff != nil || r.Trigger != nil {
 			ru.draws = make(map[drawKey]uint64)
 		}
 		e.rules = append(e.rules, ru)
@@ -101,15 +135,6 @@ func Check(rules []Rule) error {
 	return nil
 }
 
-// Session returns the faults for one SFTP session, whose client logged in as
-// user with the key whose fingerprint is keyFingerprint, or with a password
-// if keyFingerprint is empty. It is meant for sftpproxy.Options.Faults.
-func (e *Engine) Session(user, keyFingerprint string) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
-		return e.decide(user, keyFingerprint, r)
-	}
-}
-
 // Counts returns what each rule has done so far, by rule ID.
 func (e *Engine) Counts() map[string]Counts {
 	e.mu.Lock()
@@ -119,48 +144,6 @@ func (e *Engine) Counts() map[string]Counts {
 		counts[r.ID] = r.counts
 	}
 	return counts
-}
-
-// decide returns the action of the first rule that selects r and fires for
-// it, if any. Every rule that matches r counts it, whichever rule is chosen,
-// so a rule's attempts, occurrences and draws do not depend on the rules
-// before it.
-func (e *Engine) decide(user, keyFingerprint string, r sftpproxy.Request) sftpproxy.Action {
-	op := operationOf(r)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var chosen *rule
-	var ordinal uint64
-	var key Key
-	for _, ru := range e.rules {
-		if !ru.matches(user, keyFingerprint, op, r) {
-			continue
-		}
-		n := ru.count(user, r.Path)
-		k := ru.decisionKey(user, r.Path, op)
-		if chosen == nil && ru.selects(n) && !ru.spent() && e.fires(ru, k) {
-			chosen, ordinal, key = ru, n, k
-		}
-	}
-	if chosen == nil {
-		return nil
-	}
-	chosen.counts.Selected++
-	action, drawn := e.action(chosen, key)
-	fired := append([]any{"rule", chosen.ID, "request", op, "path", r.Path, "user", user, "ordinal", ordinal}, drawn...)
-	switch a := action.(type) {
-	case sftpproxy.PartialUpload:
-		a.Reserve = e.reserve(chosen, fired)
-		e.logger.Debug("rule selected", fired...)
-		return a
-	case sftpproxy.CorruptDownload:
-		a.Reserve = e.reserve(chosen, fired)
-		e.logger.Debug("rule selected", fired...)
-		return a
-	}
-	chosen.counts.Fired++
-	e.logger.Info("rule fired", fired...)
-	return action
 }
 
 // fires reports whether r fires for the request of the decision k, which it
@@ -191,7 +174,43 @@ func (e *Engine) action(r *rule, k Key) (sftpproxy.Action, []any) {
 			return a, []any{"cutoff", a.Cutoff}
 		}
 	}
+	if r.timedByTransfer() {
+		at := e.moment(r, k)
+		return sftpproxy.Timed{After: at, Action: r.Action}, []any{"at", at}
+	}
 	return r.Action, nil
+}
+
+// moment returns the moment of r's trigger for the decision k: its at,
+// drawn if its bounds differ.
+func (e *Engine) moment(r *rule, k Key) time.Duration {
+	at := r.Trigger.At
+	if at.Min == at.Max {
+		return at.Min
+	}
+	return drawFrom(e, k, "at", *at)
+}
+
+// connectionMoment returns c's connection's moment for r, drawn the first
+// time one of its sessions asks.
+func (e *Engine) connectionMoment(r *rule, c Client) *connectionMoment {
+	m := r.connections[c.Connection]
+	if m == nil {
+		r.users[c.User]++
+		after := e.moment(r, Key{Rule: r.ID, User: c.User, Ordinal: r.users[c.User]})
+		m = &connectionMoment{at: c.Authenticated.Add(after)}
+		r.connections[c.Connection] = m
+	}
+	return m
+}
+
+// runMoment returns the moment of r's trigger from the run, drawn once.
+func (e *Engine) runMoment(r *rule) time.Duration {
+	if r.runAt == nil {
+		at := e.moment(r, Key{Rule: r.ID, Ordinal: 1})
+		r.runAt = &at
+	}
+	return *r.runAt
 }
 
 // drawFrom returns the value that the choice of the decision k draws from r.
@@ -203,12 +222,20 @@ func drawFrom[T ~int64 | ~uint64](e *Engine, k Key, choice string, r Range[T]) T
 	return v
 }
 
-// reserve returns the Reserve of a transfer that r selected, which lets the
-// fault take effect if r has not used up its MaxTriggers by then.
-func (e *Engine) reserve(r *rule, attrs []any) func() bool {
+// reserve returns the Reserve of a transfer that r selected, or of a moment
+// it timed, which lets the fault take effect if r has not used up its
+// MaxTriggers by then. A moment of a connection takes effect only once,
+// whichever of the connection's sessions it is timed for.
+func (e *Engine) reserve(r *rule, attrs []any, once *connectionMoment) func() bool {
 	return func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		if once != nil {
+			if once.fired {
+				return false
+			}
+			once.fired = true
+		}
 		if r.spent() {
 			e.logger.Info("rule suppressed", append(attrs, "reason", "max_triggers")...)
 			return false
@@ -219,13 +246,16 @@ func (e *Engine) reserve(r *rule, attrs []any) func() bool {
 	}
 }
 
-func (r *rule) matches(user, keyFingerprint string, op Operation, req sftpproxy.Request) bool {
-	m := r.Match
+func (r *rule) matches(c Client, op Operation, req sftpproxy.Request) bool {
 	return slices.Contains(r.ops, op) &&
-		(m.User == "" || m.User == user) &&
-		(m.KeyFingerprint == "" || m.KeyFingerprint == keyFingerprint) &&
-		m.Path.matches(req.Path) &&
-		m.Target.matches(req.Target)
+		r.matchesClient(c) &&
+		r.Match.Path.matches(req.Path) &&
+		r.Match.Target.matches(req.Target)
+}
+
+func (r *rule) matchesClient(c Client) bool {
+	m := r.Match
+	return (m.User == "" || m.User == c.User) && (m.KeyFingerprint == "" || m.KeyFingerprint == c.KeyFingerprint)
 }
 
 // count counts a request the rule matched and returns its ordinal: its

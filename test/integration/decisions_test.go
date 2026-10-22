@@ -55,7 +55,7 @@ func TestSeededFailuresRepeat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}
-		failures := &uploadOutcomes{faults: rules.Session(testUser, "")}
+		failures := &uploadOutcomes{faults: rules.Session(faults.Client{User: testUser}).Decide}
 		srv := startServer(t, proxied, sftpproxy.Options{Faults: failures.decide})
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "orders.csv"), []byte("id,total\n1,9.99\n"))

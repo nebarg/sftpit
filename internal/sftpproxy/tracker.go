@@ -66,6 +66,9 @@ type request struct {
 	// wrongSize is the size to misreport in the reply.
 	wrongSize *WrongSize
 
+	// timed is the fault, for an OPEN, that its handle takes after a time.
+	timed *Timed
+
 	// snapshot is set for the CLOSE of a faulted file handle, and closed
 	// once the session has snapshotted the file.
 	snapshot chan struct{}
@@ -106,6 +109,9 @@ type handle struct {
 	// snapshotted is set once the session has snapshotted the handle's
 	// file.
 	snapshotted bool
+
+	// closing, if set, is closed when the handle's CLOSE is sent.
+	closing chan struct{}
 }
 
 // newTracker returns a tracker for a session whose backend default directory
@@ -216,6 +222,16 @@ func (t *tracker) use(req *request, id string) {
 	}
 }
 
+// watchClose returns the open handle id and a channel that is closed when
+// the handle's CLOSE is sent.
+func (t *tracker) watchClose(id string) (*handle, <-chan struct{}) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	h := t.handles[id]
+	h.closing = make(chan struct{})
+	return h, h.closing
+}
+
 // fault records that a fault acts on req, which marks the handle it uses as
 // faulted.
 func (t *tracker) fault(req *request) {
@@ -293,6 +309,9 @@ func (t *tracker) register(req *request) {
 		t.pending[rest.proxyID] = rest
 	}
 	if c, ok := req.packet.(*sftpwire.Close); ok {
+		if h := t.handles[c.Handle]; h != nil && h.closing != nil {
+			close(h.closing)
+		}
 		// The draft makes a handle invalid as soon as CLOSE is sent, even if
 		// the close then fails.
 		delete(t.handles, c.Handle)

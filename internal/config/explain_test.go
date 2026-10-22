@@ -36,9 +36,9 @@ scenarios:
       - {id: slow-reply, match: {operation: rename}, action: {type: delay, when: after, duration: 1500ms}}
       - {id: slow-stat, priority: 10, match: {operation: [stat, lstat], path_prefix: /out}, decision: {probability: 0.5}, action: {type: delay, when: before, duration: {min: 200ms, max: 3s}}}
       - {id: failed-close, priority: -1, match: {operation: close, filename: orders.csv}, action: {type: fail, when: after, status: failure}}
-      - {id: fin, max_triggers: 3, match: {operation: mkdir, occurrence: [2, 3]}, action: {type: drop, when: before}}
-      - {id: rst, match: {operation: remove, user: partner-b, key_fingerprint: "`+ssh.FingerprintSHA256(key)+`"}, action: {type: drop, when: after, mode: rst}}
-      - {id: freeze, match: {operation: any, path_glob: /dead/*}, action: {type: drop, when: before, mode: freeze, max_freeze: 2m}}
+      - {id: fin, max_triggers: 3, match: {operation: mkdir, occurrence: [2, 3]}, action: {type: close_connection, when: before}}
+      - {id: rst, match: {operation: remove, user: partner-b, key_fingerprint: "`+ssh.FingerprintSHA256(key)+`"}, action: {type: close_connection, when: after, mode: rst}}
+      - {id: freeze, match: {operation: any, path_glob: /dead/*}, action: {type: freeze_connection, when: before, max_freeze: 2m}}
       - {id: cut-status, match: {operation: write, path: /in/a.csv, attempt: {per: [user], numbers: [1, 3]}}, action: {type: partial_upload, cutoff_offset: 0, result: status, status: permission_denied}}
       - {id: cut-rst, match: {operation: write, filename_glob: "*.part"}, decision: {scope: transfer, probability: 0.25}, action: {type: partial_upload, cutoff_offset: {min: 1, max: 9}, result: close_connection, mode: rst}}
       - {id: cut-freeze, match: {operation: write, path_glob: /in/*, attempt: {per: [path], numbers: [2]}}, action: {type: partial_upload, cutoff_offset: 10, result: freeze_connection, max_freeze: 30s}}
@@ -50,6 +50,12 @@ scenarios:
       - {id: renames, match: {operation: rename, source_glob: /in/*.part, target_prefix: /in}, action: {type: fail, when: before, status: no_such_file}}
       - {id: named-renames, match: {operation: rename, source_filename: a.part, target_filename_glob: "*.csv"}, action: {type: fail, when: before, status: op_unsupported}}
       - {id: random-opens, match: {operation: [open_read, open_write]}, decision: {scope: transfer, probability: 1}, action: {type: fail, when: before, status: eof}}
+      - {id: window, match: {operation: any, user: test}, trigger: {window: {from: 10s, until: 15s}, anchor: connection}, action: {type: fail, when: before, status: failure}}
+      - {id: first-stat-after, match: {operation: stat}, trigger: {at: 1m30s, anchor: run}, action: {type: delay, when: after, duration: 2s}}
+      - {id: reset-into-upload, match: {operation: [open_write, write], path_prefix: /incoming}, trigger: {at: 2s, anchor: transfer}, decision: {probability: 0.5}, action: {type: close_connection, mode: rst}}
+      - {id: random-freeze, match: {user: partner-b}, trigger: {at: {min: 1s, max: 5s}, anchor: connection}, action: {type: freeze_connection, max_freeze: 1m}}
+      - {id: idle, trigger: {at: 5m, anchor: run}, action: {type: close_subsystem}}
+      - {id: end-at-remove, match: {operation: remove}, action: {type: close_subsystem, when: after}}
       - id: first-upload-cutoff
         fail_upload: {path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576}
       - id: random-failures

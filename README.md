@@ -117,7 +117,7 @@ scenarios:
           source: "/incoming/orders.csv.part"
           target: "/incoming/orders.csv"
         action:
-          type: "drop"
+          type: "close_connection"
           when: "after" # the rename happens, and its reply is lost
           mode: "fin"
 ```
@@ -137,7 +137,9 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 |---|---|---|
 | `delay` | Holds the request before the server acts, or its reply after | `when`, `duration` |
 | `fail` | Answers with `status`. After, the server has acted although the client is told otherwise | `when`, `status` |
-| `drop` | Closes the connection where the reply would be, with a FIN or an RST, or freezes it for at most `max_freeze` | `when`, `mode`, `max_freeze` |
+| `close_connection` | Closes the connection where the reply would be, with a FIN or, with `mode: rst`, a TCP reset | `when`, `mode` |
+| `freeze_connection` | Stops all traffic where the reply would be, keepalives included, then closes the connection after `max_freeze` | `when`, `max_freeze` |
+| `close_subsystem` | Ends the SFTP session where the reply would be, closing its channel but leaving the connection open, as a server ending an idle session does | `when` |
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
 | `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
@@ -192,6 +194,32 @@ scenarios:
 ```
 
 A rule with a `decision` fires with its `probability`: a partial upload or corrupt download draws once for each transfer, as its file opens, and any other rule for each request it selects. When the draw misses, the request goes on to the next rule. A range is drawn for each request a rule fires for, or each transfer. `rule fired` shows the values drawn.
+
+A `trigger` ties a rule to time, measured from an `anchor`: the start of the `run`, when the client's `connection` authenticated, or, for a connection action, when a `transfer`'s file opened.
+
+```yaml
+faults:
+  - id: "bad-five-seconds" # every request fails from 10 s to 15 s into the run
+    match: { operation: "any" }
+    trigger: { window: { from: "10s", until: "15s" }, anchor: "run" }
+    action: { type: "fail", when: "before", status: "failure" }
+  - id: "reset-into-upload" # whatever the client is doing 2 s after an upload opens
+    match: { operation: "write", path_prefix: "/incoming" }
+    trigger: { at: "2s", anchor: "transfer" }
+    action: { type: "close_connection", mode: "rst" }
+  - id: "idle-timeout" # each connection's session ends 5 minutes in
+    trigger: { at: "5m", anchor: "connection" }
+    action: { type: "close_subsystem" }
+```
+
+- **`window`:** the rule applies only from `from` until `until`.
+- **`at` with a connection action:** the action fires at that moment whatever the client is doing, without a `when`.
+  - Anchored to a transfer, it fires only while the file is still open, and selects transfers as their file opens, so `attempt` and `decision` apply to it.
+  - Anchored to the run or the connection, it matches only `user` and `key_fingerprint`, and fires once per connection.
+- **`at` with any other action:** the rule applies to the first request it selects from that moment on, once per run or connection.
+- `at` takes a `{min, max}` range, drawn once per anchor.
+
+Time triggers suit tests of timeouts, keepalives and reconnects. A test of file contents should cut at a byte offset instead, because how far a client gets in two seconds depends on the machine.
 
 Every draw depends only on the run's seed and on the request: its rule, user, path and operation, and how many requests of that user, path and operation the rule has matched before it. Requests for other files never change one. So a pinned seed, from the scenario's `seed` or `--seed`, gives a test the same faults on every run of the same workload. Without one, each run draws a fresh seed, so chaos differs from run to run. The banner shows the seed, and a kept workspace records it in `runs/<run>/run.json`, so `--seed` can repeat a run's decisions.
 

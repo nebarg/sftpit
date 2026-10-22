@@ -417,6 +417,24 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 			err:     "unknown CorruptDownload corruption Corruption(7)",
 		},
 		{
+			name:    "timed fault on a request other than OPEN",
+			request: &sftpwire.Stat{Path: "/a"},
+			action:  sftpproxy.Timed{After: time.Second, Action: sftpproxy.EndSession{}},
+			err:     "a Timed fault is for OPEN, not SSH_FXP_STAT",
+		},
+		{
+			name:    "timed failure",
+			request: open,
+			action:  sftpproxy.Timed{After: time.Second, Action: fail},
+			err:     "a fault at a moment must be a Drop, Freeze or EndSession, not sftpproxy.Fail",
+		},
+		{
+			name:    "timed drop without the connection",
+			request: open,
+			action:  sftpproxy.Timed{After: time.Second, Action: sftpproxy.Drop{}},
+			err:     "a sftpproxy.Drop fault needs Options.Conn",
+		},
+		{
 			name:    "wrong size on a request other than a stat",
 			request: open,
 			action:  sftpproxy.WrongSize{Size: 1},

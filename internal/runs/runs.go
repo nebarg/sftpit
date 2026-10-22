@@ -21,8 +21,9 @@ import (
 // through sftpproxy to a new session on embedded, which serves the run's
 // files, starting in the user's home directory. Each session runs with opts
 // and its own connection as opts.Conn, so a Drop or Freeze acts on the
-// client that caused it. Its faults come from rules, for the user and key it
-// logged in with, or from opts.Faults if rules is nil. Snapshots hold back
+// client that caused it. Its faults and timers come from rules, for the
+// user and key it logged in with and the time it did, or from opts if rules
+// is nil. Snapshots hold back
 // every session's changes to their file, and keep copies in the run's
 // snapshots directory.
 func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sftpproxy.Options) sshfront.Handler {
@@ -36,7 +37,8 @@ func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sf
 		opts := opts
 		opts.Conn = conn
 		if rules != nil {
-			opts.Faults = rules.Session(conn.User(), conn.KeyFingerprint())
+			s := rules.Session(faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID(), Authenticated: conn.Authenticated()})
+			opts.Faults, opts.Timers = s.Decide, s.Timers()
 		}
 		return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), opts)
 	}

@@ -32,6 +32,7 @@ type ruleConfig struct {
 	Priority    int             `yaml:"priority"`
 	MaxTriggers int             `yaml:"max_triggers"`
 	Match       matchConfig     `yaml:"match"`
+	Trigger     *triggerConfig  `yaml:"trigger,omitempty"`
 	Decision    *decisionConfig `yaml:"decision,omitempty"`
 	Action      actionConfig    `yaml:"action"`
 
@@ -40,6 +41,27 @@ type ruleConfig struct {
 	FailRandomly    *failRandomlyConfig    `yaml:"fail_randomly,omitempty"`
 	CorruptDownload *corruptDownloadConfig `yaml:"corrupt_download,omitempty"`
 }
+
+type triggerConfig struct {
+	At     *valueRange[string] `yaml:"at,omitempty"`
+	Window *windowConfig       `yaml:"window,flow,omitempty"`
+	Anchor string              `yaml:"anchor"`
+}
+
+type windowConfig struct {
+	From  string `yaml:"from"`
+	Until string `yaml:"until"`
+}
+
+var anchors = map[string]faults.Anchor{
+	"run":        faults.Run,
+	"connection": faults.Connection,
+	"transfer":   faults.Transfer,
+}
+
+// connectionActions are the action types that act on the client's
+// connection or session, and so can fire at a moment.
+var connectionActions = []string{"close_connection", "freeze_connection", "close_subsystem"}
 
 type decisionConfig struct {
 	Probability *float64 `yaml:"probability,omitempty"`
@@ -212,10 +234,18 @@ func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rul
 func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 	r := faults.Rule{ID: rc.ID, Priority: rc.Priority, MaxTriggers: rc.MaxTriggers}
 	var err error
-	if r.Match, err = rc.Match.match(users); err != nil {
+	// A connection action at a moment of the run or the connection matches
+	// connections, not requests, so it has no operation.
+	moment := rc.atMoment()
+	if r.Match, err = rc.Match.match(users, !moment || rc.Trigger.Anchor == "transfer"); err != nil {
 		return r, fmt.Errorf("match: %w", err)
 	}
-	if err := rc.Action.apply(&r); err != nil {
+	if rc.Trigger != nil {
+		if r.Trigger, err = rc.Trigger.trigger(); err != nil {
+			return r, fmt.Errorf("trigger: %w", err)
+		}
+	}
+	if err := rc.Action.apply(&r, moment); err != nil {
 		return r, fmt.Errorf("action: %w", err)
 	}
 	if d := rc.Decision; d != nil {
@@ -235,7 +265,8 @@ func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 // open, and any other fault for each request, which for an open is the same
 // as for its transfer. The scope defaults to the one the action has.
 func (rc ruleConfig) checkScope(scope string) error {
-	transfer := rc.Action.Type == "partial_upload" || rc.Action.Type == "corrupt_download"
+	transfer := rc.Action.Type == "partial_upload" || rc.Action.Type == "corrupt_download" ||
+		(rc.atMoment() && rc.Trigger.Anchor == "transfer")
 	switch scope {
 	case "":
 	case "transfer":
@@ -255,9 +286,56 @@ func (rc ruleConfig) checkScope(scope string) error {
 	return nil
 }
 
-func (mc matchConfig) match(users []sshfront.User) (faults.Match, error) {
+// atMoment reports whether the rule is a connection action that fires at a
+// moment rather than at a request.
+func (rc ruleConfig) atMoment() bool {
+	return rc.Trigger != nil && rc.Trigger.At != nil && slices.Contains(connectionActions, rc.Action.Type)
+}
+
+func (tc triggerConfig) trigger() (*faults.Trigger, error) {
+	anchor, ok := anchors[tc.Anchor]
+	names := strings.Join(slices.Sorted(maps.Keys(anchors)), ", ")
+	switch {
+	case tc.Anchor == "":
+		return nil, fmt.Errorf("anchor is required: one of %s", names)
+	case !ok:
+		return nil, fmt.Errorf("anchor %q is not one of %s", tc.Anchor, names)
+	}
+	t := &faults.Trigger{Anchor: anchor}
+	switch {
+	case tc.At != nil && tc.Window != nil:
+		return nil, errors.New("set at or window, not both")
+	case tc.At != nil:
+		lo, err := nonNegativeDuration("at", tc.At.Min)
+		if err != nil {
+			return nil, err
+		}
+		hi := lo
+		if tc.At.ranged {
+			if hi, err = nonNegativeDuration("at", tc.At.Max); err != nil {
+				return nil, err
+			}
+		}
+		t.At = &faults.Range[time.Duration]{Min: lo, Max: hi}
+	case tc.Window != nil:
+		from, err := nonNegativeDuration("window from", tc.Window.From)
+		if err != nil {
+			return nil, err
+		}
+		until, err := nonNegativeDuration("window until", tc.Window.Until)
+		if err != nil {
+			return nil, err
+		}
+		t.Window = &faults.Window{From: from, Until: until}
+	default:
+		return nil, errors.New("at or window is required")
+	}
+	return t, nil
+}
+
+func (mc matchConfig) match(users []sshfront.User, needsOperation bool) (faults.Match, error) {
 	m := faults.Match{User: mc.User, KeyFingerprint: mc.KeyFingerprint, Occurrence: mc.Occurrence}
-	if len(mc.Operation) == 0 {
+	if len(mc.Operation) == 0 && needsOperation {
 		return m, errors.New("operation is required")
 	}
 	for _, op := range mc.Operation {
@@ -382,16 +460,20 @@ func location(fields []locationField) (faults.Location, error) {
 
 // actionFields are the fields each action type allows, besides type.
 var actionFields = map[string][]string{
-	"delay":            {"when", "duration"},
-	"fail":             {"when", "status"},
-	"drop":             {"when", "mode", "max_freeze"},
-	"partial_upload":   {"cutoff_offset", "result", "status", "mode", "max_freeze"},
-	"corrupt_download": {"transform", "offset", "length"},
-	"wrong_size":       {"size", "size_delta"},
+	"delay":             {"when", "duration"},
+	"fail":              {"when", "status"},
+	"close_connection":  {"when", "mode"},
+	"freeze_connection": {"when", "max_freeze"},
+	"close_subsystem":   {"when"},
+	"partial_upload":    {"cutoff_offset", "result", "status", "mode", "max_freeze"},
+	"corrupt_download":  {"transform", "offset", "length"},
+	"wrong_size":        {"size", "size_delta"},
 }
 
-// apply sets the action of r, and the ranges it draws values from.
-func (ac actionConfig) apply(r *faults.Rule) error {
+// apply sets the action of r, and the ranges it draws values from. A
+// connection action at a moment acts whatever the client is doing, so it
+// takes no when.
+func (ac actionConfig) apply(r *faults.Rule, moment bool) error {
 	allowed, ok := actionFields[ac.Type]
 	if !ok {
 		return fmt.Errorf("type %q is not one of %s", ac.Type, strings.Join(slices.Sorted(maps.Keys(actionFields)), ", "))
@@ -407,8 +489,14 @@ func (ac actionConfig) apply(r *faults.Rule) error {
 		r.Action, r.Duration, err = ac.delay()
 	case "fail":
 		r.Action, err = ac.fail()
-	case "drop":
-		r.Action, err = ac.drop()
+	case "close_connection":
+		r.Action, err = ac.closeConnection(moment)
+	case "freeze_connection":
+		r.Action, err = ac.freezeConnection(moment)
+	case "close_subsystem":
+		var when sftpproxy.When
+		when, err = ac.connectionWhen(moment)
+		r.Action = sftpproxy.EndSession{When: when}
 	case "partial_upload":
 		r.Action, r.Cutoff, err = ac.partialUpload()
 	case "corrupt_download":
@@ -492,29 +580,43 @@ func (ac actionConfig) when() (sftpproxy.When, error) {
 	return 0, fmt.Errorf("when %q is not before or after", ac.When)
 }
 
-// drop returns the Drop or Freeze that ac's mode chooses. The mode is fin
-// unless set.
-func (ac actionConfig) drop() (sftpproxy.Action, error) {
-	when, err := ac.when()
+// connectionWhen returns when a connection action at a request acts, or
+// Before, which is ignored, for one at a moment.
+func (ac actionConfig) connectionWhen(moment bool) (sftpproxy.When, error) {
+	if !moment {
+		return ac.when()
+	}
+	if ac.When != "" {
+		return 0, fmt.Errorf("when does not apply to a %s at a moment, which acts whatever the client is doing", ac.Type)
+	}
+	return sftpproxy.Before, nil
+}
+
+// closeConnection returns the Drop that ac's mode chooses, fin unless set.
+func (ac actionConfig) closeConnection(moment bool) (sftpproxy.Action, error) {
+	when, err := ac.connectionWhen(moment)
 	if err != nil {
 		return nil, err
-	}
-	if ac.Mode != "freeze" && ac.MaxFreeze != "" {
-		return nil, errors.New("max_freeze applies only to mode freeze")
 	}
 	switch ac.Mode {
 	case "", "fin":
 		return sftpproxy.Drop{When: when}, nil
 	case "rst":
 		return sftpproxy.Drop{When: when, Reset: true}, nil
-	case "freeze":
-		limit, err := positiveDuration("max_freeze", ac.MaxFreeze)
-		if err != nil {
-			return nil, err
-		}
-		return sftpproxy.Freeze{When: when, Limit: limit}, nil
 	}
-	return nil, fmt.Errorf("mode %q is not fin, rst or freeze", ac.Mode)
+	return nil, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
+}
+
+func (ac actionConfig) freezeConnection(moment bool) (sftpproxy.Action, error) {
+	when, err := ac.connectionWhen(moment)
+	if err != nil {
+		return nil, err
+	}
+	limit, err := positiveDuration("max_freeze", ac.MaxFreeze)
+	if err != nil {
+		return nil, err
+	}
+	return sftpproxy.Freeze{When: when, Limit: limit}, nil
 }
 
 // partialUpload returns the partial upload of ac, and the range it draws
@@ -624,6 +726,17 @@ func status(name string) (sftpwire.StatusCode, error) {
 		return 0, fmt.Errorf("status %q is not one of %s", name, strings.Join(slices.Sorted(maps.Keys(statuses)), ", "))
 	}
 	return code, nil
+}
+
+func nonNegativeDuration(field, value string) (time.Duration, error) {
+	if value == "" {
+		return 0, fmt.Errorf("%s is required", field)
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s %q is not a duration of 0 or more, such as 0s or 2s", field, value)
+	}
+	return d, nil
 }
 
 func positiveDuration(field, value string) (time.Duration, error) {
