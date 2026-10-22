@@ -2,7 +2,9 @@ package faults_test
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
+
+const testSeed = faults.Seed(481516)
 
 var (
 	failure = sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusFailure}
@@ -28,7 +32,7 @@ func on(p sftpwire.Packet, path string) sftpproxy.Request {
 
 func newEngine(t *testing.T, rules ...faults.Rule) *faults.Engine {
 	t.Helper()
-	e, err := faults.New(rules, slog.New(slog.DiscardHandler))
+	e, err := faults.New(rules, testSeed, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -238,7 +242,7 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 		MaxTriggers: 1,
 		Match:       faults.Match{Operations: ops(faults.Write), Path: faults.Location{Kind: faults.Exactly, Pattern: "/in/a.csv"}},
 		Action:      cutOff,
-	}}, slog.New(slog.NewTextHandler(&logs, nil)))
+	}}, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,8 +318,153 @@ func TestWrongSizesApplyToListingEntries(t *testing.T) {
 	}
 }
 
+func probability(p float64) *float64 { return &p }
+
+func TestARandomRuleDrawsFromTheKeyOfEachRequest(t *testing.T) {
+	const write = sftpwire.OpenWrite | sftpwire.OpenCreate
+	opens := faults.Match{Operations: ops(faults.OpenWrite)}
+	e := newEngine(t,
+		faults.Rule{ID: "random", Priority: 1, Match: opens, Probability: probability(0.5), Action: failure},
+		faults.Rule{ID: "otherwise", Priority: 2, Match: opens, Action: denied},
+	)
+	// Each user's opens of each path count separately, so that no other
+	// request changes a draw.
+	ordinals := make(map[string]uint64)
+	var fired, missed int
+	for i := range 40 {
+		user, path := []string{"a", "b"}[i%2], fmt.Sprintf("/in/%d.csv", i%3)
+		ordinals[user+path]++
+		draw := testSeed.Draw(faults.Key{Rule: "random", Choice: "probability", User: user, Path: path, Operation: "open_write", Ordinal: ordinals[user+path]})
+		want := denied
+		if draw.Fires(0.5) {
+			want, fired = failure, fired+1
+		} else {
+			missed++
+		}
+		if got := e.Session(user, "")(openFor(path, write)); got != want {
+			t.Errorf("open %d (%s %s) got %#v, want %#v", i+1, user, path, got, want)
+		}
+	}
+	if fired == 0 || missed == 0 {
+		t.Fatalf("the rule fired %d times and missed %d; the test needs both", fired, missed)
+	}
+	counts := e.Counts()
+	if want := (faults.Counts{Matched: 40, Selected: uint64(fired), Fired: uint64(fired)}); counts["random"] != want {
+		t.Errorf("counts = %+v, want %+v", counts["random"], want)
+	}
+	if want := (faults.Counts{Matched: 40, Selected: uint64(missed), Fired: uint64(missed)}); counts["otherwise"] != want {
+		t.Errorf("the next rule's counts = %+v, want %+v, as it takes each miss", counts["otherwise"], want)
+	}
+}
+
+func TestProbabilitiesOfNoneAndAll(t *testing.T) {
+	stat := faults.Match{Operations: ops(faults.Stat)}
+	for _, p := range []float64{0, 1} {
+		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Probability: probability(p), Action: failure})
+		for range 20 {
+			if got := e.Session("test", "")(on(&sftpwire.Stat{}, "/f")) != nil; got != (p == 1) {
+				t.Fatalf("with probability %v, a stat got the fault: %v", p, got)
+			}
+		}
+	}
+}
+
+func TestRangesDrawAValueForEachDecision(t *testing.T) {
+	durations := faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Second}
+	cutoffs := faults.Range[uint64]{Min: 1 << 16, Max: 1 << 20}
+	var logs bytes.Buffer
+	e, err := faults.New([]faults.Rule{
+		{ID: "slow", Match: faults.Match{Operations: ops(faults.Stat)}, Duration: &durations, Action: sftpproxy.Delay{When: sftpproxy.After}},
+		{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Cutoff: &cutoffs, Action: cutOff},
+	}, testSeed, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decide := e.Session("test", "")
+	seen := make(map[time.Duration]bool)
+	for i := range uint64(20) {
+		key := faults.Key{Rule: "slow", Choice: "duration", User: "test", Path: "/f", Operation: "stat", Ordinal: i + 1}
+		want := sftpproxy.Delay{When: sftpproxy.After, Duration: faults.Between(testSeed.Draw(key), durations.Min, durations.Max)}
+		if got := decide(on(&sftpwire.Stat{}, "/f")); got != want {
+			t.Fatalf("stat %d got %#v, want %#v", i+1, got, want)
+		}
+		seen[want.Duration] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("20 stats drew the durations %v; want them to vary", seen)
+	}
+
+	// A transfer draws its cutoff once, at its open.
+	key := faults.Key{Rule: "cut", Choice: "cutoff", User: "test", Path: "/in/a.csv", Operation: "open_write", Ordinal: 1}
+	want := faults.Between(testSeed.Draw(key), cutoffs.Min, cutoffs.Max)
+	a, ok := decide(openFor("/in/a.csv", sftpwire.OpenWrite)).(sftpproxy.PartialUpload)
+	if !ok || a.Cutoff != want || a.Result != cutOff.Result {
+		t.Fatalf("the open got %#v, want the partial upload with cutoff %d", a, want)
+	}
+	if !a.Reserve() {
+		t.Fatal("the transfer was refused its effect")
+	}
+	for _, line := range []string{
+		fmt.Sprintf(`level=DEBUG msg=decision key.rule=cut key.activation=0 key.choice=cutoff key.user=test key.path=/in/a.csv key.operation=open_write key.ordinal=1 draw=%d min=65536 max=1048576 value=%d`, testSeed.Draw(key), want),
+		fmt.Sprintf(`level=INFO msg="rule fired" rule=cut request=open_write path=/in/a.csv user=test ordinal=1 cutoff=%d`, want),
+		`level=INFO msg="rule fired" rule=slow request=stat path=/f user=test ordinal=20 duration=`,
+	} {
+		if !strings.Contains(logs.String(), line) {
+			t.Errorf("logs lack %s:\n%s", line, logs.String())
+		}
+	}
+}
+
+func TestEachOperationCountsItsOwnDraws(t *testing.T) {
+	durations := faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Second}
+	e := newEngine(t, faults.Rule{ID: "slow", Match: faults.Match{Operations: ops(faults.Stat, faults.LStat)}, Duration: &durations, Action: sftpproxy.Delay{}})
+	decide := e.Session("test", "")
+	requests := []struct {
+		packet  sftpwire.Packet
+		op      string
+		ordinal uint64
+	}{
+		{&sftpwire.Stat{}, "stat", 1},
+		{&sftpwire.LStat{}, "lstat", 1},
+		{&sftpwire.Stat{}, "stat", 2},
+	}
+	for _, r := range requests {
+		key := faults.Key{Rule: "slow", Choice: "duration", User: "test", Path: "/f", Operation: r.op, Ordinal: r.ordinal}
+		want := sftpproxy.Delay{Duration: faults.Between(testSeed.Draw(key), durations.Min, durations.Max)}
+		if got := decide(on(r.packet, "/f")); got != want {
+			t.Errorf("%s %d got %#v, want %#v", r.op, r.ordinal, got, want)
+		}
+	}
+}
+
+func TestARangeOfOneValueDrawsIt(t *testing.T) {
+	e := newEngine(t, faults.Rule{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Cutoff: &faults.Range[uint64]{Min: 10, Max: 10}, Action: cutOff})
+	if a, ok := e.Session("test", "")(openFor("/f", sftpwire.OpenWrite)).(sftpproxy.PartialUpload); !ok || a.Cutoff != 10 {
+		t.Errorf("the open got %#v, want a cutoff of 10", a)
+	}
+}
+
+func TestProbabilityDecisionsAreLogged(t *testing.T) {
+	var logs bytes.Buffer
+	e, err := faults.New([]faults.Rule{
+		{ID: "random", Match: faults.Match{Operations: ops(faults.Remove)}, Probability: probability(0.25), Action: failure},
+	}, testSeed, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Session("partner-b", "")(on(&sftpwire.Remove{}, "/out/a.csv"))
+	key := faults.Key{Rule: "random", Choice: "probability", User: "partner-b", Path: "/out/a.csv", Operation: "remove", Ordinal: 1}
+	draw := testSeed.Draw(key)
+	line := fmt.Sprintf(`level=DEBUG msg=decision key.rule=random key.activation=0 key.choice=probability key.user=partner-b key.path=/out/a.csv key.operation=remove key.ordinal=1 draw=%d probability=0.25 fires=%v`, draw, draw.Fires(0.25))
+	if !strings.Contains(logs.String(), line) {
+		t.Errorf("logs lack %s:\n%s", line, logs.String())
+	}
+}
+
 func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 	read := faults.Match{Operations: ops(faults.Read)}
+	stat := faults.Match{Operations: ops(faults.Stat)}
+	write := faults.Match{Operations: ops(faults.Write)}
 	tests := []struct {
 		name  string
 		rules []faults.Rule
@@ -343,10 +492,17 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"no attempt numbers", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.OpenRead), Attempt: &faults.Attempt{}})}, "attempt needs at least one number"},
 		{"occurrence 0", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Rename), Occurrence: []uint64{0}})}, "count from 1"},
 		{"a repeated occurrence", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Rename), Occurrence: []uint64{2, 2}})}, "occurrence 2 is listed twice"},
+		{"a negative probability", []faults.Rule{{ID: "r", Match: stat, Probability: probability(-0.1), Action: failure}}, "probability -0.1 is not from 0 to 1"},
+		{"a probability above 1", []faults.Rule{{ID: "r", Match: stat, Probability: probability(1.5), Action: failure}}, "probability 1.5 is not from 0 to 1"},
+		{"a probability that is not a number", []faults.Rule{{ID: "r", Match: stat, Probability: probability(math.NaN()), Action: failure}}, "probability NaN is not from 0 to 1"},
+		{"a duration range off a delay", []faults.Rule{{ID: "r", Match: stat, Duration: &faults.Range[time.Duration]{Min: 1, Max: 2}, Action: failure}}, "a duration range needs a delay"},
+		{"a cutoff range off a partial upload", []faults.Rule{{ID: "r", Match: write, Cutoff: &faults.Range[uint64]{Min: 1, Max: 2}, Action: sftpproxy.Delay{}}}, "a cutoff range needs a partial upload"},
+		{"an empty duration range", []faults.Rule{{ID: "r", Match: stat, Duration: &faults.Range[time.Duration]{Min: 3 * time.Second, Max: 200 * time.Millisecond}, Action: sftpproxy.Delay{}}}, "the duration range's min 3s is above its max 200ms"},
+		{"an empty cutoff range", []faults.Rule{{ID: "r", Match: write, Cutoff: &faults.Range[uint64]{Min: 2, Max: 1}, Action: cutOff}}, "the cutoff_offset range's min 2 is above its max 1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := faults.New(tt.rules, nil)
+			_, err := faults.New(tt.rules, testSeed, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.err) || !strings.HasPrefix(err.Error(), "faults: ") {
 				t.Errorf("New = %v, want an error about %q", err, tt.err)
 			}

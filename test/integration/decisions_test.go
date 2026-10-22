@@ -1,7 +1,9 @@
 package integration
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -15,7 +17,7 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-// TestSeededFailuresRepeat fails a seeded half of OpenSSH's upload attempts
+// TestSeededFailuresRepeat fails a random half of OpenSSH's upload attempts
 // and checks that a pinned seed fails the same attempts on every run, also
 // when uploads of other files, which the same rule decides, come in between.
 func TestSeededFailuresRepeat(t *testing.T) {
@@ -44,7 +46,16 @@ func TestSeededFailuresRepeat(t *testing.T) {
 	var first map[string][]bool
 	var firstOutput string
 	for _, r := range runs {
-		failures := &seededFailures{seed: 481516, p: 0.5}
+		rules, err := faults.New([]faults.Rule{{
+			ID:          "random-failures",
+			Match:       faults.Match{Operations: []faults.Operation{faults.OpenWrite}},
+			Probability: &half,
+			Action:      sftpproxy.Fail{Status: sftpwire.StatusFailure},
+		}}, 481516, slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatalf("faults.New: %v", err)
+		}
+		failures := &uploadOutcomes{faults: rules.Session(testUser, "")}
 		srv := startServer(t, proxied, sftpproxy.Options{Faults: failures.decide})
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "orders.csv"), []byte("id,total\n1,9.99\n"))
@@ -67,8 +78,8 @@ func TestSeededFailuresRepeat(t *testing.T) {
 				t.Errorf("%s: %s stored: %v, but its attempts failed: %v", r.name, name, stored[name], attempts)
 			}
 		}
-		if reported, fired := strings.Count(string(out), ": Failure"), failures.fired(); reported != fired {
-			t.Errorf("%s: sftp reported %d failures, want %d:\n%s", r.name, reported, fired, out)
+		if reported, fired := strings.Count(string(out), ": Failure"), failures.fired(); reported != fired || rules.Counts()["random-failures"].Fired != uint64(fired) {
+			t.Errorf("%s: sftp reported %d failures and the rule %d, want %d:\n%s", r.name, reported, rules.Counts()["random-failures"].Fired, fired, out)
 		}
 
 		if first == nil {
@@ -82,6 +93,81 @@ func TestSeededFailuresRepeat(t *testing.T) {
 		if r.batch == alone.String() && string(out) != firstOutput {
 			t.Errorf("%s: sftp printed\n%s\nwant, as in the first run:\n%s", r.name, out, firstOutput)
 		}
+	}
+}
+
+// TestSeededCutoffsRepeat cuts off a random half of OpenSSH's uploads, each
+// at a random offset, and checks that a pinned seed leaves the same partial
+// files on every run, and another seed different ones.
+func TestSeededCutoffsRepeat(t *testing.T) {
+	sftpPath := openSSHOrSkip(t)
+
+	const files = 8
+	data := randomBytes(128 << 10)
+	var batch strings.Builder
+	batch.WriteString("-mkdir in\n")
+	for i := range files {
+		fmt.Fprintf(&batch, "-put orders.csv in/orders-%d.csv\n", i)
+	}
+	cutoffs := faults.Range[uint64]{Min: 1000, Max: 100_000}
+	stored := func(seed faults.Seed) map[string]int {
+		t.Helper()
+		rules, err := faults.New([]faults.Rule{{
+			ID:          "random-cutoffs",
+			Match:       faults.Match{Operations: []faults.Operation{faults.Write}},
+			Probability: &half,
+			Cutoff:      &cutoffs,
+			Action:      sftpproxy.PartialUpload{Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}},
+		}}, seed, slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatalf("faults.New: %v", err)
+		}
+		srv := startServerWithRules(t, rules, sftpproxy.Options{})
+		work := t.TempDir()
+		writeFile(t, filepath.Join(work, "orders.csv"), data)
+		if out, err := openSSH(t, sftpPath, srv, work, batch.String()); err != nil {
+			t.Fatalf("seed %d: sftp failed: %v\n%s", seed, err, out)
+		}
+		sizes := make(map[string]int)
+		var cut uint64
+		for i := range files {
+			name := fmt.Sprintf("/in/orders-%d.csv", i)
+			got, err := os.ReadFile(filepath.Join(srv.files, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch n := uint64(len(got)); {
+			case !bytes.Equal(got, data[:len(got)]):
+				t.Errorf("seed %d: %s holds %d bytes that are not the start of the upload", seed, name, n)
+			case n == uint64(len(data)):
+			case n < cutoffs.Min || n > cutoffs.Max:
+				t.Errorf("seed %d: %s was cut off at %d, outside %+v", seed, name, n, cutoffs)
+			default:
+				cut++
+			}
+			sizes[name] = len(got)
+		}
+		if fired := rules.Counts()["random-cutoffs"].Fired; fired != cut {
+			t.Errorf("seed %d: the rule fired %d times, but %d uploads were cut off", seed, fired, cut)
+		}
+		return sizes
+	}
+
+	first := stored(481516)
+	cut := 0
+	for _, n := range first {
+		if n != len(data) {
+			cut++
+		}
+	}
+	if cut == 0 || cut == files {
+		t.Fatalf("the seed cut off %d of %d uploads; the test needs some of each: %v", cut, files, first)
+	}
+	if again := stored(481516); !maps.Equal(again, first) {
+		t.Errorf("the same seed stored %v, want %v as in the first run", again, first)
+	}
+	if other := stored(7); maps.Equal(other, first) {
+		t.Errorf("another seed stored %v, the same as the first", other)
 	}
 }
 
@@ -104,50 +190,36 @@ func assertSeedFailsSomeRetries(t *testing.T, decided map[string][]bool, files i
 	}
 }
 
-// seededFailures fails each upload attempt with probability p, drawn from
-// seed, counting each path's attempts as the rule engine will.
-type seededFailures struct {
-	seed faults.Seed
-	p    float64
+var half = 0.5
 
-	mu sync.Mutex
-	// decided holds, for each path, whether each of its attempts failed.
+// uploadOutcomes records, for each path, whether each upload attempt that
+// faults decides fails.
+type uploadOutcomes struct {
+	faults func(sftpproxy.Request) sftpproxy.Action
+
+	mu      sync.Mutex
 	decided map[string][]bool
 }
 
-func (f *seededFailures) decide(r sftpproxy.Request) sftpproxy.Action {
-	open, ok := r.Packet.(*sftpwire.Open)
-	if !ok || open.Flags&sftpwire.OpenWrite == 0 {
-		return nil
+func (o *uploadOutcomes) decide(r sftpproxy.Request) sftpproxy.Action {
+	a := o.faults(r)
+	if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite != 0 {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if o.decided == nil {
+			o.decided = make(map[string][]bool)
+		}
+		o.decided[r.Path] = append(o.decided[r.Path], a != nil)
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.decided == nil {
-		f.decided = make(map[string][]bool)
-	}
-	attempts := f.decided[r.Path]
-	draw := f.seed.Draw(faults.Key{
-		Rule:      "random-failures",
-		Choice:    "probability",
-		User:      testUser,
-		Path:      r.Path,
-		Operation: "open_write",
-		Ordinal:   uint64(len(attempts)) + 1,
-	})
-	fail := draw.Fires(f.p)
-	f.decided[r.Path] = append(attempts, fail)
-	if fail {
-		return sftpproxy.Fail{Status: sftpwire.StatusFailure}
-	}
-	return nil
+	return a
 }
 
 // under returns the decisions for the paths under dir.
-func (f *seededFailures) under(dir string) map[string][]bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func (o *uploadOutcomes) under(dir string) map[string][]bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	decided := make(map[string][]bool)
-	for name, attempts := range f.decided {
+	for name, attempts := range o.decided {
 		if strings.HasPrefix(name, dir) {
 			decided[name] = attempts
 		}
@@ -156,11 +228,11 @@ func (f *seededFailures) under(dir string) map[string][]bool {
 }
 
 // fired returns how many attempts have failed.
-func (f *seededFailures) fired() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func (o *uploadOutcomes) fired() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	n := 0
-	for _, attempts := range f.decided {
+	for _, attempts := range o.decided {
 		for _, failed := range attempts {
 			if failed {
 				n++

@@ -29,7 +29,7 @@ func TestRulesMatchTheKeyAClientLoggedInWith(t *testing.T) {
 			Operations:     []faults.Operation{faults.Mkdir},
 		},
 		Action: sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied},
-	}}, slog.New(slog.DiscardHandler))
+	}}, 0, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("faults.New: %v", err)
 	}

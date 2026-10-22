@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -32,6 +33,8 @@ Flags:
   --config FILE        read settings, users and scenarios from FILE
   --scenario NAME      inject the faults of the scenario NAME in the
                        config; without it, no faults are injected
+  --seed N             pin the scenario's random decisions to seed N, in
+                       place of its own seed or a fresh one every run
   --sftp-listen ADDR   listen on ADDR instead of the configured address
                        (default 127.0.0.1:2122; port 0 picks a free port)
   --seed-dir DIR       copy the files under DIR into the workspace at startup
@@ -50,6 +53,15 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&opts.SeedDir, "seed-dir", "", "")
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
 	flags.StringVar(&opts.Scenario, "scenario", "", "")
+	flags.Func("seed", "", func(s string) error {
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return errors.New("a seed is a whole number from 0 to 18446744073709551615")
+		}
+		seed := faults.Seed(n)
+		opts.Seed = &seed
+		return nil
+	})
 	flags.Func("env-file", "", func(name string) error {
 		opts.EnvFiles = append(opts.EnvFiles, name)
 		return nil
@@ -64,6 +76,10 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "sftpit serve: unexpected arguments %q\n", flags.Args())
+		return exitUsage
+	}
+	if opts.Seed != nil && opts.Scenario == "" {
+		fmt.Fprintln(stderr, "sftpit serve: --seed needs --scenario, whose random decisions it pins")
 		return exitUsage
 	}
 
@@ -106,7 +122,15 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	if cfg.SeedDir != "" && within(workspace.Dir(), cfg.SeedDir) {
 		return errSeedHoldsWorkspace
 	}
-	run, err := workspace.NewRun()
+	scenario := runs.Scenario{Name: cfg.Scenario}
+	switch {
+	case cfg.Scenario == "":
+	case cfg.Seed != nil:
+		scenario.Seed, scenario.Pinned = *cfg.Seed, true
+	default:
+		scenario.Seed = faults.RandomSeed()
+	}
+	run, err := workspace.NewRun(scenario)
 	if err != nil {
 		return err
 	}
@@ -142,7 +166,7 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 
 	var rules *faults.Engine
 	if cfg.Scenario != "" {
-		if rules, err = faults.New(cfg.Rules, logger); err != nil {
+		if rules, err = faults.New(cfg.Rules, scenario.Seed, logger); err != nil {
 			return err
 		}
 	}
@@ -220,12 +244,17 @@ func printBanner(w io.Writer, addr string, workspace *runs.Workspace, run *runs.
 		fmt.Fprintf(w, "  workspace: %s (kept, with its last five runs)\n", workspace.Dir())
 	}
 	fmt.Fprintf(w, "  run: %s\n", run.ID)
-	if cfg.Scenario != "" {
+	if s := run.Scenario; s.Name != "" {
 		rules := "rules"
 		if len(cfg.Rules) == 1 {
 			rules = "rule"
 		}
-		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", cfg.Scenario, len(cfg.Rules), rules)
+		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", s.Name, len(cfg.Rules), rules)
+		if s.Pinned {
+			fmt.Fprintf(w, "  seed: %d (pinned)\n", s.Seed)
+		} else {
+			fmt.Fprintf(w, "  seed: %d (fresh; --seed %[1]d repeats its decisions)\n", s.Seed)
+		}
 	}
 	if cfg.SeedDir != "" {
 		fmt.Fprintf(w, "  seeded from: %s\n", cfg.SeedDir)

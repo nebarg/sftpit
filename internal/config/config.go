@@ -85,6 +85,10 @@ type Config struct {
 	// Rules are the scenario's fault rules.
 	Rules []faults.Rule
 
+	// Seed is the seed pinned for the scenario's random decisions, or nil
+	// for a fresh seed in every run.
+	Seed *faults.Seed
+
 	// Warnings describe problems that do not prevent sftpit from starting.
 	Warnings []string
 }
@@ -107,6 +111,9 @@ type Options struct {
 	// Scenario names the scenario whose faults to inject, or is "" for no
 	// faults.
 	Scenario string
+
+	// Seed, if set, overrides the seed the scenario pins.
+	Seed *faults.Seed
 
 	// EnvFiles are read after the configuration's env files, so their
 	// values override those.
@@ -262,6 +269,10 @@ func Load(opts Options) (*Config, error) {
 		return nil, err
 	}
 	cfg.Scenario = opts.Scenario
+	cfg.Seed = f.Scenarios[opts.Scenario].Seed
+	if opts.Seed != nil {
+		cfg.Seed = opts.Seed
+	}
 	return cfg, nil
 }
 

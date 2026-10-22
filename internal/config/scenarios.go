@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"go.yaml.in/yaml/v3"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/faults"
@@ -22,15 +23,22 @@ import (
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 type scenarioConfig struct {
+	Seed   *faults.Seed `yaml:"seed"`
 	Faults []ruleConfig `yaml:"faults"`
 }
 
 type ruleConfig struct {
-	ID          string       `yaml:"id"`
-	Priority    int          `yaml:"priority"`
-	MaxTriggers int          `yaml:"max_triggers"`
-	Match       matchConfig  `yaml:"match"`
-	Action      actionConfig `yaml:"action"`
+	ID          string          `yaml:"id"`
+	Priority    int             `yaml:"priority"`
+	MaxTriggers int             `yaml:"max_triggers"`
+	Match       matchConfig     `yaml:"match"`
+	Decision    *decisionConfig `yaml:"decision"`
+	Action      actionConfig    `yaml:"action"`
+}
+
+type decisionConfig struct {
+	Probability *float64 `yaml:"probability"`
+	Scope       string   `yaml:"scope"`
 }
 
 type matchConfig struct {
@@ -68,19 +76,62 @@ type attemptConfig struct {
 // actionConfig holds the fields of every action type. Each type allows only
 // its own fields.
 type actionConfig struct {
-	Type         string  `yaml:"type"`
-	When         string  `yaml:"when"`
-	Duration     string  `yaml:"duration"`
-	Status       string  `yaml:"status"`
-	Mode         string  `yaml:"mode"`
-	MaxFreeze    string  `yaml:"max_freeze"`
-	CutoffOffset *uint64 `yaml:"cutoff_offset"`
-	Result       string  `yaml:"result"`
-	Transform    string  `yaml:"transform"`
-	Offset       *uint64 `yaml:"offset"`
-	Length       *uint64 `yaml:"length"`
-	Size         *uint64 `yaml:"size"`
-	SizeDelta    *int64  `yaml:"size_delta"`
+	Type         string              `yaml:"type"`
+	When         string              `yaml:"when"`
+	Duration     *valueRange[string] `yaml:"duration"`
+	Status       string              `yaml:"status"`
+	Mode         string              `yaml:"mode"`
+	MaxFreeze    string              `yaml:"max_freeze"`
+	CutoffOffset *valueRange[uint64] `yaml:"cutoff_offset"`
+	Result       string              `yaml:"result"`
+	Transform    string              `yaml:"transform"`
+	Offset       *uint64             `yaml:"offset"`
+	Length       *uint64             `yaml:"length"`
+	Size         *uint64             `yaml:"size"`
+	SizeDelta    *int64              `yaml:"size_delta"`
+}
+
+// valueRange is a value, such as 2s, or a range to draw one from for each
+// decision, such as {min: 1s, max: 5s}.
+type valueRange[T any] struct {
+	Min, Max T
+	ranged   bool
+}
+
+func (r *valueRange[T]) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		var v T
+		if err := n.Decode(&v); err != nil {
+			return err
+		}
+		*r = valueRange[T]{Min: v, Max: v}
+		return nil
+	}
+	// A node decodes without the file's KnownFields, so a misspelt bound
+	// would go unnoticed if the mapping were decoded into a struct.
+	var hasMin, hasMax bool
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key, value := n.Content[i], n.Content[i+1]
+		var err error
+		switch {
+		case key.Value == "min" && !hasMin:
+			hasMin, err = true, value.Decode(&r.Min)
+		case key.Value == "max" && !hasMax:
+			hasMax, err = true, value.Decode(&r.Max)
+		case key.Value == "min" || key.Value == "max":
+			return fmt.Errorf("line %d: a range's %s is set twice", key.Line, key.Value)
+		default:
+			return fmt.Errorf("line %d: a range has min and max, not %s", key.Line, key.Value)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if !hasMin || !hasMax {
+		return fmt.Errorf("line %d: a range needs both min and max", n.Line)
+	}
+	r.ranged = true
+	return nil
 }
 
 // statuses are the statuses a fault can answer with. OK would fake success,
@@ -149,15 +200,49 @@ func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rul
 }
 
 func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
-	m, err := rc.Match.match(users)
-	if err != nil {
-		return faults.Rule{}, fmt.Errorf("match: %w", err)
+	r := faults.Rule{ID: rc.ID, Priority: rc.Priority, MaxTriggers: rc.MaxTriggers}
+	var err error
+	if r.Match, err = rc.Match.match(users); err != nil {
+		return r, fmt.Errorf("match: %w", err)
 	}
-	a, err := rc.Action.action()
-	if err != nil {
-		return faults.Rule{}, fmt.Errorf("action: %w", err)
+	if err := rc.Action.apply(&r); err != nil {
+		return r, fmt.Errorf("action: %w", err)
 	}
-	return faults.Rule{ID: rc.ID, Priority: rc.Priority, MaxTriggers: rc.MaxTriggers, Match: m, Action: a}, nil
+	if d := rc.Decision; d != nil {
+		if d.Probability == nil {
+			return r, errors.New("decision: probability is required")
+		}
+		if err := rc.checkScope(d.Scope); err != nil {
+			return r, fmt.Errorf("decision: %w", err)
+		}
+		r.Probability = d.Probability
+	}
+	return r, nil
+}
+
+// checkScope reports a decision scope that the rule cannot have. A partial
+// upload or corrupt download is decided once for each transfer, at its
+// open, and any other fault for each request, which for an open is the same
+// as for its transfer. The scope defaults to the one the action has.
+func (rc ruleConfig) checkScope(scope string) error {
+	transfer := rc.Action.Type == "partial_upload" || rc.Action.Type == "corrupt_download"
+	switch scope {
+	case "":
+	case "transfer":
+		opens := !slices.ContainsFunc(rc.Match.Operation, func(op string) bool {
+			return op != string(faults.OpenRead) && op != string(faults.OpenWrite)
+		})
+		if !transfer && !opens {
+			return fmt.Errorf("scope transfer needs a partial_upload, a corrupt_download or the open_read and open_write operations; a %s on every request of a chosen transfer is not supported", rc.Action.Type)
+		}
+	case "operation":
+		if transfer {
+			return fmt.Errorf("a %s is decided once for each transfer, at its open, so its scope is transfer", rc.Action.Type)
+		}
+	default:
+		return fmt.Errorf("scope %q is not operation or transfer", scope)
+	}
+	return nil
 }
 
 func (mc matchConfig) match(users []sshfront.User) (faults.Match, error) {
@@ -295,49 +380,33 @@ var actionFields = map[string][]string{
 	"wrong_size":       {"size", "size_delta"},
 }
 
-func (ac actionConfig) action() (sftpproxy.Action, error) {
+// apply sets the action of r, and the ranges it draws values from.
+func (ac actionConfig) apply(r *faults.Rule) error {
 	allowed, ok := actionFields[ac.Type]
 	if !ok {
-		return nil, fmt.Errorf("type %q is not one of %s", ac.Type, strings.Join(slices.Sorted(maps.Keys(actionFields)), ", "))
+		return fmt.Errorf("type %q is not one of %s", ac.Type, strings.Join(slices.Sorted(maps.Keys(actionFields)), ", "))
 	}
 	for _, f := range ac.set() {
 		if !slices.Contains(allowed, f) {
-			return nil, fmt.Errorf("%s does not apply to a %s", f, ac.Type)
+			return fmt.Errorf("%s does not apply to a %s", f, ac.Type)
 		}
 	}
+	var err error
 	switch ac.Type {
 	case "delay":
-		when, err := ac.when()
-		if err != nil {
-			return nil, err
-		}
-		d, err := positiveDuration("duration", ac.Duration)
-		if err != nil {
-			return nil, err
-		}
-		return sftpproxy.Delay{When: when, Duration: d}, nil
+		r.Action, r.Duration, err = ac.delay()
 	case "fail":
-		when, err := ac.when()
-		if err != nil {
-			return nil, err
-		}
-		code, err := status(ac.Status)
-		if err != nil {
-			return nil, err
-		}
-		return sftpproxy.Fail{When: when, Status: code}, nil
+		r.Action, err = ac.fail()
 	case "drop":
-		when, err := ac.when()
-		if err != nil {
-			return nil, err
-		}
-		return ac.drop(when)
+		r.Action, err = ac.drop()
 	case "partial_upload":
-		return ac.partialUpload()
+		r.Action, r.Cutoff, err = ac.partialUpload()
 	case "corrupt_download":
-		return ac.corruptDownload()
+		r.Action, err = ac.corruptDownload()
+	case "wrong_size":
+		r.Action, err = ac.wrongSize()
 	}
-	return ac.wrongSize()
+	return err
 }
 
 // set returns the names of the fields that are set, besides type.
@@ -345,7 +414,7 @@ func (ac actionConfig) set() []string {
 	var names []string
 	for name, set := range map[string]bool{
 		"when":          ac.When != "",
-		"duration":      ac.Duration != "",
+		"duration":      ac.Duration != nil,
 		"status":        ac.Status != "",
 		"mode":          ac.Mode != "",
 		"max_freeze":    ac.MaxFreeze != "",
@@ -365,6 +434,42 @@ func (ac actionConfig) set() []string {
 	return names
 }
 
+// delay returns the delay of ac, and the range it draws its duration from
+// if ac gives one.
+func (ac actionConfig) delay() (sftpproxy.Action, *faults.Range[time.Duration], error) {
+	when, err := ac.when()
+	if err != nil {
+		return nil, nil, err
+	}
+	if ac.Duration == nil {
+		return nil, nil, errors.New("duration is required")
+	}
+	lo, err := positiveDuration("duration", ac.Duration.Min)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ac.Duration.ranged {
+		return sftpproxy.Delay{When: when, Duration: lo}, nil, nil
+	}
+	hi, err := positiveDuration("duration", ac.Duration.Max)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sftpproxy.Delay{When: when}, &faults.Range[time.Duration]{Min: lo, Max: hi}, nil
+}
+
+func (ac actionConfig) fail() (sftpproxy.Action, error) {
+	when, err := ac.when()
+	if err != nil {
+		return nil, err
+	}
+	code, err := status(ac.Status)
+	if err != nil {
+		return nil, err
+	}
+	return sftpproxy.Fail{When: when, Status: code}, nil
+}
+
 func (ac actionConfig) when() (sftpproxy.When, error) {
 	switch ac.When {
 	case "before":
@@ -377,9 +482,13 @@ func (ac actionConfig) when() (sftpproxy.When, error) {
 	return 0, fmt.Errorf("when %q is not before or after", ac.When)
 }
 
-// drop returns the Drop or Freeze that ac's mode chooses, taking effect
-// when. The mode is fin unless set.
-func (ac actionConfig) drop(when sftpproxy.When) (sftpproxy.Action, error) {
+// drop returns the Drop or Freeze that ac's mode chooses. The mode is fin
+// unless set.
+func (ac actionConfig) drop() (sftpproxy.Action, error) {
+	when, err := ac.when()
+	if err != nil {
+		return nil, err
+	}
 	if ac.Mode != "freeze" && ac.MaxFreeze != "" {
 		return nil, errors.New("max_freeze applies only to mode freeze")
 	}
@@ -398,11 +507,29 @@ func (ac actionConfig) drop(when sftpproxy.When) (sftpproxy.Action, error) {
 	return nil, fmt.Errorf("mode %q is not fin, rst or freeze", ac.Mode)
 }
 
-func (ac actionConfig) partialUpload() (sftpproxy.Action, error) {
+// partialUpload returns the partial upload of ac, and the range it draws
+// its cutoff from if ac gives one.
+func (ac actionConfig) partialUpload() (sftpproxy.Action, *faults.Range[uint64], error) {
 	if ac.CutoffOffset == nil {
-		return nil, errors.New("cutoff_offset is required")
+		return nil, nil, errors.New("cutoff_offset is required")
 	}
-	u := sftpproxy.PartialUpload{Cutoff: *ac.CutoffOffset}
+	var u sftpproxy.PartialUpload
+	var cutoffs *faults.Range[uint64]
+	if ac.CutoffOffset.ranged {
+		cutoffs = &faults.Range[uint64]{Min: ac.CutoffOffset.Min, Max: ac.CutoffOffset.Max}
+	} else {
+		u.Cutoff = ac.CutoffOffset.Min
+	}
+	result, err := ac.uploadResult()
+	if err != nil {
+		return nil, nil, err
+	}
+	u.Result = result
+	return u, cutoffs, nil
+}
+
+// uploadResult returns what a partial upload of ac does at its cutoff.
+func (ac actionConfig) uploadResult() (sftpproxy.Action, error) {
 	if ac.Status != "" && ac.Result != "status" {
 		return nil, errors.New("status applies only to result status")
 	}
@@ -415,19 +542,18 @@ func (ac actionConfig) partialUpload() (sftpproxy.Action, error) {
 		if err != nil {
 			return nil, err
 		}
-		u.Result = sftpproxy.Fail{Status: code}
+		return sftpproxy.Fail{Status: code}, nil
 	case "close_connection":
 		if ac.MaxFreeze != "" {
 			return nil, errors.New("max_freeze applies only to result freeze_connection")
 		}
 		switch ac.Mode {
 		case "", "fin":
-			u.Result = sftpproxy.Drop{}
+			return sftpproxy.Drop{}, nil
 		case "rst":
-			u.Result = sftpproxy.Drop{Reset: true}
-		default:
-			return nil, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
+			return sftpproxy.Drop{Reset: true}, nil
 		}
+		return nil, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
 	case "freeze_connection":
 		if ac.Mode != "" {
 			return nil, errors.New("mode applies only to result close_connection")
@@ -436,13 +562,11 @@ func (ac actionConfig) partialUpload() (sftpproxy.Action, error) {
 		if err != nil {
 			return nil, err
 		}
-		u.Result = sftpproxy.Freeze{Limit: limit}
+		return sftpproxy.Freeze{Limit: limit}, nil
 	case "":
 		return nil, errors.New("result is required: status, close_connection or freeze_connection")
-	default:
-		return nil, fmt.Errorf("result %q is not status, close_connection or freeze_connection", ac.Result)
 	}
-	return u, nil
+	return nil, fmt.Errorf("result %q is not status, close_connection or freeze_connection", ac.Result)
 }
 
 func (ac actionConfig) corruptDownload() (sftpproxy.Action, error) {

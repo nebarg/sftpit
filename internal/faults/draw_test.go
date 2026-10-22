@@ -186,3 +186,19 @@ func FuzzBetweenStaysInRange(f *testing.F) {
 		}
 	})
 }
+
+func TestRandomSeedsFitIn32BitsAndVary(t *testing.T) {
+	seen := make(map[faults.Seed]bool)
+	for range 8 {
+		s := faults.RandomSeed()
+		if s > math.MaxUint32 {
+			t.Errorf("RandomSeed() = %d, which does not fit in 32 bits", s)
+		}
+		seen[s] = true
+	}
+	// Two of eight 32-bit seeds coincide with a chance of about 1 in 150
+	// million.
+	if len(seen) != 8 {
+		t.Errorf("eight random seeds gave %v", seen)
+	}
+}

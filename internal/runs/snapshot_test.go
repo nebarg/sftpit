@@ -18,7 +18,7 @@ func TestSnapshotsCopyFilesWithinTheBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	run, err := w.NewRun()
+	run, err := w.NewRun(Scenario{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -202,7 +202,7 @@ scenarios:
 		t.Fatalf("Load: %v", err)
 	}
 	var logs snapshotLog
-	rules, err := faults.New(cfg.Rules, logs.logger())
+	rules, err := faults.New(cfg.Rules, 0, logs.logger())
 	if err != nil {
 		t.Fatalf("faults.New: %v", err)
 	}

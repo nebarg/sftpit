@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -97,7 +98,7 @@ func TestTempWorkspaceIsDeletedOnClose(t *testing.T) {
 	if !w.Temporary() {
 		t.Error("Temporary() = false for a temporary workspace")
 	}
-	if _, err := w.NewRun(); err != nil {
+	if _, err := w.NewRun(runs.Scenario{}); err != nil {
 		t.Fatalf("NewRun: %v", err)
 	}
 	closeWorkspace(t, w)
@@ -122,7 +123,7 @@ func TestNewRunKeepsTheNewestFiveRuns(t *testing.T) {
 	for range 7 {
 		// Runs started in the same millisecond have no order.
 		time.Sleep(2 * time.Millisecond)
-		r, err := w.NewRun()
+		r, err := w.NewRun(runs.Scenario{})
 		if err != nil {
 			t.Fatalf("NewRun: %v", err)
 		}
@@ -149,6 +150,41 @@ func TestNewRunKeepsTheNewestFiveRuns(t *testing.T) {
 	want := slices.Sorted(slices.Values(append(others, ids[2:]...)))
 	if got := listDir(t, filepath.Join(dir, "runs")); !slices.Equal(got, want) {
 		t.Errorf("runs/ holds %v, want the newest five runs and the other entries, %v", got, want)
+	}
+}
+
+func TestNewRunRecordsItsScenarioAndSeed(t *testing.T) {
+	w := openWorkspace(t, t.TempDir())
+	defer closeWorkspace(t, w)
+	tests := []struct {
+		scenario runs.Scenario
+		want     map[string]any
+	}{
+		{runs.Scenario{}, map[string]any{}},
+		{runs.Scenario{Name: "upload-recovery", Seed: 0, Pinned: true}, map[string]any{"scenario": "upload-recovery", "seed": 0.0, "seed_pinned": true}},
+		{runs.Scenario{Name: "dev-chaos", Seed: 4294967295}, map[string]any{"scenario": "dev-chaos", "seed": 4294967295.0}},
+	}
+	for _, tt := range tests {
+		r, err := w.NewRun(tt.scenario)
+		if err != nil {
+			t.Fatalf("NewRun: %v", err)
+		}
+		if r.Scenario != tt.scenario {
+			t.Errorf("NewRun(%+v) has Scenario %+v", tt.scenario, r.Scenario)
+		}
+		b, err := os.ReadFile(filepath.Join(r.Dir, "run.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record map[string]any
+		if err := json.Unmarshal(b, &record); err != nil {
+			t.Fatal(err)
+		}
+		delete(record, "id")
+		delete(record, "started")
+		if !maps.Equal(record, tt.want) {
+			t.Errorf("NewRun(%+v) wrote run.json\n%s\nwant, besides the ID and start, %v", tt.scenario, b, tt.want)
+		}
 	}
 }
 

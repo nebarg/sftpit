@@ -28,6 +28,7 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+`  upload-recovery:
+    seed: 481516
     faults:
       - id: first-upload-cutoff
         priority: 10
@@ -71,6 +72,22 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
       - id: cut-and-freeze
         match: {operation: write, path: /in/c.csv, attempt: {numbers: [2]}}
         action: {type: partial_upload, cutoff_offset: 10, result: freeze_connection, max_freeze: 30s}
+      - id: slow-stat
+        match: {operation: stat}
+        decision: {probability: 0.05}
+        action: {type: delay, when: before, duration: {min: 200ms, max: 3s}}
+      - id: flaky-upload
+        match: {operation: write, path_prefix: /in}
+        decision: {scope: transfer, probability: 0.25}
+        action: {type: partial_upload, cutoff_offset: {min: 65536, max: 1048576}, result: close_connection, mode: rst}
+      - id: failed-opens
+        match: {operation: [open_read, open_write]}
+        decision: {scope: transfer, probability: 1}
+        action: {type: fail, when: before, status: failure}
+      - id: never
+        match: {operation: remove}
+        decision: {scope: operation, probability: 0}
+        action: {type: fail, when: after, status: failure}
   other:
     faults:
       - id: deny
@@ -147,9 +164,72 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 			},
 			Action: sftpproxy.PartialUpload{Cutoff: 10, Result: sftpproxy.Freeze{Limit: 30 * time.Second}},
 		},
+		{
+			ID:          "slow-stat",
+			Match:       faults.Match{Operations: []faults.Operation{faults.Stat}},
+			Probability: probability(0.05),
+			Duration:    &faults.Range[time.Duration]{Min: 200 * time.Millisecond, Max: 3 * time.Second},
+			Action:      sftpproxy.Delay{When: sftpproxy.Before},
+		},
+		{
+			ID:          "flaky-upload",
+			Match:       faults.Match{Operations: []faults.Operation{faults.Write}, Path: faults.Location{Kind: faults.Under, Pattern: "/in"}},
+			Probability: probability(0.25),
+			Cutoff:      &faults.Range[uint64]{Min: 65536, Max: 1048576},
+			Action:      sftpproxy.PartialUpload{Result: sftpproxy.Drop{Reset: true}},
+		},
+		{
+			ID:          "failed-opens",
+			Match:       faults.Match{Operations: []faults.Operation{faults.OpenRead, faults.OpenWrite}},
+			Probability: probability(1),
+			Action:      sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusFailure},
+		},
+		{
+			ID:          "never",
+			Match:       faults.Match{Operations: []faults.Operation{faults.Remove}},
+			Probability: probability(0),
+			Action:      sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure},
+		},
 	}
 	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Rules, want) {
 		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Rules, want)
+	}
+	if cfg.Seed == nil || *cfg.Seed != 481516 {
+		t.Errorf("Seed = %v, want the scenario's 481516", cfg.Seed)
+	}
+}
+
+func probability(p float64) *float64 { return &p }
+
+func TestLoadPinsTheSeedOfTheSelectedScenario(t *testing.T) {
+	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
+scenarios:
+  pinned:
+    seed: 0
+    faults: []
+  fresh:
+    faults: []
+`, 0o600)
+	seven := faults.Seed(7)
+	tests := []struct {
+		scenario string
+		seed     *faults.Seed
+		want     *faults.Seed
+	}{
+		{"pinned", nil, new(faults.Seed)},
+		{"pinned", &seven, &seven},
+		{"fresh", nil, nil},
+		{"fresh", &seven, &seven},
+		{"", nil, nil},
+	}
+	for _, tt := range tests {
+		cfg, err := Load(Options{ConfigFile: config, Scenario: tt.scenario, Seed: tt.seed, LookupEnv: noEnv})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !reflect.DeepEqual(cfg.Seed, tt.want) {
+			t.Errorf("scenario %q with option %v has seed %v, want %v", tt.scenario, tt.seed, cfg.Seed, tt.want)
+		}
 	}
 }
 
@@ -187,6 +267,9 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	rule := func(match, action string) string {
 		return "  s:\n    faults:\n      - id: r\n        match: " + match + "\n        action: " + action + "\n"
+	}
+	decided := func(decision, match, action string) string {
+		return "  s:\n    faults:\n      - id: r\n        match: " + match + "\n        decision: " + decision + "\n        action: " + action + "\n"
 	}
 	deny := "{type: fail, when: before, status: failure}"
 	tests := []struct {
@@ -237,6 +320,22 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"no size", rule("{operation: stat}", "{type: wrong_size}"), "", "size or a size_delta other than 0 is required"},
 		{"a size delta of 0", rule("{operation: stat}", "{type: wrong_size, size_delta: 0}"), "", "size or a size_delta other than 0 is required"},
 		{"two sizes", rule("{operation: stat}", "{type: wrong_size, size: 1, size_delta: 1}"), "", "set size or size_delta, not both"},
+		{"a negative seed", "  s:\n    seed: -1\n    faults: []\n", "", "cannot unmarshal !!int `-1` into faults.Seed"},
+		{"a decision without a probability", decided("{scope: operation}", "{operation: stat}", deny), "", "scenarios.s.faults[0] (r): decision: probability is required"},
+		{"a probability above 1", decided("{probability: 1.5}", "{operation: stat}", deny), "", "probability 1.5 is not from 0 to 1"},
+		{"an unknown decision field", decided("{probability: 0.5, chance: 0.5}", "{operation: stat}", deny), "", "field chance not found"},
+		{"an unknown scope", decided("{scope: chunk, probability: 0.5}", "{operation: stat}", deny), "", `decision: scope "chunk" is not operation or transfer`},
+		{"a transfer decided per operation", decided("{scope: operation, probability: 0.5}", "{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: status, status: failure}"), "", "a partial_upload is decided once for each transfer, at its open, so its scope is transfer"},
+		{"a corrupt download decided per operation", decided("{scope: operation, probability: 0.5}", "{operation: read}", "{type: corrupt_download, transform: truncate, offset: 0}"), "", "a corrupt_download is decided once for each transfer"},
+		{"a delay of every read of a transfer", decided("{scope: transfer, probability: 0.5}", "{operation: [open_read, read]}", "{type: delay, when: before, duration: 1s}"), "", "scope transfer needs a partial_upload, a corrupt_download or the open_read and open_write operations; a delay on every request of a chosen transfer is not supported"},
+		{"an empty duration range", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 3s, max: 200ms}}"), "", "the duration range's min 3s is above its max 200ms"},
+		{"an empty cutoff range", rule("{operation: write}", "{type: partial_upload, cutoff_offset: {min: 2, max: 1}, result: status, status: failure}"), "", "the cutoff_offset range's min 2 is above its max 1"},
+		{"a range without a max", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s}}"), "", "a range needs both min and max"},
+		{"a range with another bound", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s, mid: 2s, max: 3s}}"), "", "a range has min and max, not mid"},
+		{"a range with two minimums", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s, min: 2s, max: 3s}}"), "", "a range's min is set twice"},
+		{"a range of bad durations", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s, max: soon}}"), "", `duration "soon" is not a positive duration`},
+		{"a range of bad offsets", rule("{operation: write}", "{type: partial_upload, cutoff_offset: {min: 0, max: 1MiB}, result: status, status: failure}"), "", "cannot unmarshal !!str `1MiB` into uint64"},
+		{"a list for a range", rule("{operation: stat}", "{type: delay, when: before, duration: [1s, 2s]}"), "", "cannot unmarshal !!seq into string"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

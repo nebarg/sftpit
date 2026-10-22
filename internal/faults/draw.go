@@ -8,8 +8,10 @@ package faults
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"log/slog"
 	"math"
 	"math/bits"
 )
@@ -20,6 +22,15 @@ const drawVersion = 1
 
 // Seed fixes every random decision of a run.
 type Seed uint64
+
+// RandomSeed returns a seed from the operating system's random source, for a
+// run whose seed is not pinned. It fits in 32 bits, so that it is easy to
+// copy into a command line and is exact as a number to any JSON reader.
+func RandomSeed() Seed {
+	var b [4]byte
+	rand.Read(b[:])
+	return Seed(binary.BigEndian.Uint32(b[:]))
+}
 
 // Key identifies one random decision. Each random choice a rule makes for a
 // request needs its own Choice, or its draws would be the same.
@@ -43,9 +54,23 @@ type Key struct {
 	// Operation names the request, such as "open_write" or "rename".
 	Operation string
 
-	// Ordinal is the attempt or occurrence the decision is for, counted
-	// within the rule's scope.
+	// Ordinal counts the requests the rule has matched with the same user,
+	// path and operation, up to the one the decision is for. Requests for
+	// other users, paths or operations never change it.
 	Ordinal uint64
+}
+
+// LogValue logs k as a group of its fields.
+func (k Key) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("rule", k.Rule),
+		slog.Uint64("activation", k.Activation),
+		slog.String("choice", k.Choice),
+		slog.String("user", k.User),
+		slog.String("path", k.Path),
+		slog.String("operation", k.Operation),
+		slog.Uint64("ordinal", k.Ordinal),
+	)
 }
 
 // Draw is the value a seed gives one decision, uniformly distributed over

@@ -6,6 +6,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -29,6 +30,19 @@ type Rule struct {
 
 	Match Match
 
+	// Probability, if set, is the chance that the rule fires for a request
+	// it selects, drawn for each request, or for a transfer once at its
+	// open. When it does not fire, the request goes to the next rule.
+	Probability *float64
+
+	// Duration, if set, is the range that a Delay draws its Duration from
+	// for each request the rule fires for, in place of its own.
+	Duration *Range[time.Duration]
+
+	// Cutoff, if set, is the range that a PartialUpload draws its Cutoff
+	// from for each transfer the rule selects, in place of its own.
+	Cutoff *Range[uint64]
+
 	// Action is what the rule does to a request it selects: a Delay, Fail,
 	// Drop or Freeze; a PartialUpload for the write operation or a
 	// CorruptDownload for the read operation, chosen when the transfer's
@@ -36,6 +50,16 @@ type Rule struct {
 	// operations. The engine sets the Reserve of a PartialUpload or
 	// CorruptDownload.
 	Action sftpproxy.Action
+}
+
+// Range is the values from Min to Max, inclusive, that a rule draws one of.
+type Range[T ~int64 | ~uint64] struct{ Min, Max T }
+
+func (r *Range[T]) check(field string) error {
+	if r != nil && r.Min > r.Max {
+		return fmt.Errorf("the %s range's min %v is above its max %v", field, r.Min, r.Max)
+	}
+	return nil
 }
 
 // Match says which requests a rule matches. A field left empty matches
@@ -268,7 +292,13 @@ func (r Rule) check() error {
 	if r.MaxTriggers < 0 {
 		return fmt.Errorf("max_triggers is %d; it must be positive, or 0 for no limit", r.MaxTriggers)
 	}
+	if p := r.Probability; p != nil && !(*p >= 0 && *p <= 1) {
+		return fmt.Errorf("probability %v is not from 0 to 1", *p)
+	}
 	if err := r.checkAction(); err != nil {
+		return err
+	}
+	if err := r.checkRanges(); err != nil {
 		return err
 	}
 	return r.checkSelection()
@@ -301,6 +331,19 @@ func (r Rule) checkAction() error {
 		return fmt.Errorf("unsupported action %T", r.Action)
 	}
 	return nil
+}
+
+func (r Rule) checkRanges() error {
+	if _, ok := r.Action.(sftpproxy.Delay); r.Duration != nil && !ok {
+		return errors.New("a duration range needs a delay")
+	}
+	if _, ok := r.Action.(sftpproxy.PartialUpload); r.Cutoff != nil && !ok {
+		return errors.New("a cutoff range needs a partial upload")
+	}
+	if err := r.Duration.check("duration"); err != nil {
+		return err
+	}
+	return r.Cutoff.check("cutoff_offset")
 }
 
 func (r Rule) checkSelection() error {

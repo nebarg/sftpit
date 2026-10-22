@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,8 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/nebarg/sftpit/internal/faults"
 )
 
 const startTimeout = 10 * time.Second
@@ -123,7 +127,7 @@ scenarios:
 			if err != nil || statErr == nil {
 				t.Errorf("without a scenario, Remove = %v and the file is still there (%v), want it removed", err, statErr)
 			}
-			if strings.Contains(s.stdout.String(), "scenario:") || strings.Contains(s.stderr.String(), "rule") {
+			if strings.Contains(s.stdout.String(), "scenario:") || strings.Contains(s.stdout.String(), "  seed:") || strings.Contains(s.stderr.String(), "rule") {
 				t.Errorf("without a scenario, sftpit reported one:\n%s%s", s.stdout.String(), s.stderr.String())
 			}
 			continue
@@ -137,6 +141,79 @@ scenarios:
 		if logs := s.stderr.String(); !strings.Contains(logs, `msg="rule fired" rule=deny-remove request=remove path=/outgoing/orders.csv user=test ordinal=1`) {
 			t.Errorf("stderr does not log the rule firing:\n%s", logs)
 		}
+	}
+}
+
+func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	slowStat := `
+      - id: slow-stat
+        match: {operation: stat}
+        action: {type: delay, when: before, duration: {min: 1ms, max: 20ms}}
+`
+	writeTestFile(t, config, "schema_version: 1\nscenarios:\n  pinned:\n    seed: 481516\n    faults:"+slowStat+"  fresh:\n    faults:"+slowStat)
+	freshLine := regexp.MustCompile(`  seed: (\d+) \(fresh; --seed (\d+) repeats its decisions\)\n`)
+	tests := []struct {
+		args []string
+		// pinned is the seed shown and recorded, or "" for a fresh one.
+		pinned string
+	}{
+		{[]string{"--scenario", "pinned"}, "481516"},
+		{[]string{"--scenario", "pinned", "--seed", "7"}, "7"},
+		{[]string{"--scenario", "fresh", "--seed", "18446744073709551615"}, "18446744073709551615"},
+		{[]string{"--scenario", "fresh"}, ""},
+		{[]string{"--scenario", "fresh"}, ""},
+	}
+	var fresh []string
+	for _, tt := range tests {
+		s := startServe(t, append([]string{"--config", config, "--sftp-listen", "127.0.0.1:0"}, tt.args...)...)
+		var record struct {
+			Scenario   string `json:"scenario"`
+			Seed       uint64 `json:"seed"`
+			SeedPinned bool   `json:"seed_pinned"`
+		}
+		b, err := os.ReadFile(filepath.Join(s.workspace, "runs", s.run, "run.json"))
+		if err == nil {
+			err = json.Unmarshal(b, &record)
+		}
+		c := s.dial(t, "test", "test")
+		if _, err := c.Stat("/"); err != nil {
+			t.Errorf("%v: Stat: %v", tt.args, err)
+		}
+		c.Close()
+		s.stop(t)
+		if err != nil {
+			t.Fatalf("%v: run.json: %v", tt.args, err)
+		}
+
+		out := s.stdout.String()
+		shown := tt.pinned
+		if tt.pinned != "" {
+			if !strings.Contains(out, "  seed: "+tt.pinned+" (pinned)\n") {
+				t.Errorf("%v: banner does not show seed %s as pinned:\n%s", tt.args, tt.pinned, out)
+			}
+		} else if m := freshLine.FindStringSubmatch(out); m == nil || m[1] != m[2] {
+			t.Fatalf("%v: banner does not show a fresh seed and how to repeat it:\n%s", tt.args, out)
+		} else {
+			shown = m[1]
+			fresh = append(fresh, shown)
+			if _, err := strconv.ParseUint(shown, 10, 32); err != nil {
+				t.Errorf("%v: fresh seed %s does not fit in 32 bits", tt.args, shown)
+			}
+		}
+		if want := tt.args[1]; record.Scenario != want || strconv.FormatUint(record.Seed, 10) != shown || record.SeedPinned != (tt.pinned != "") {
+			t.Errorf("%v: run.json records %+v, want scenario %s and seed %s, pinned: %v", tt.args, record, want, shown, tt.pinned != "")
+		}
+		seed, _ := strconv.ParseUint(shown, 10, 64)
+		key := faults.Key{Rule: "slow-stat", Choice: "duration", User: "test", Path: "/", Operation: "stat", Ordinal: 1}
+		duration := faults.Between(faults.Seed(seed).Draw(key), time.Millisecond, 20*time.Millisecond)
+		if fired := fmt.Sprintf(`msg="rule fired" rule=slow-stat request=stat path=/ user=test ordinal=1 duration=%v`, duration); !strings.Contains(s.stderr.String(), fired) {
+			t.Errorf("%v: stderr lacks %s, drawn from seed %s:\n%s", tt.args, fired, shown, s.stderr.String())
+		}
+	}
+	// Two fresh 32-bit seeds coincide with a chance of 1 in 2^32.
+	if len(fresh) == 2 && fresh[0] == fresh[1] {
+		t.Errorf("two runs drew the same fresh seed %s", fresh[0])
 	}
 }
 
@@ -291,6 +368,8 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		{"missing config", []string{"--config", "missing.yaml"}, "missing.yaml"},
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
 		{"undefined scenario", []string{"--scenario", "upload-recovery"}, `scenario "upload-recovery" is not defined`},
+		{"seed without a scenario", []string{"--seed", "7"}, "--seed needs --scenario, whose random decisions it pins"},
+		{"negative seed", []string{"--scenario", "s", "--seed", "-1"}, `invalid value "-1" for flag -seed: a seed is a whole number from 0 to 18446744073709551615`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -135,6 +135,26 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 
 A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault, and keeps the file that each faulted upload leaves behind, logging its size and SHA-256 when its handle closes.
 
+Rules can also fire at random, and draw a delay's `duration` or a partial upload's `cutoff_offset` from a range:
+
+```yaml
+scenarios:
+  flaky-partner:
+    seed: 481516 # omit for a fresh seed every run
+    faults:
+      - id: "slow-stat"
+        match: { operation: "stat" }
+        action: { type: "delay", when: "before", duration: { min: "200ms", max: "3s" } }
+      - id: "flaky-upload"
+        match: { operation: "write", path_prefix: "/incoming" }
+        decision: { probability: 0.25 } # a quarter of uploads, decided as each opens
+        action: { type: "partial_upload", cutoff_offset: { min: 65536, max: 1048576 }, result: "close_connection", mode: "rst" }
+```
+
+A rule with a `decision` fires with its `probability`: a partial upload or corrupt download draws once for each transfer, as its file opens, and any other rule for each request it selects. When the draw misses, the request goes on to the next rule. A range is drawn for each request a rule fires for, or each transfer. `rule fired` shows the values drawn.
+
+Every draw depends only on the run's seed and on the request: its rule, user, path and operation, and how many requests of that user, path and operation the rule has matched before it. Requests for other files never change one. So a pinned seed, from the scenario's `seed` or `--seed`, gives a test the same faults on every run of the same workload. Without one, each run draws a fresh seed, so chaos differs from run to run. The banner shows the seed, and a kept workspace records it in `runs/<run>/run.json`, so `--seed` can repeat a run's decisions.
+
 ## Behavior
 
 With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The differences:

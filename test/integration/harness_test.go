@@ -118,7 +118,7 @@ func startLimitedServer(t testing.TB, via route, rules *faults.Engine, opts sftp
 		t.Fatalf("OpenWorkspace: %v", err)
 	}
 	t.Cleanup(func() { workspace.Close() })
-	run, err := workspace.NewRun()
+	run, err := workspace.NewRun(runs.Scenario{})
 	if err != nil {
 		t.Fatalf("NewRun: %v", err)
 	}

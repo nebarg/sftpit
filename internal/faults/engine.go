@@ -12,9 +12,11 @@ import (
 )
 
 // Engine applies the rules of a scenario to the requests of one run. Each
-// rule counts the requests it matches from the start of the run. Its methods
-// are safe for concurrent use.
+// rule counts the requests it matches from the start of the run, and draws
+// its random decisions from the run's seed. Its methods are safe for
+// concurrent use.
 type Engine struct {
+	seed   Seed
 	logger *slog.Logger
 
 	mu    sync.Mutex
@@ -30,9 +32,18 @@ type rule struct {
 	// attempts counts the opens of each user, path or both, for a rule with
 	// an Attempt.
 	attempts map[attemptKey]uint64
+
+	// draws counts the requests of each user, path and operation, for a
+	// rule that makes random decisions.
+	draws map[drawKey]uint64
 }
 
 type attemptKey struct{ user, path string }
+
+type drawKey struct {
+	user, path string
+	op         Operation
+}
 
 // Counts are what a rule has done in a run.
 type Counts struct {
@@ -50,18 +61,23 @@ type Counts struct {
 	Fired uint64
 }
 
-// New returns an engine for rules, which logs each fault it injects to
-// logger, or to slog.Default() if logger is nil.
-func New(rules []Rule, logger *slog.Logger) (*Engine, error) {
+// New returns an engine for rules, which draws its random decisions from
+// seed and logs each fault it injects to logger, or to slog.Default() if
+// logger is nil. It logs each random decision at debug level.
+func New(rules []Rule, seed Seed, logger *slog.Logger) (*Engine, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if err := Check(rules); err != nil {
 		return nil, err
 	}
-	e := &Engine{logger: logger}
+	e := &Engine{seed: seed, logger: logger}
 	for _, r := range rules {
-		e.rules = append(e.rules, &rule{Rule: r, ops: r.selectedAt(), attempts: make(map[attemptKey]uint64)})
+		ru := &rule{Rule: r, ops: r.selectedAt(), attempts: make(map[attemptKey]uint64)}
+		if r.Probability != nil || r.Duration != nil || r.Cutoff != nil {
+			ru.draws = make(map[drawKey]uint64)
+		}
+		e.rules = append(e.rules, ru)
 	}
 	slices.SortStableFunc(e.rules, func(a, b *rule) int { return cmp.Compare(a.Priority, b.Priority) })
 	return e, nil
@@ -105,30 +121,34 @@ func (e *Engine) Counts() map[string]Counts {
 	return counts
 }
 
-// decide returns the action of the first rule that selects r, if any. Every
-// rule that matches r counts it, whichever rule is chosen, so a rule's
-// attempts and occurrences do not depend on the rules before it.
+// decide returns the action of the first rule that selects r and fires for
+// it, if any. Every rule that matches r counts it, whichever rule is chosen,
+// so a rule's attempts, occurrences and draws do not depend on the rules
+// before it.
 func (e *Engine) decide(user, keyFingerprint string, r sftpproxy.Request) sftpproxy.Action {
 	op := operationOf(r)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var chosen *rule
 	var ordinal uint64
+	var key Key
 	for _, ru := range e.rules {
 		if !ru.matches(user, keyFingerprint, op, r) {
 			continue
 		}
 		n := ru.count(user, r.Path)
-		if chosen == nil && ru.selects(n) && !ru.spent() {
-			chosen, ordinal = ru, n
+		k := ru.decisionKey(user, r.Path, op)
+		if chosen == nil && ru.selects(n) && !ru.spent() && e.fires(ru, k) {
+			chosen, ordinal, key = ru, n, k
 		}
 	}
 	if chosen == nil {
 		return nil
 	}
 	chosen.counts.Selected++
-	fired := []any{"rule", chosen.ID, "request", op, "path", r.Path, "user", user, "ordinal", ordinal}
-	switch a := chosen.Action.(type) {
+	action, drawn := e.action(chosen, key)
+	fired := append([]any{"rule", chosen.ID, "request", op, "path", r.Path, "user", user, "ordinal", ordinal}, drawn...)
+	switch a := action.(type) {
 	case sftpproxy.PartialUpload:
 		a.Reserve = e.reserve(chosen, fired)
 		e.logger.Debug("rule selected", fired...)
@@ -140,7 +160,47 @@ func (e *Engine) decide(user, keyFingerprint string, r sftpproxy.Request) sftppr
 	}
 	chosen.counts.Fired++
 	e.logger.Info("rule fired", fired...)
-	return chosen.Action
+	return action
+}
+
+// fires reports whether r fires for the request of the decision k, which it
+// selects: always, unless r has a Probability.
+func (e *Engine) fires(r *rule, k Key) bool {
+	if r.Probability == nil {
+		return true
+	}
+	k.Choice = "probability"
+	d := e.seed.Draw(k)
+	fires := d.Fires(*r.Probability)
+	e.logger.Debug("decision", "key", k, "draw", d, "probability", *r.Probability, "fires", fires)
+	return fires
+}
+
+// action returns r's action for the request of the decision k, with any
+// value r draws for it, which it also returns as log attributes.
+func (e *Engine) action(r *rule, k Key) (sftpproxy.Action, []any) {
+	switch a := r.Action.(type) {
+	case sftpproxy.Delay:
+		if r.Duration != nil {
+			a.Duration = drawFrom(e, k, "duration", *r.Duration)
+			return a, []any{"duration", a.Duration}
+		}
+	case sftpproxy.PartialUpload:
+		if r.Cutoff != nil {
+			a.Cutoff = drawFrom(e, k, "cutoff", *r.Cutoff)
+			return a, []any{"cutoff", a.Cutoff}
+		}
+	}
+	return r.Action, nil
+}
+
+// drawFrom returns the value that the choice of the decision k draws from r.
+func drawFrom[T ~int64 | ~uint64](e *Engine, k Key, choice string, r Range[T]) T {
+	k.Choice = choice
+	d := e.seed.Draw(k)
+	v := Between(d, r.Min, r.Max)
+	e.logger.Debug("decision", "key", k, "draw", d, "min", r.Min, "max", r.Max, "value", v)
+	return v
 }
 
 // reserve returns the Reserve of a transfer that r selected, which lets the
@@ -185,6 +245,19 @@ func (r *rule) count(user, path string) uint64 {
 	}
 	r.attempts[k]++
 	return r.attempts[k]
+}
+
+// decisionKey counts a request the rule matched among those with the same
+// user, path and operation, and returns the key of the rule's random
+// decisions about it, without a Choice.
+func (r *rule) decisionKey(user, path string, op Operation) Key {
+	k := Key{Rule: r.ID, User: user, Path: path, Operation: string(op)}
+	if r.draws != nil {
+		dk := drawKey{user, path, op}
+		r.draws[dk]++
+		k.Ordinal = r.draws[dk]
+	}
+	return k
 }
 
 func (r *rule) selects(ordinal uint64) bool {

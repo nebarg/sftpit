@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"slices"
 	"time"
+
+	"github.com/nebarg/sftpit/internal/faults"
 )
 
 var (
@@ -184,21 +186,37 @@ type Run struct {
 	// Dir is the run's directory, and Files the directory its SFTP clients
 	// see.
 	Dir, Files string
+
+	Scenario Scenario
+}
+
+// Scenario is the scenario whose faults a run injects.
+type Scenario struct {
+	// Name names the scenario, or is "" for a run without faults.
+	Name string
+
+	// Seed fixes the scenario's random decisions in the run, and Pinned
+	// reports whether it was given rather than drawn for the run.
+	Seed   faults.Seed
+	Pinned bool
 }
 
 // runRecord is the content of a run's run.json.
 type runRecord struct {
-	ID      string    `json:"id"`
-	Started time.Time `json:"started"`
+	ID         string       `json:"id"`
+	Started    time.Time    `json:"started"`
+	Scenario   string       `json:"scenario,omitempty"`
+	Seed       *faults.Seed `json:"seed,omitempty"`
+	SeedPinned bool         `json:"seed_pinned,omitempty"`
 }
 
 // runIDPattern matches the IDs NewRun gives. They sort in the order the
 // runs started.
 var runIDPattern = regexp.MustCompile(`^\d{8}-\d{6}\.\d{3}-[0-9a-f]{4}$`)
 
-// NewRun starts a run with no files, and deletes the oldest runs so that
-// the workspace keeps the newest five.
-func (w *Workspace) NewRun() (*Run, error) {
+// NewRun starts a run of scenario with no files, and deletes the oldest runs
+// so that the workspace keeps the newest five.
+func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	started := time.Now().UTC()
 	suffix := make([]byte, 2)
 	rand.Read(suffix)
@@ -208,7 +226,11 @@ func (w *Workspace) NewRun() (*Run, error) {
 	if err := w.root.MkdirAll(filepath.Join(dir, "fs"), 0o700); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
-	b, err := json.MarshalIndent(runRecord{ID: id, Started: started}, "", "  ")
+	record := runRecord{ID: id, Started: started}
+	if scenario.Name != "" {
+		record.Scenario, record.Seed, record.SeedPinned = scenario.Name, &scenario.Seed, scenario.Pinned
+	}
+	b, err := json.MarshalIndent(record, "", "  ")
 	if err == nil {
 		err = w.root.WriteFile(filepath.Join(dir, "run.json"), append(b, '\n'), 0o600)
 	}
@@ -218,7 +240,7 @@ func (w *Workspace) NewRun() (*Run, error) {
 	if err := w.prune(id); err != nil {
 		return nil, err
 	}
-	return &Run{ID: id, Dir: filepath.Join(w.dir, dir), Files: filepath.Join(w.dir, dir, "fs")}, nil
+	return &Run{ID: id, Dir: filepath.Join(w.dir, dir), Files: filepath.Join(w.dir, dir, "fs"), Scenario: scenario}, nil
 }
 
 // prune deletes the oldest runs beyond the newest keptRuns, never current.
