@@ -24,10 +24,12 @@ const usage = `Usage: sftpit <command>
 
 Commands:
   serve     Run the SFTP server
+  config    Check or explain a configuration file
   version   Print the build version
   help      Show this help
 
-Run "sftpit serve --help" for the server's flags.
+Run "sftpit serve --help" for the server's flags, and "sftpit config --help"
+for the configuration commands.
 `
 
 func main() {
@@ -46,8 +48,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
-	if args[0] == "serve" {
+	switch args[0] {
+	case "serve":
 		return serve(ctx, args[1:], stdout, stderr)
+	case "config":
+		return configCommand(args[1:], stdout, stderr)
 	}
 	if len(args) > 1 {
 		fmt.Fprintf(stderr, "sftpit %s: unexpected arguments %q\n", args[0], args[1:])

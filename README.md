@@ -2,7 +2,7 @@
 
 Mailpit for SFTP: a local SFTP server for developing and testing file integrations, with faults you can inject on demand — slow responses, dropped connections, random failures and simulated corruption.
 
-**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration.
+**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration, which `sftpit config` checks and explains.
 
 ## Quickstart
 
@@ -82,6 +82,15 @@ sftpit never reads a `.env` it was not told about. It never copies env-file valu
 
 Expansion such as `${OTHER}`, escapes and multi-line values are rejected for referenced variables. Keep env files out of version control.
 
+To check a configuration without starting a server:
+
+```bash
+sftpit config validate --config ./sftpit.yaml
+sftpit config explain --config ./sftpit.yaml
+```
+
+`validate` checks everything `serve` would, every scenario included, and exits with 2 at the first problem. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, and each scenario's rules in the order they are tried. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace, and both take `--env-file`.
+
 ## Faults
 
 A scenario in the configuration lists fault rules, and `--scenario` chooses the one a run injects. Without it, sftpit injects nothing. Every scenario is checked at startup, whichever one is chosen.
@@ -132,6 +141,37 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
 | `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
+
+Recipes are shorthands for common faults. A rule gives one in place of `match` and `action`, with the location fields of a match:
+
+```yaml
+faults:
+  - id: "first-upload-cutoff"
+    fail_upload:
+      path: "/incoming/orders.csv.part"
+      attempts: [1]
+      after_bytes: 1048576
+  - id: "random-failures"
+    fail_randomly:
+      operations: ["open_write", "write", "close", "rename", "stat", "list"]
+      path_glob: "/incoming/*"
+      probability: 0.05
+  - id: "missing-chunk"
+    corrupt_download:
+      path_glob: "/outgoing/*.csv"
+      attempts: [1]
+      transform: "omit_range"
+      offset: 1048576
+      length: 4096
+```
+
+| Recipe | Long form | Fields |
+|---|---|---|
+| `fail_upload` | A `partial_upload` cut off at `after_bytes`, whose `result` is `status` and `status` is `failure` unless set | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
+| `fail_randomly` | A `fail` of `operations` with `probability`, `when` `before` and `status` `failure` unless set | `operations`, `probability`, `status`, `when` |
+| `corrupt_download` | A `corrupt_download` | `attempts`, `probability`, `transform`, `offset`, `length` |
+
+`attempts` lists the opens a recipe selects, counted per user and path. `sftpit config explain` shows the long form of each recipe.
 
 A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault, and keeps the file that each faulted upload leaves behind, logging its size and SHA-256 when its handle closes.
 

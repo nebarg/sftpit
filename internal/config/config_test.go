@@ -3,8 +3,10 @@ package config
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -271,60 +273,69 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 	}
 }
 
-func TestResolveSecretsPrefersTheEnvironmentThenLaterFiles(t *testing.T) {
+func TestLookupSecretsPrefersTheEnvironmentThenLaterFiles(t *testing.T) {
 	dir := t.TempDir()
 	first := writeTestFile(t, filepath.Join(dir, "first.env"), "FROM_ENV=file\nFIRST=first\nLATER=first\n", 0o600)
 	second := writeTestFile(t, filepath.Join(dir, "second.env"), "LATER=second\nUNUSED=unused\n", 0o600)
 	env := fakeEnv{"FROM_ENV": "environment"}
 
 	names := map[string]bool{"FROM_ENV": true, "FIRST": true, "LATER": true}
-	secrets, _, err := resolveSecrets(names, []string{first, second}, env.lookup)
+	l, err := lookupSecrets(names, []string{first, second}, env.lookup)
 	if err != nil {
-		t.Fatalf("resolveSecrets: %v", err)
+		t.Fatalf("lookupSecrets: %v", err)
+	}
+	if err := l.check(); err != nil {
+		t.Errorf("check: %v", err)
 	}
 	want := map[string]string{"FROM_ENV": "environment", "FIRST": "first", "LATER": "second"}
-	for name, value := range want {
-		if secrets[name] != value {
-			t.Errorf("%s = %q, want %q", name, secrets[name], value)
-		}
+	if !maps.Equal(l.values, want) {
+		t.Errorf("values = %v, want only the referenced variables, %v", l.values, want)
 	}
-	if len(secrets) != len(want) {
-		t.Errorf("secrets = %v, want only the referenced variables", secrets)
+	if want := map[string]string{"FROM_ENV": "the environment", "FIRST": first, "LATER": second}; !maps.Equal(l.sources, want) {
+		t.Errorf("sources = %v, want %v", l.sources, want)
 	}
 }
 
-func TestResolveSecretsNeverSetsTheProcessEnvironment(t *testing.T) {
+func TestLookupSecretsNeverSetsTheProcessEnvironment(t *testing.T) {
 	const name = "SFTPIT_CONFIG_TEST_SECRET"
 	file := writeTestFile(t, filepath.Join(t.TempDir(), "test.env"), name+"=value\n", 0o600)
-	if _, _, err := resolveSecrets(map[string]bool{name: true}, []string{file}, os.LookupEnv); err != nil {
-		t.Fatalf("resolveSecrets: %v", err)
+	if _, err := lookupSecrets(map[string]bool{name: true}, []string{file}, os.LookupEnv); err != nil {
+		t.Fatalf("lookupSecrets: %v", err)
 	}
 	if _, ok := os.LookupEnv(name); ok {
 		t.Errorf("%s was added to the process environment", name)
 	}
 }
 
-func TestResolveSecretsReportsWhereItLooked(t *testing.T) {
+func TestLookupSecretsReportsWhereItLooked(t *testing.T) {
 	dir := t.TempDir()
 	present := writeTestFile(t, filepath.Join(dir, "present.env"), "OTHER=1\n", 0o600)
 	absent := filepath.Join(dir, "absent.env")
 
-	_, _, err := resolveSecrets(map[string]bool{"SECRET": true}, []string{absent, present}, noEnv)
+	l, err := lookupSecrets(map[string]bool{"SECRET": true}, []string{absent, present}, noEnv)
+	if err != nil {
+		t.Fatalf("lookupSecrets: %v", err)
+	}
+	if !slices.Equal(l.missing, []string{"SECRET"}) {
+		t.Errorf("missing = %v, want SECRET", l.missing)
+	}
 	want := "SECRET is not set in the environment or " + absent + " (not found), " + present
-	if err == nil || err.Error() != want {
-		t.Errorf("error = %v, want %q", err, want)
+	if err := l.check(); err == nil || err.Error() != want {
+		t.Errorf("check = %v, want %q", err, want)
 	}
 
 	empty := writeTestFile(t, filepath.Join(dir, "empty.env"), "SECRET=\n", 0o600)
-	_, _, err = resolveSecrets(map[string]bool{"SECRET": true}, []string{empty}, noEnv)
-	if err == nil || err.Error() != "SECRET is set but empty" {
-		t.Errorf("error = %v, want an empty value rejected", err)
+	if l, err = lookupSecrets(map[string]bool{"SECRET": true}, []string{empty}, noEnv); err != nil {
+		t.Fatalf("lookupSecrets: %v", err)
+	}
+	if err := l.check(); err == nil || err.Error() != "SECRET is set but empty" {
+		t.Errorf("check = %v, want an empty value rejected", err)
 	}
 }
 
-func TestResolveSecretsChecksEveryDeclaredFile(t *testing.T) {
+func TestLookupSecretsChecksEveryDeclaredFile(t *testing.T) {
 	malformed := writeTestFile(t, filepath.Join(t.TempDir(), "bad.env"), "NOT A LINE\n", 0o600)
-	_, _, err := resolveSecrets(map[string]bool{}, []string{malformed}, noEnv)
+	_, err := lookupSecrets(map[string]bool{}, []string{malformed}, noEnv)
 	if err == nil || !strings.Contains(err.Error(), "bad.env:1: expected KEY=value") {
 		t.Errorf("error = %v, want the malformed file reported", err)
 	}

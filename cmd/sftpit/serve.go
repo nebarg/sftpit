@@ -166,7 +166,7 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 
 	var rules *faults.Engine
 	if cfg.Scenario != "" {
-		if rules, err = faults.New(cfg.Rules, scenario.Seed, logger); err != nil {
+		if rules, err = faults.New(cfg.Rules(), scenario.Seed, logger); err != nil {
 			return err
 		}
 	}
@@ -246,10 +246,10 @@ func printBanner(w io.Writer, addr string, workspace *runs.Workspace, run *runs.
 	fmt.Fprintf(w, "  run: %s\n", run.ID)
 	if s := run.Scenario; s.Name != "" {
 		rules := "rules"
-		if len(cfg.Rules) == 1 {
+		if len(cfg.Rules()) == 1 {
 			rules = "rule"
 		}
-		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", s.Name, len(cfg.Rules), rules)
+		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", s.Name, len(cfg.Rules()), rules)
 		if s.Pinned {
 			fmt.Fprintf(w, "  seed: %d (pinned)\n", s.Seed)
 		} else {

@@ -78,19 +78,33 @@ type Config struct {
 	// because no users were configured.
 	DefaultCredentials bool
 
+	// Scenarios are the configuration's scenarios, by name.
+	Scenarios map[string]Scenario
+
 	// Scenario names the scenario whose rules inject faults, or is "" for
 	// none.
 	Scenario string
 
-	// Rules are the scenario's fault rules.
-	Rules []faults.Rule
-
-	// Seed is the seed pinned for the scenario's random decisions, or nil
-	// for a fresh seed in every run.
+	// Seed is the seed pinned for the chosen scenario's random decisions,
+	// or nil for a fresh seed in every run.
 	Seed *faults.Seed
 
 	// Warnings describe problems that do not prevent sftpit from starting.
 	Warnings []string
+}
+
+// Scenario is a validated scenario.
+type Scenario struct {
+	// Seed is the seed the scenario pins, or nil.
+	Seed *faults.Seed
+
+	// Rules are the scenario's fault rules, in the order they were given.
+	Rules []faults.Rule
+}
+
+// Rules returns the fault rules of the chosen scenario, if any.
+func (c *Config) Rules() []faults.Rule {
+	return c.Scenarios[c.Scenario].Rules
 }
 
 // Options are the command-line settings. They take precedence over the
@@ -125,21 +139,21 @@ type Options struct {
 
 type fileConfig struct {
 	SchemaVersion int           `yaml:"schema_version"`
-	EnvFile       stringList    `yaml:"env_file"`
+	EnvFile       stringList    `yaml:"env_file,flow,omitempty"`
 	Server        serverConfig  `yaml:"server"`
 	Storage       storageConfig `yaml:"storage"`
-	Users         []userConfig  `yaml:"users"`
+	Users         []userConfig  `yaml:"users,omitempty"`
 
-	Scenarios map[string]scenarioConfig `yaml:"scenarios"`
+	Scenarios map[string]scenarioConfig `yaml:"scenarios,omitempty"`
 }
 
 type storageConfig struct {
-	DataDir       string `yaml:"data_dir"`
-	SeedDir       string `yaml:"seed_dir"`
-	MaxFileBytes  *int64 `yaml:"max_file_bytes"`
-	MaxTotalBytes *int64 `yaml:"max_total_bytes"`
-	MaxFiles      *int64 `yaml:"max_files"`
-	MaxOpenFiles  *int64 `yaml:"max_open_files"`
+	DataDir       string `yaml:"data_dir,omitempty"`
+	SeedDir       string `yaml:"seed_dir,omitempty"`
+	MaxFileBytes  *int64 `yaml:"max_file_bytes,omitempty"`
+	MaxTotalBytes *int64 `yaml:"max_total_bytes,omitempty"`
+	MaxFiles      *int64 `yaml:"max_files,omitempty"`
+	MaxOpenFiles  *int64 `yaml:"max_open_files,omitempty"`
 }
 
 type serverConfig struct {
@@ -149,8 +163,8 @@ type serverConfig struct {
 
 type userConfig struct {
 	Name           string `yaml:"name"`
-	PasswordEnv    string `yaml:"password_env"`
-	AuthorizedKeys string `yaml:"authorized_keys"`
+	PasswordEnv    string `yaml:"password_env,omitempty"`
+	AuthorizedKeys string `yaml:"authorized_keys,omitempty"`
 	Home           string `yaml:"home"`
 }
 
@@ -177,10 +191,51 @@ func (l *stringList) UnmarshalYAML(n *yaml.Node) error {
 	return fmt.Errorf("line %d: expected a path or a list of paths", n.Line)
 }
 
+// MarshalYAML writes a list of one as a single string.
+func (l stringList) MarshalYAML() (any, error) {
+	if len(l) == 1 {
+		return l[0], nil
+	}
+	return flowNode([]string(l))
+}
+
+// flowNode returns v as a YAML node in the flow style, such as [a, b].
+func flowNode(v any) (*yaml.Node, error) {
+	n := new(yaml.Node)
+	if err := n.Encode(v); err != nil {
+		return nil, err
+	}
+	n.Style = yaml.FlowStyle
+	return n, nil
+}
+
 // Load reads the configuration file named in opts, if any, applies the
 // command-line overrides and resolves every referenced secret. It starts no
 // listeners and writes nothing.
 func Load(opts Options) (*Config, error) {
+	r, err := read(opts, true)
+	if err != nil {
+		return nil, err
+	}
+	return r.cfg, nil
+}
+
+// reading is a configuration as read from its file.
+type reading struct {
+	cfg *Config
+
+	// file is the configuration file as decoded, and dir the directory its
+	// relative paths are resolved against. envFiles are the env files read,
+	// in order, and secrets is what they and the environment held.
+	file     fileConfig
+	dir      string
+	envFiles []string
+	secrets  secretLookup
+}
+
+// read reads the configuration as Load does. A missing or empty secret is
+// an error only if requireSecrets is set.
+func read(opts Options, requireSecrets bool) (*reading, error) {
 	lookupEnv := opts.LookupEnv
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
@@ -246,34 +301,39 @@ func Load(opts Options) (*Config, error) {
 		envFiles = append(envFiles, resolvePath(dir, name))
 	}
 	envFiles = append(envFiles, opts.EnvFiles...)
-	secrets, warnings, err := resolveSecrets(referencedSecrets(f.Users), envFiles, lookupEnv)
+	secrets, err := lookupSecrets(referencedSecrets(f.Users), envFiles, lookupEnv)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Warnings = warnings
+	if requireSecrets {
+		if err := secrets.check(); err != nil {
+			return nil, err
+		}
+	}
+	cfg.Warnings = secrets.warnings
 
 	if len(f.Users) == 0 {
 		cfg.Users = []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}
 		cfg.DefaultCredentials = true
 	}
 	for i, u := range f.Users {
-		user, err := u.resolve(dir, secrets)
+		user, err := u.resolve(dir, secrets.values)
 		if err != nil {
 			return nil, fmt.Errorf("users[%d] (%s): %w", i, u.Name, err)
 		}
 		cfg.Users = append(cfg.Users, user)
 	}
 
-	cfg.Rules, err = scenarios(f.Scenarios, opts.Scenario, cfg.Users)
+	cfg.Scenarios, err = scenarios(f.Scenarios, opts.Scenario, cfg.Users)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Scenario = opts.Scenario
-	cfg.Seed = f.Scenarios[opts.Scenario].Seed
+	cfg.Seed = cfg.Scenarios[opts.Scenario].Seed
 	if opts.Seed != nil {
 		cfg.Seed = opts.Seed
 	}
-	return cfg, nil
+	return &reading{cfg: cfg, file: f, dir: dir, envFiles: envFiles, secrets: secrets}, nil
 }
 
 func decodeFile(name string) (*fileConfig, error) {
@@ -491,24 +551,37 @@ func readAuthorizedKeys(name string) ([]ssh.PublicKey, error) {
 	return keys, nil
 }
 
-// resolveSecrets looks up each variable in names, first in the process
+// secretLookup is what looking up the referenced variables found.
+type secretLookup struct {
+	// values holds each variable found, and sources where it was found:
+	// "the environment" or the env file's path.
+	values, sources map[string]string
+
+	// missing are the variables found nowhere, and searched says where
+	// they were looked for.
+	missing  []string
+	searched string
+
+	warnings []string
+}
+
+// lookupSecrets looks up each variable in names, first in the process
 // environment and then in envFiles, where a later file overrides an earlier
 // one. An env file that does not exist is skipped, so a configuration can
 // declare a git-ignored file that CI replaces with real environment
 // variables.
-func resolveSecrets(names map[string]bool, envFiles []string, lookupEnv func(string) (string, bool)) (map[string]string, []string, error) {
-	secrets := make(map[string]string, len(names))
+func lookupSecrets(names map[string]bool, envFiles []string, lookupEnv func(string) (string, bool)) (secretLookup, error) {
+	l := secretLookup{values: make(map[string]string, len(names)), sources: make(map[string]string, len(names))}
 	missing := make(map[string]bool)
 	for name := range names {
 		if value, ok := lookupEnv(name); ok {
-			secrets[name] = value
+			l.values[name], l.sources[name] = value, "the environment"
 		} else {
 			missing[name] = true
 		}
 	}
 
-	var warnings, searched []string
-	fromFiles := make(map[string]string)
+	var searched []string
 	for _, file := range envFiles {
 		values, warning, err := readEnvFile(file, missing)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -516,32 +589,38 @@ func resolveSecrets(names map[string]bool, envFiles []string, lookupEnv func(str
 			continue
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("env file: %w", err)
+			return secretLookup{}, fmt.Errorf("env file: %w", err)
 		}
 		searched = append(searched, file)
 		if warning != "" {
-			warnings = append(warnings, warning)
+			l.warnings = append(l.warnings, warning)
 		}
 		for name, v := range values {
-			fromFiles[name] = v.value
+			l.values[name], l.sources[name] = v.value, file
 		}
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(missing)) {
-		value, ok := fromFiles[name]
-		if !ok {
-			where := "the environment"
-			if len(searched) > 0 {
-				where += " or " + strings.Join(searched, ", ")
-			}
-			return nil, nil, fmt.Errorf("%s is not set in %s", name, where)
-		}
-		secrets[name] = value
-	}
-	for _, name := range slices.Sorted(maps.Keys(secrets)) {
-		if secrets[name] == "" {
-			return nil, nil, fmt.Errorf("%s is set but empty", name)
+		if _, ok := l.values[name]; !ok {
+			l.missing = append(l.missing, name)
 		}
 	}
-	return secrets, warnings, nil
+	l.searched = "the environment"
+	if len(searched) > 0 {
+		l.searched += " or " + strings.Join(searched, ", ")
+	}
+	return l, nil
+}
+
+// check reports the first variable that is missing or empty.
+func (l secretLookup) check() error {
+	if len(l.missing) > 0 {
+		return fmt.Errorf("%s is not set in %s", l.missing[0], l.searched)
+	}
+	for _, name := range slices.Sorted(maps.Keys(l.values)) {
+		if l.values[name] == "" {
+			return fmt.Errorf("%s is set but empty", name)
+		}
+	}
+	return nil
 }

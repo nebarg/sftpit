@@ -23,7 +23,7 @@ import (
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 type scenarioConfig struct {
-	Seed   *faults.Seed `yaml:"seed"`
+	Seed   *faults.Seed `yaml:"seed,omitempty"`
 	Faults []ruleConfig `yaml:"faults"`
 }
 
@@ -32,63 +32,68 @@ type ruleConfig struct {
 	Priority    int             `yaml:"priority"`
 	MaxTriggers int             `yaml:"max_triggers"`
 	Match       matchConfig     `yaml:"match"`
-	Decision    *decisionConfig `yaml:"decision"`
+	Decision    *decisionConfig `yaml:"decision,omitempty"`
 	Action      actionConfig    `yaml:"action"`
+
+	// A rule gives either a match and an action, or one recipe.
+	FailUpload      *failUploadConfig      `yaml:"fail_upload,omitempty"`
+	FailRandomly    *failRandomlyConfig    `yaml:"fail_randomly,omitempty"`
+	CorruptDownload *corruptDownloadConfig `yaml:"corrupt_download,omitempty"`
 }
 
 type decisionConfig struct {
-	Probability *float64 `yaml:"probability"`
-	Scope       string   `yaml:"scope"`
+	Probability *float64 `yaml:"probability,omitempty"`
+	Scope       string   `yaml:"scope,omitempty"`
 }
 
 type matchConfig struct {
-	User           string     `yaml:"user"`
-	KeyFingerprint string     `yaml:"key_fingerprint"`
-	Operation      stringList `yaml:"operation"`
+	User           string     `yaml:"user,omitempty"`
+	KeyFingerprint string     `yaml:"key_fingerprint,omitempty"`
+	Operation      stringList `yaml:"operation,omitempty"`
 
-	Path         string `yaml:"path"`
-	PathPrefix   string `yaml:"path_prefix"`
-	PathGlob     string `yaml:"path_glob"`
-	Filename     string `yaml:"filename"`
-	FilenameGlob string `yaml:"filename_glob"`
+	Path         string `yaml:"path,omitempty"`
+	PathPrefix   string `yaml:"path_prefix,omitempty"`
+	PathGlob     string `yaml:"path_glob,omitempty"`
+	Filename     string `yaml:"filename,omitempty"`
+	FilenameGlob string `yaml:"filename_glob,omitempty"`
 
-	Source             string `yaml:"source"`
-	SourcePrefix       string `yaml:"source_prefix"`
-	SourceGlob         string `yaml:"source_glob"`
-	SourceFilename     string `yaml:"source_filename"`
-	SourceFilenameGlob string `yaml:"source_filename_glob"`
+	Source             string `yaml:"source,omitempty"`
+	SourcePrefix       string `yaml:"source_prefix,omitempty"`
+	SourceGlob         string `yaml:"source_glob,omitempty"`
+	SourceFilename     string `yaml:"source_filename,omitempty"`
+	SourceFilenameGlob string `yaml:"source_filename_glob,omitempty"`
 
-	Target             string `yaml:"target"`
-	TargetPrefix       string `yaml:"target_prefix"`
-	TargetGlob         string `yaml:"target_glob"`
-	TargetFilename     string `yaml:"target_filename"`
-	TargetFilenameGlob string `yaml:"target_filename_glob"`
+	Target             string `yaml:"target,omitempty"`
+	TargetPrefix       string `yaml:"target_prefix,omitempty"`
+	TargetGlob         string `yaml:"target_glob,omitempty"`
+	TargetFilename     string `yaml:"target_filename,omitempty"`
+	TargetFilenameGlob string `yaml:"target_filename_glob,omitempty"`
 
-	Attempt    *attemptConfig `yaml:"attempt"`
-	Occurrence []uint64       `yaml:"occurrence"`
+	Attempt    *attemptConfig `yaml:"attempt,omitempty"`
+	Occurrence []uint64       `yaml:"occurrence,flow,omitempty"`
 }
 
 type attemptConfig struct {
-	Per     []string `yaml:"per"`
-	Numbers []uint64 `yaml:"numbers"`
+	Per     []string `yaml:"per,flow,omitempty"`
+	Numbers []uint64 `yaml:"numbers,flow,omitempty"`
 }
 
 // actionConfig holds the fields of every action type. Each type allows only
 // its own fields.
 type actionConfig struct {
 	Type         string              `yaml:"type"`
-	When         string              `yaml:"when"`
-	Duration     *valueRange[string] `yaml:"duration"`
-	Status       string              `yaml:"status"`
-	Mode         string              `yaml:"mode"`
-	MaxFreeze    string              `yaml:"max_freeze"`
-	CutoffOffset *valueRange[uint64] `yaml:"cutoff_offset"`
-	Result       string              `yaml:"result"`
-	Transform    string              `yaml:"transform"`
-	Offset       *uint64             `yaml:"offset"`
-	Length       *uint64             `yaml:"length"`
-	Size         *uint64             `yaml:"size"`
-	SizeDelta    *int64              `yaml:"size_delta"`
+	When         string              `yaml:"when,omitempty"`
+	Duration     *valueRange[string] `yaml:"duration,omitempty"`
+	CutoffOffset *valueRange[uint64] `yaml:"cutoff_offset,omitempty"`
+	Result       string              `yaml:"result,omitempty"`
+	Status       string              `yaml:"status,omitempty"`
+	Mode         string              `yaml:"mode,omitempty"`
+	MaxFreeze    string              `yaml:"max_freeze,omitempty"`
+	Transform    string              `yaml:"transform,omitempty"`
+	Offset       *uint64             `yaml:"offset,omitempty"`
+	Length       *uint64             `yaml:"length,omitempty"`
+	Size         *uint64             `yaml:"size,omitempty"`
+	SizeDelta    *int64              `yaml:"size_delta,omitempty"`
 }
 
 // valueRange is a value, such as 2s, or a range to draw one from for each
@@ -151,10 +156,10 @@ var corruptions = map[string]sftpproxy.Corruption{
 	"flip_bytes": sftpproxy.FlipBytes,
 }
 
-// scenarios validates every scenario and returns the rules of the one named
-// selected, or none if selected is "". Rules may refer only to users, and
-// keys, that the configuration defines.
-func scenarios(defined map[string]scenarioConfig, selected string, users []sshfront.User) ([]faults.Rule, error) {
+// scenarios validates every scenario, and checks that selected names one
+// unless it is "". Rules may refer only to users, and keys, that the
+// configuration defines.
+func scenarios(defined map[string]scenarioConfig, selected string, users []sshfront.User) (map[string]Scenario, error) {
 	if _, ok := defined[selected]; selected != "" && !ok {
 		names := slices.Sorted(maps.Keys(defined))
 		if len(names) == 0 {
@@ -162,21 +167,19 @@ func scenarios(defined map[string]scenarioConfig, selected string, users []sshfr
 		}
 		return nil, fmt.Errorf("scenario %q is not defined; the configuration defines %s", selected, strings.Join(names, ", "))
 	}
-	var rules []faults.Rule
+	valid := make(map[string]Scenario, len(defined))
 	for _, name := range slices.Sorted(maps.Keys(defined)) {
 		field := "scenarios." + name
 		if !namePattern.MatchString(name) {
 			return nil, fmt.Errorf("%s: a scenario name may hold only lowercase letters, digits and -, starting with a letter or digit", field)
 		}
-		scenario, err := defined[name].rules(field, users)
+		rules, err := defined[name].rules(field, users)
 		if err != nil {
 			return nil, err
 		}
-		if name == selected {
-			rules = scenario
-		}
+		valid[name] = Scenario{Seed: defined[name].Seed, Rules: rules}
 	}
-	return rules, nil
+	return valid, nil
 }
 
 func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rule, error) {
@@ -187,7 +190,14 @@ func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rul
 			return nil, fmt.Errorf("%s: id %q must hold only lowercase letters, digits and -, starting with a letter or digit", field, rc.ID)
 		}
 		field += " (" + rc.ID + ")"
-		r, err := rc.rule(users)
+		long, recipe, err := rc.expand()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", field, err)
+		}
+		if recipe != "" {
+			field += ": " + recipe
+		}
+		r, err := long.rule(users)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", field, err)
 		}
@@ -570,9 +580,13 @@ func (ac actionConfig) uploadResult() (sftpproxy.Action, error) {
 }
 
 func (ac actionConfig) corruptDownload() (sftpproxy.Action, error) {
+	names := strings.Join(slices.Sorted(maps.Keys(corruptions)), ", ")
 	corruption, ok := corruptions[ac.Transform]
-	if !ok {
-		return nil, fmt.Errorf("transform %q is not one of %s", ac.Transform, strings.Join(slices.Sorted(maps.Keys(corruptions)), ", "))
+	switch {
+	case ac.Transform == "":
+		return nil, fmt.Errorf("transform is required: one of %s", names)
+	case !ok:
+		return nil, fmt.Errorf("transform %q is not one of %s", ac.Transform, names)
 	}
 	if ac.Offset == nil {
 		return nil, errors.New("offset is required")

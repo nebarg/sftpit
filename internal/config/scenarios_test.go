@@ -191,8 +191,8 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 			Action:      sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure},
 		},
 	}
-	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Rules, want) {
-		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Rules, want)
+	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Rules(), want) {
+		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Rules(), want)
 	}
 	if cfg.Seed == nil || *cfg.Seed != 481516 {
 		t.Errorf("Seed = %v, want the scenario's 481516", cfg.Seed)
@@ -247,8 +247,8 @@ func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Scenario != "" || cfg.Rules != nil {
-		t.Errorf("Load chose scenario %q with %d rules, want none without --scenario", cfg.Scenario, len(cfg.Rules))
+	if cfg.Scenario != "" || len(cfg.Rules()) != 0 {
+		t.Errorf("Load chose scenario %q with %d rules, want none without --scenario", cfg.Scenario, len(cfg.Rules()))
 	}
 
 	broken := writeTestFile(t, filepath.Join(dir, "broken.yaml"), withScenarios+valid+`  broken:
