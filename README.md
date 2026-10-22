@@ -2,7 +2,7 @@
 
 Mailpit for SFTP: a local SFTP server for developing and testing file integrations, with faults you can inject on demand — slow responses, dropped connections, random failures and simulated corruption.
 
-**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration, which `sftpit config` checks and explains.
+**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration, which `sftpit config` checks and explains. Its [control API](#control-api) reports on the run and resets it.
 
 ## Quickstart
 
@@ -12,7 +12,7 @@ go run ./cmd/sftpit serve
 
 sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
 
-`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces.
+`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces. The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
 
 To have files ready to download, point sftpit at a directory of fixtures:
 
@@ -20,7 +20,7 @@ To have files ready to download, point sftpit at a directory of fixtures:
 go run ./cmd/sftpit serve --seed-dir ./tests/sftpit/seed
 ```
 
-The directory is copied into the workspace at every start, keeping permissions and modification times, so each run begins with the same files and nothing a client does changes the originals. It may contain only directories and regular files. An empty directory has to hold something, such as a `.gitkeep`, before git will commit it, and SFTP clients see that file too.
+At startup, sftpit copies the directory into the workspace, keeping permissions and modification times, and every run begins with a copy of that snapshot. So each run, after a [reset](#control-api) too, begins with the same files, and nothing a client does changes the originals. Changes to the directory reach runs at the next start. It may contain only directories and regular files. An empty directory has to hold something, such as a `.gitkeep`, before git will commit it, and SFTP clients see that file too.
 
 To keep the workspace after sftpit stops, name a directory for it:
 
@@ -28,7 +28,7 @@ To keep the workspace after sftpit stops, name a directory for it:
 go run ./cmd/sftpit serve --data-dir ./sandbox-data
 ```
 
-The directory must be empty or already an sftpit workspace, and only one sftpit can use it at a time. It keeps the host keys, so clients see the same fingerprints at every start, and the files of the last five runs, under `runs/<run>/fs/`, so that a failed run can be inspected afterwards. Each start is still a new run, which begins with only the seed's files.
+The directory must be empty or already an sftpit workspace, and only one sftpit can use it at a time. It keeps the host keys, so clients see the same fingerprints at every start, and the files of the last five runs, under `runs/<run>/fs/`, so that a failed run can be inspected afterwards. Each start, and each reset, is still a new run, which begins with only the seed's files. The seed's snapshot is in `fixtures/seed/`, and `fixtures/seed.json` lists what it holds, with each file's size and SHA-256.
 
 Names in `fs/` are encoded, so that they behave as on a case-sensitive Linux server whatever the host's volume ignores or refuses. A capital is stored as `^` and its lowercase letter, and any other character outside `a-z`, `0-9`, `-`, `_` and `.` as `%` and two hex digits: `Orders 2026.CSV` is stored as `^orders%202026.^c^s^v`. Add files through the seed directory or over SFTP, because sftpit ignores names in `fs/` that it did not encode. Escaping makes names longer, so a name of more than 127 capitals, or of more than 85 bytes that need `%`, is too long to store and fails the way an over-long name fails on a Linux server.
 
@@ -45,11 +45,12 @@ env_file: ".env" # optional; a path or a list of paths
 
 server:
   sftp_listen: "127.0.0.1:2122"
+  http_listen: "127.0.0.1:8122" # the control API
   host_key: "./hostkeys" # or "workspace" (the default) for the workspace's own keys
 
 storage:
   data_dir: "./sandbox-data" # a workspace to keep; temporary by default
-  seed_dir: "./seed" # copied into the workspace at every start
+  seed_dir: "./seed" # every run starts with a copy, taken at startup
   # Limits on each run's files, shown with their defaults:
   max_file_bytes: 1073741824 # 1 GiB
   max_total_bytes: 4294967296 # 4 GiB
@@ -252,6 +253,48 @@ faults:
 - **What clients see:**
   - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, a close or reset as the server closing or resetting the connection, and a connection refused during an outage as `connect to host 127.0.0.1 port N: Connection refused`.
   - Flysystem's SFTP adapter retries a failed connection 4 times at once, so a Laravel upload rides out four cut-off logins in a row, and fails after five. Those retries are all refused during an outage, so only an application that backs off for longer than the outage recovers from it.
+
+## Control API
+
+`sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names. Port `0` picks a free port, and the banner shows the address.
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/health` | `{"status": "ok"}` while sftpit runs |
+| `GET /api/v1/ready` | `{"ready": true}`, or status 503 with the error once a reset has failed |
+| `GET /api/v1/status` | the state of the SFTP server, the backend and the current run |
+| `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
+
+```bash
+curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
+  -d '{"scenario": "upload-recovery", "seed": "7"}'
+```
+
+```json
+{
+  "sftp": { "state": "up" },
+  "backend": "embedded",
+  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true }
+}
+```
+
+The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string.
+
+**A reset:**
+- **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
+- **Ends the run.** Every connection is closed, as at a `close_connection`, and the run's timers stop. The reset then waits, for up to 30 s, until every session has finished, so no client of the run can still change its files. The run's files stay among the workspace's last five runs.
+- **Starts the next run.** Its files are a copy of the [seed's snapshot](#quickstart), its counters start from zero, and its timers count from its start. Then connections are admitted again.
+
+Every field of the body is optional:
+- `run` is the run the reset expects to end. If another run is current, the reset is refused with status 409.
+- `scenario` names the next run's scenario, or `""` for none. Without it, the next run repeats the current scenario, and its seed if that was pinned.
+- `seed` pins the next run's random decisions. Without it, the scenario's own seed does, or the run draws a fresh one.
+
+An unknown scenario, or a seed without one, is refused with status 400 and leaves the run alone. The scenarios are those of the configuration as it was at startup, so a change to the file needs a restart.
+
+If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
+
+**Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. A `POST` needs the `Sftpit-Control` header, with any value, which a page on another origin cannot send, and a `POST` that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`.
 
 ## Behavior
 

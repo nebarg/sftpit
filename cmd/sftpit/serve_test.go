@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/nebarg/sftpit/internal/control"
 	"github.com/nebarg/sftpit/internal/faults"
 )
 
@@ -366,6 +368,53 @@ func TestServeStartsEveryRunFromTheSeed(t *testing.T) {
 	}
 }
 
+func TestServeResetsThroughTheControlAPI(t *testing.T) {
+	seed := t.TempDir()
+	writeTestFile(t, filepath.Join(seed, "orders.csv"), "id,total\n")
+	s := startServe(t, "--sftp-listen", "127.0.0.1:0", "--seed-dir", seed)
+	c := s.dial(t, "test", "test")
+	if err := c.Remove("/orders.csv"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	api := "http://" + s.apiAddr + "/api/v1"
+	if status := requestJSON(t, "GET", api+"/status", ""); status["run"].(map[string]any)["id"] != s.run {
+		t.Errorf("status = %v, want the run in the banner, %s", status, s.run)
+	}
+
+	reset := requestJSON(t, "POST", api+"/reset", `{"run": "`+s.run+`"}`)
+	next, _ := reset["run"].(map[string]any)["id"].(string)
+	if next == "" || next == s.run {
+		t.Fatalf("reset = %v, want a new run", reset)
+	}
+	if _, err := s.dial(t, "test", "test").Stat("/orders.csv"); err != nil {
+		t.Errorf("the next run lacks the seeded file: %v", err)
+	}
+	if want := "msg=reset run=" + next; !strings.Contains(s.stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, s.stderr.String())
+	}
+}
+
+// requestJSON makes a request to the control API, with the header that a
+// change needs, and decodes its JSON reply, which must be a success.
+func requestJSON(t *testing.T, method, url, body string) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(control.RequestHeader, "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer resp.Body.Close()
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s %s = %s %v (%v)", method, url, resp.Status, decoded, err)
+	}
+	return decoded
+}
+
 func TestServeRejectsUnusableSeeds(t *testing.T) {
 	withLink := t.TempDir()
 	writeTestFile(t, filepath.Join(withLink, "orders.csv"), "data")
@@ -417,7 +466,8 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		want string
 	}{
 		{"non-loopback address", []string{"--sftp-listen", "0.0.0.0:2122"}, "not a loopback address"},
-		{"unknown flag", []string{"--http-listen", "127.0.0.1:0"}, "flag provided but not defined"},
+		{"unknown flag", []string{"--smtp-listen", "127.0.0.1:0"}, "flag provided but not defined"},
+		{"non-loopback control address", []string{"--http-listen", "0.0.0.0:8122"}, `http_listen "0.0.0.0:8122" is not a loopback address`},
 		{"stray argument", []string{"extra"}, `unexpected arguments ["extra"]`},
 		{"missing config", []string{"--config", "missing.yaml"}, "missing.yaml"},
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
@@ -446,13 +496,35 @@ func TestServeFailsClearlyOnAnOccupiedPort(t *testing.T) {
 	}
 	defer ln.Close()
 
-	var stdout, stderr syncBuffer
-	code := run(context.Background(), []string{"serve", "--sftp-listen", ln.Addr().String()}, &stdout, &stderr)
-	if code != exitFailure {
-		t.Errorf("exit code = %d, want %d", code, exitFailure)
+	occupied := ln.Addr().String()
+	for _, args := range [][]string{
+		{"--sftp-listen", occupied, "--http-listen", "127.0.0.1:0"},
+		{"--sftp-listen", "127.0.0.1:0", "--http-listen", occupied},
+	} {
+		var stdout, stderr syncBuffer
+		code := run(context.Background(), append([]string{"serve"}, args...), &stdout, &stderr)
+		if code != exitFailure {
+			t.Errorf("%v: exit code = %d, want %d", args, code, exitFailure)
+		}
+		if !strings.Contains(stderr.String(), "address already in use") {
+			t.Errorf("%v: stderr = %q, want the listen error", args, stderr.String())
+		}
 	}
-	if !strings.Contains(stderr.String(), "address already in use") {
-		t.Errorf("stderr = %q, want the listen error", stderr.String())
+}
+
+func TestListenLoopbackRefusesAnAddressThatIsNotLoopback(t *testing.T) {
+	// The configuration refuses every address but localhost and loopback
+	// ones, so only localhost resolving elsewhere would reach the check.
+	// The test listens on every interface instead.
+	if runtime.GOOS != "linux" {
+		t.Skip("listening on every interface makes the firewall of macOS or Windows ask to allow it")
+	}
+	ln, err := listenLoopback("http_listen", "0.0.0.0:0")
+	if err == nil {
+		ln.Close()
+	}
+	if err == nil || !strings.HasPrefix(err.Error(), `http_listen "0.0.0.0:0" resolved to `) || !strings.HasSuffix(err.Error(), "which is not a loopback address") {
+		t.Errorf("listenLoopback = %v, want it refused as not loopback", err)
 	}
 }
 
@@ -469,7 +541,7 @@ func TestServeHelp(t *testing.T) {
 // running is a serve command running in the background.
 type running struct {
 	stdout, stderr *syncBuffer
-	addr           string
+	addr, apiAddr  string
 	workspace      string
 	run            string
 	cancel         context.CancelFunc
@@ -478,15 +550,19 @@ type running struct {
 
 var (
 	addrLine      = regexp.MustCompile(`serving SFTP on (\S+)`)
+	apiLine       = regexp.MustCompile(`control API: http://(\S+)/api/v1/`)
 	workspaceLine = regexp.MustCompile(`workspace: (.+) \((?:deleted|kept)`)
 	runLine       = regexp.MustCompile(`run: (\S+)`)
 )
 
+// startServe runs serve with args, after a flag for a free port for the
+// control API, which args can override.
 func startServe(t *testing.T, args ...string) *running {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &running{stdout: &syncBuffer{}, stderr: &syncBuffer{}, cancel: cancel, code: make(chan int, 1)}
-	go func() { s.code <- run(ctx, append([]string{"serve"}, args...), s.stdout, s.stderr) }()
+	args = append([]string{"serve", "--http-listen", "127.0.0.1:0"}, args...)
+	go func() { s.code <- run(ctx, args, s.stdout, s.stderr) }()
 	t.Cleanup(func() { s.stop(t) })
 
 	deadline := time.Now().Add(startTimeout)
@@ -502,6 +578,7 @@ func startServe(t *testing.T, args ...string) *running {
 	}
 	out := s.stdout.String()
 	s.addr = addrLine.FindStringSubmatch(out)[1]
+	s.apiAddr = apiLine.FindStringSubmatch(out)[1]
 	s.workspace = workspaceLine.FindStringSubmatch(out)[1]
 	s.run = runLine.FindStringSubmatch(out)[1]
 	return s

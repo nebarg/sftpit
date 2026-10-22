@@ -21,7 +21,7 @@ func TestExplainedConfigurationsLoadTheSame(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "", 0o600)
 	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: .env
-server: {sftp_listen: "127.0.0.1:2200", host_key: ./hostkeys}
+server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys}
 storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
 users:
   - {name: test, password_env: P}

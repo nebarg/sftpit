@@ -20,7 +20,7 @@ func TestLoadWithoutAConfigFileUsesTheDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.SFTPListen != DefaultSFTPListen || cfg.HostKeyDir != "" || !cfg.DefaultCredentials {
+	if cfg.SFTPListen != DefaultSFTPListen || cfg.HTTPListen != DefaultHTTPListen || cfg.HostKeyDir != "" || !cfg.DefaultCredentials {
 		t.Errorf("Load = %+v, want the defaults", cfg)
 	}
 	if len(cfg.Users) != 1 || cfg.Users[0].Name != "test" || cfg.Users[0].Password != "test" || cfg.Users[0].Home != "/" {
@@ -70,6 +70,7 @@ schema_version: 1
 env_file: ".env"
 server:
   sftp_listen: "127.0.0.1:2200"
+  http_listen: "127.0.0.1:8200"
   host_key: "./hostkeys"
 users:
   - name: "test"
@@ -83,8 +84,8 @@ users:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.SFTPListen != "127.0.0.1:2200" {
-		t.Errorf("SFTPListen = %q", cfg.SFTPListen)
+	if cfg.SFTPListen != "127.0.0.1:2200" || cfg.HTTPListen != "127.0.0.1:8200" {
+		t.Errorf("SFTPListen = %q, HTTPListen = %q", cfg.SFTPListen, cfg.HTTPListen)
 	}
 	if cfg.HostKeyDir != filepath.Join(dir, "hostkeys") {
 		t.Errorf("HostKeyDir = %q, want it next to the config file", cfg.HostKeyDir)
@@ -107,14 +108,14 @@ users:
 	}
 }
 
-func TestLoadAppliesTheFlagOverride(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nserver:\n  sftp_listen: \"127.0.0.1:2200\"\n", 0o600)
-	cfg, err := Load(Options{ConfigFile: config, SFTPListen: "[::1]:0", LookupEnv: noEnv})
+func TestLoadAppliesTheFlagOverrides(t *testing.T) {
+	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nserver:\n  sftp_listen: \"127.0.0.1:2200\"\n  http_listen: \"127.0.0.1:8200\"\n", 0o600)
+	cfg, err := Load(Options{ConfigFile: config, SFTPListen: "[::1]:0", HTTPListen: "localhost:0", LookupEnv: noEnv})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.SFTPListen != "[::1]:0" {
-		t.Errorf("SFTPListen = %q, want the flag's value", cfg.SFTPListen)
+	if cfg.SFTPListen != "[::1]:0" || cfg.HTTPListen != "localhost:0" {
+		t.Errorf("SFTPListen = %q, HTTPListen = %q, want the flags' values", cfg.SFTPListen, cfg.HTTPListen)
 	}
 }
 
@@ -207,24 +208,30 @@ func TestLoadRejectsUnsuitableDataDirectories(t *testing.T) {
 }
 
 func TestLoadAcceptsOnlyLoopbackAddresses(t *testing.T) {
-	for _, addr := range []string{"127.0.0.1:2122", "127.0.0.2:22", "[::1]:0", "localhost:2122"} {
-		if _, err := Load(Options{SFTPListen: addr, LookupEnv: noEnv}); err != nil {
-			t.Errorf("%s: %v", addr, err)
+	settings := map[string]func(addr string) Options{
+		"sftp_listen": func(addr string) Options { return Options{SFTPListen: addr, LookupEnv: noEnv} },
+		"http_listen": func(addr string) Options { return Options{HTTPListen: addr, LookupEnv: noEnv} },
+	}
+	for setting, options := range settings {
+		for _, addr := range []string{"127.0.0.1:2122", "127.0.0.2:22", "[::1]:0", "localhost:2122"} {
+			if _, err := Load(options(addr)); err != nil {
+				t.Errorf("%s %s: %v", setting, addr, err)
+			}
 		}
-	}
-	tests := map[string]string{
-		":2122":          "not a loopback address",
-		"0.0.0.0:2122":   "not a loopback address",
-		"[::]:2122":      "not a loopback address",
-		"192.0.2.1:2122": "not a loopback address",
-		"example.com:22": "not a loopback address",
-		"127.0.0.1":      "missing port",
-		"127.0.0.1:ssh":  "must be a number",
-		"127.0.0.1:2e5":  "must be a number",
-	}
-	for addr, want := range tests {
-		if _, err := Load(Options{SFTPListen: addr, LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%s: error = %v, want %q", addr, err, want)
+		tests := map[string]string{
+			":2122":          "not a loopback address; sftpit listens only on loopback, such as 127.0.0.1:2122 or [::1]:2122",
+			"0.0.0.0:2122":   "not a loopback address",
+			"[::]:2122":      "not a loopback address",
+			"192.0.2.1:2122": "not a loopback address",
+			"example.com:22": "not a loopback address",
+			"127.0.0.1":      "missing port",
+			"127.0.0.1:ssh":  "must be a number",
+			"127.0.0.1:2e5":  "must be a number",
+		}
+		for addr, want := range tests {
+			if _, err := Load(options(addr)); err == nil || !strings.HasPrefix(err.Error(), setting+" ") || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s %s: error = %v, want %q about %s", setting, addr, err, want, setting)
+			}
 		}
 	}
 }
@@ -243,7 +250,7 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{"empty file", "", "the file is empty"},
 		{"no schema version", "server: {}\n", "schema_version is required"},
 		{"future schema version", "schema_version: 2\n", "schema_version 2 is not supported"},
-		{"unknown field", "schema_version: 1\nserver:\n  http_listen: \"127.0.0.1:8122\"\n", "field http_listen not found"},
+		{"unknown field", "schema_version: 1\nserver:\n  smtp_listen: \"127.0.0.1:1025\"\n", "field smtp_listen not found"},
 		{"duplicate key", "schema_version: 1\nschema_version: 1\n", "already defined"},
 		{"two documents", "schema_version: 1\n---\nschema_version: 1\n", "a single YAML document"},
 		{"wrong type", "schema_version: \"1\"\n", "cannot unmarshal"},

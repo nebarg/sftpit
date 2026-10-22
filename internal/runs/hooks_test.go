@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -72,6 +74,38 @@ func TestShutdownDuringAFreezeIsNoFailure(t *testing.T) {
 	}
 }
 
+// TestArmTimersStartsNoOutageOnceStopped stops a run's timer as it fires,
+// many times over, since only a stop that races a firing timer can fall
+// between its firing and the outage.
+func TestArmTimersStartsNoOutageOnceStopped(t *testing.T) {
+	srv, err := sshfront.New(sshfront.Config{
+		HostKeys: []ssh.Signer{newHostKey(t)},
+		Users:    []sshfront.User{{Name: "test", Password: "test"}},
+		Handler:  func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("sshfront.New: %v", err)
+	}
+	defer srv.Close()
+	logger := slog.New(slog.DiscardHandler)
+	moment := &faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Millisecond}
+	outage := faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.ListenerDown{Duration: time.Minute}}
+	for attempt := range 300 {
+		rules, err := faults.New([]faults.Rule{outage}, 0, logger)
+		if err != nil {
+			t.Fatalf("faults.New: %v", err)
+		}
+		stop := ArmTimers(rules, srv, logger)
+		time.Sleep(time.Until(rules.Timers()[0].At))
+		stop()
+		fired := rules.Counts()["outage"].Fired
+		time.Sleep(time.Millisecond)
+		if rules.Counts()["outage"].Fired != fired {
+			t.Fatalf("attempt %d: the outage fired after stop returned", attempt)
+		}
+	}
+}
+
 // serveWithHooks serves connections whose connect gets action, with the
 // handshake timeout given, and returns the server's address, the server
 // and the messages it logs.
@@ -112,20 +146,3 @@ func serveWithHooks(t *testing.T, action sftpproxy.Action, handshakeTimeout time
 	})
 	return ln.Addr().String(), srv, logs
 }
-
-// messages is a slog handler that sends the message of each record to it,
-// dropping those that do not fit.
-type messages chan string
-
-func (m messages) Enabled(context.Context, slog.Level) bool { return true }
-
-func (m messages) Handle(_ context.Context, r slog.Record) error {
-	select {
-	case m <- r.Message:
-	default:
-	}
-	return nil
-}
-
-func (m messages) WithAttrs([]slog.Attr) slog.Handler { return m }
-func (m messages) WithGroup(string) slog.Handler      { return m }

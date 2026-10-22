@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -8,24 +9,26 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
+	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/control"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 const serveUsage = `Usage: sftpit serve [flags]
 
-Runs an SFTP server on a loopback address until interrupted. Files live in a
+Runs an SFTP server on a loopback address until interrupted, with a control
+API over HTTP that reports on the current run and resets it. Files live in a
 temporary workspace that is deleted when sftpit stops, unless --data-dir
 names one to keep.
 
@@ -37,7 +40,10 @@ Flags:
                        place of its own seed or a fresh one every run
   --sftp-listen ADDR   listen on ADDR instead of the configured address
                        (default 127.0.0.1:2122; port 0 picks a free port)
-  --seed-dir DIR       copy the files under DIR into the workspace at startup
+  --http-listen ADDR   serve the control API on ADDR instead of the
+                       configured address (default 127.0.0.1:8122)
+  --seed-dir DIR       start every run with a copy of the files under DIR,
+                       as they are at startup
   --data-dir DIR       keep the workspace in DIR, with its host keys and its
                        last five runs; DIR must be empty or a workspace
   --env-file FILE      also read secrets from FILE; may be repeated, and
@@ -50,6 +56,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts := config.Options{}
 	flags.StringVar(&opts.ConfigFile, "config", "", "")
 	flags.StringVar(&opts.SFTPListen, "sftp-listen", "", "")
+	flags.StringVar(&opts.HTTPListen, "http-listen", "", "")
 	flags.StringVar(&opts.SeedDir, "seed-dir", "", "")
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
 	flags.StringVar(&opts.Scenario, "scenario", "", "")
@@ -104,9 +111,9 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 var errSeedHoldsWorkspace = errors.New("the seed directory contains the workspace, so it would be copied into itself")
 
-// runServer serves SFTP from a new run in the configured workspace, or in a
-// temporary one, until ctx is cancelled, then shuts down and deletes a
-// temporary workspace.
+// runServer serves SFTP from runs in the configured workspace, or in a
+// temporary one, and the control API, until ctx is cancelled, then shuts
+// down and deletes a temporary workspace.
 func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (err error) {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
@@ -122,84 +129,67 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	if cfg.SeedDir != "" && within(workspace.Dir(), cfg.SeedDir) {
 		return errSeedHoldsWorkspace
 	}
-	scenario := runs.Scenario{Name: cfg.Scenario}
-	switch {
-	case cfg.Scenario == "":
-	case cfg.Seed != nil:
-		scenario.Seed, scenario.Pinned = *cfg.Seed, true
-	default:
-		scenario.Seed = faults.RandomSeed()
-	}
-	run, err := workspace.NewRun(scenario)
+	hostKeys, err := sshfront.LoadOrCreateHostKeys(cmp.Or(cfg.HostKeyDir, workspace.IdentityDir()))
 	if err != nil {
 		return err
 	}
 
-	hostKeyDir := cfg.HostKeyDir
-	if hostKeyDir == "" {
-		hostKeyDir = workspace.IdentityDir()
-	}
-	hostKeys, err := sshfront.LoadOrCreateHostKeys(hostKeyDir)
-	if err != nil {
-		return err
-	}
-
-	root, err := os.OpenRoot(run.Files)
-	if err != nil {
-		return fmt.Errorf("open run files: %w", err)
-	}
-	defer root.Close()
-	embedded, err := backend.New(root, backend.Options{Limits: cfg.Limits, Logger: logger})
-	if err != nil {
-		return err
-	}
-	if cfg.SeedDir != "" {
-		if err := embedded.Seed(cfg.SeedDir); err != nil {
-			return err
-		}
-	}
-	for _, u := range cfg.Users {
-		if err := embedded.MkdirAll(u.Home); err != nil {
-			return fmt.Errorf("create home %s for %s: %w", u.Home, u.Name, err)
-		}
-	}
-
-	var rules *faults.Engine
-	if cfg.Scenario != "" {
-		if rules, err = faults.New(cfg.Rules(), scenario.Seed, logger); err != nil {
-			return err
-		}
-	}
-	srv, err := sshfront.New(sshfront.Config{
-		HostKeys: hostKeys,
-		Users:    cfg.Users,
-		Handler:  runs.Handler(run, embedded, rules, sftpproxy.Options{Logger: logger}),
-		Hooks:    runs.Hooks(rules, logger),
-		Logger:   logger,
+	manager, err := runs.Start(workspace, runs.Options{
+		Server:    sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
+		SeedDir:   cfg.SeedDir,
+		Limits:    cfg.Limits,
+		Scenarios: cfg.Scenarios,
+		Scenario:  cfg.Scenario,
+		Seed:      cfg.Seed,
+		Logger:    logger,
 	})
 	if err != nil {
 		return err
 	}
-	defer runs.ArmTimers(rules, srv, logger)()
-	ln, err := listenLoopback(cfg.SFTPListen)
+	defer func() {
+		if closeErr := manager.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	sftpLn, err := listenLoopback("sftp_listen", cfg.SFTPListen)
 	if err != nil {
 		return err
 	}
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
+	httpLn, err := listenLoopback("http_listen", cfg.HTTPListen)
+	if err != nil {
+		sftpLn.Close()
+		return err
+	}
 
-	printBanner(stdout, ln.Addr().String(), workspace, run, hostKeys, cfg)
+	srv := manager.Server()
+	sftpServed := make(chan error, 1)
+	go func() { sftpServed <- srv.Serve(sftpLn) }()
+	api := &http.Server{
+		Handler:           control.Handler(manager),
+		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
+	apiServed := make(chan error, 1)
+	go func() { apiServed <- api.Serve(httpLn) }()
+
+	printBanner(stdout, sftpLn.Addr().String(), httpLn.Addr().String(), workspace, manager.Status().Run, hostKeys, cfg)
 
 	select {
 	case <-ctx.Done():
 		fmt.Fprintln(stdout, "Stopping.")
-		closeErr := srv.Close()
-		<-served
-		return closeErr
-	case err := <-served:
-		srv.Close()
-		return err
+	case err = <-sftpServed:
+		sftpServed = nil
+	case err = <-apiServed:
+		apiServed = nil
 	}
+	err = errors.Join(err, api.Close(), srv.Close())
+	if sftpServed != nil {
+		<-sftpServed
+	}
+	if apiServed != nil {
+		<-apiServed
+	}
+	return err
 }
 
 func openWorkspace(dataDir string) (*runs.Workspace, error) {
@@ -224,22 +214,23 @@ func within(name, dir string) bool {
 	return err == nil && filepath.IsLocal(rel)
 }
 
-// listenLoopback listens on addr and refuses an address that turns out not
-// to be loopback, as a host name could.
-func listenLoopback(addr string) (net.Listener, error) {
+// listenLoopback listens on addr, the value of setting, and refuses an
+// address that turns out not to be loopback, as a host name could.
+func listenLoopback(setting, addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
 		ln.Close()
-		return nil, fmt.Errorf("sftp_listen %q resolved to %v, which is not a loopback address", addr, ln.Addr())
+		return nil, fmt.Errorf("%s %q resolved to %v, which is not a loopback address", setting, addr, ln.Addr())
 	}
 	return ln, nil
 }
 
-func printBanner(w io.Writer, addr string, workspace *runs.Workspace, run *runs.Run, hostKeys []ssh.Signer, cfg *config.Config) {
+func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, run runs.Run, hostKeys []ssh.Signer, cfg *config.Config) {
 	fmt.Fprintf(w, "sftpit is serving SFTP on %s\n", addr)
+	fmt.Fprintf(w, "  control API: http://%s/api/v1/\n", apiAddr)
 	if workspace.Temporary() {
 		fmt.Fprintf(w, "  workspace: %s (deleted when sftpit stops)\n", workspace.Dir())
 	} else {

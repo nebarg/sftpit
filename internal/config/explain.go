@@ -30,7 +30,7 @@ func Explain(opts Options) ([]byte, error) {
 	f := fileConfig{
 		SchemaVersion: SchemaVersion,
 		EnvFile:       r.envFiles,
-		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace)},
+		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HTTPListen: cfg.HTTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace)},
 		Storage: storageConfig{
 			DataDir:       cfg.DataDir,
 			SeedDir:       cfg.SeedDir,

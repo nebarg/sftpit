@@ -34,6 +34,7 @@ var (
 	errInvalidCredentials = errors.New("sshfront: invalid credentials")
 	errHandlerPanicked    = errors.New("sshfront: handler panicked")
 	errDown               = errors.New("sshfront: server down")
+	errPaused             = errors.New("sshfront: admission closed")
 )
 
 // User is a test account that clients can log in as.
@@ -113,9 +114,13 @@ type Server struct {
 	// listeners maps each listener Serve accepts on to whether an outage
 	// has closed it.
 	listeners map[net.Listener]bool
-	conns     map[*gate]struct{}
+	// conns maps each connection to a channel that is closed once it has
+	// ended.
+	conns map[*gate]chan struct{}
 	// outage is set while the server is down.
 	outage *outage
+	// paused is set while admission is closed.
+	paused bool
 	wg     sync.WaitGroup
 }
 
@@ -148,7 +153,7 @@ func New(cfg Config) (*Server, error) {
 		users:            users,
 		done:             make(chan struct{}),
 		listeners:        make(map[net.Listener]bool),
-		conns:            make(map[*gate]struct{}),
+		conns:            make(map[*gate]chan struct{}),
 	}
 	if s.handshakeTimeout == 0 {
 		s.handshakeTimeout = defaultHandshakeTimeout
@@ -255,6 +260,10 @@ func (s *Server) accept(ln net.Listener) error {
 			// The connection came in as the outage began.
 			g.Close()
 			continue
+		case errors.Is(err, errPaused):
+			s.logger.Info("closed a connection while admission is closed", "remote", g.RemoteAddr())
+			g.Close()
+			continue
 		case err != nil:
 			g.Close()
 			return err
@@ -295,11 +304,11 @@ func (s *Server) listenAgain(addr net.Addr) (net.Listener, error) {
 // address again once d has passed. A connection accepted as the outage
 // begins is closed at once. If closeExisting, Down also closes every
 // connection, as Conn.Close does. Down while the server is down extends the
-// outage if it would end later.
+// outage if it would end later. Down does nothing while admission is closed.
 func (s *Server) Down(d time.Duration, closeExisting bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || s.paused {
 		return
 	}
 	until := time.Now().Add(d)
@@ -337,6 +346,60 @@ func (s *Server) endOutage(o *outage) {
 	}
 	s.outage = nil
 	close(o.over)
+}
+
+// Outage returns when the current outage ends, and false if the server is
+// up.
+func (s *Server) Outage() (until time.Time, down bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outage == nil {
+		return time.Time{}, false
+	}
+	return s.outage.until, true
+}
+
+// Pause closes admission and ends every connection, so that what serves
+// them can change while no client is connected. Until Resume, the server
+// accepts each new connection and closes it before its handshake, keeping
+// its listeners open, and Down does nothing. An outage ends, so that Serve
+// listens again. Pause closes every connection, as Conn.Close does, and
+// waits until each has ended, its handlers included, or until ctx is done,
+// whose error it then returns. Admission stays closed however Pause returns.
+func (s *Server) Pause(ctx context.Context) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrServerClosed
+	}
+	s.paused = true
+	if o := s.outage; o != nil {
+		o.timer.Stop()
+		s.outage = nil
+		close(o.over)
+	}
+	ended := make([]chan struct{}, 0, len(s.conns))
+	for g, done := range s.conns {
+		g.closeNormally()
+		ended = append(ended, done)
+	}
+	s.mu.Unlock()
+
+	for _, done := range ended {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("sshfront: pause: %w", ctx.Err())
+		}
+	}
+	return nil
+}
+
+// Resume admits connections again after Pause.
+func (s *Server) Resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = false
 }
 
 // outageOver returns a channel that is closed when the outage ends, or nil
@@ -404,7 +467,7 @@ func (s *Server) untrackListener(ln net.Listener) {
 
 // trackConn registers g with the wait group under the same lock that Close
 // takes, so Close never waits on a group that is still being added to. It
-// refuses g if the server is closed or down.
+// refuses g if the server is closed or down, or admission is closed.
 func (s *Server) trackConn(g *gate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -413,8 +476,10 @@ func (s *Server) trackConn(g *gate) error {
 		return ErrServerClosed
 	case s.outage != nil:
 		return errDown
+	case s.paused:
+		return errPaused
 	}
-	s.conns[g] = struct{}{}
+	s.conns[g] = make(chan struct{})
 	s.wg.Add(1)
 	return nil
 }
@@ -422,6 +487,7 @@ func (s *Server) trackConn(g *gate) error {
 func (s *Server) untrackConn(g *gate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	close(s.conns[g])
 	delete(s.conns, g)
 }
 

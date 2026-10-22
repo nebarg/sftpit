@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/nebarg/sftpit/internal/faults"
@@ -15,10 +16,10 @@ import (
 // Hooks returns the sshfront.Hooks that inject rules' faults into each
 // connection as it is accepted and as its client logs in: a delay, which
 // ends early if the connection does, a close, reset or freeze of the
-// connection, or an outage of the server. A frozen connection is closed at its limit, or when the
-// handshake timeout ends the hook. Hooks returns no hooks if rules is nil.
-// It logs each fault it injects to logger, or to slog.Default() if logger is
-// nil.
+// connection, or an outage of the server. A frozen connection is closed at
+// its limit, or when the handshake timeout ends the hook. Hooks returns no
+// hooks if rules is nil. It logs each fault it injects to logger, or to
+// slog.Default() if logger is nil.
 func Hooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
 	if rules == nil {
 		return sshfront.Hooks{}
@@ -74,8 +75,10 @@ func inject(ctx context.Context, logger *slog.Logger, conn *sshfront.Conn, event
 }
 
 // ArmTimers takes srv down at the moments of the run that rules times,
-// whatever the run's sessions are doing then, until stop is called. It logs
-// each outage to logger, or to slog.Default() if logger is nil.
+// whatever the run's sessions are doing then, until stop is called. A
+// moment that has already come, such as the start of the run, takes srv
+// down before ArmTimers returns. Once stop has returned, no outage begins.
+// It logs each outage to logger, or to slog.Default() if logger is nil.
 func ArmTimers(rules *faults.Engine, srv *sshfront.Server, logger *slog.Logger) (stop func()) {
 	if rules == nil {
 		return func() {}
@@ -83,18 +86,32 @@ func ArmTimers(rules *faults.Engine, srv *sshfront.Server, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	var timers []*time.Timer
+	var (
+		mu      sync.Mutex
+		stopped bool
+		timers  []*time.Timer
+	)
 	for _, t := range rules.Timers() {
 		down := t.Action.(sftpproxy.ListenerDown)
-		timers = append(timers, time.AfterFunc(time.Until(t.At), func() {
-			if t.Reserve != nil && !t.Reserve() {
+		fire := func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if stopped || (t.Reserve != nil && !t.Reserve()) {
 				return
 			}
 			logger.Info("injected fault", "fault", "listener_down", "when", "timer", "duration", down.Duration, "close_existing", down.CloseExisting)
 			srv.Down(down.Duration, down.CloseExisting)
-		}))
+		}
+		if wait := time.Until(t.At); wait > 0 {
+			timers = append(timers, time.AfterFunc(wait, fire))
+		} else {
+			fire()
+		}
 	}
 	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		stopped = true
 		for _, timer := range timers {
 			timer.Stop()
 		}

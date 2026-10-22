@@ -11,6 +11,7 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -40,6 +41,7 @@ const SchemaVersion = 1
 // value.
 const (
 	DefaultSFTPListen = "127.0.0.1:2122"
+	DefaultHTTPListen = "127.0.0.1:8122"
 	DefaultUser       = "test"
 	DefaultPassword   = "test"
 
@@ -54,8 +56,10 @@ const hostKeyWorkspace = "workspace"
 
 // Config is a validated configuration with its secrets resolved.
 type Config struct {
-	// SFTPListen is the loopback address the SFTP server listens on.
+	// SFTPListen is the loopback address the SFTP server listens on, and
+	// HTTPListen the one the control API listens on.
 	SFTPListen string
+	HTTPListen string
 
 	// HostKeyDir is the directory holding the host keys, or "" for the
 	// workspace's own.
@@ -113,8 +117,10 @@ type Options struct {
 	// ConfigFile is the configuration file to read, or "" for none.
 	ConfigFile string
 
-	// SFTPListen overrides the configured listen address when non-empty.
+	// SFTPListen and HTTPListen override the configured listen addresses
+	// when non-empty.
 	SFTPListen string
+	HTTPListen string
 
 	// SeedDir overrides the configured seed directory when non-empty.
 	SeedDir string
@@ -158,6 +164,7 @@ type storageConfig struct {
 
 type serverConfig struct {
 	SFTPListen string `yaml:"sftp_listen"`
+	HTTPListen string `yaml:"http_listen"`
 	HostKey    string `yaml:"host_key"`
 }
 
@@ -252,14 +259,14 @@ func read(opts Options, requireSecrets bool) (*reading, error) {
 		dir = filepath.Dir(opts.ConfigFile)
 	}
 
-	cfg := &Config{SFTPListen: DefaultSFTPListen}
-	if f.Server.SFTPListen != "" {
-		cfg.SFTPListen = f.Server.SFTPListen
+	cfg := &Config{
+		SFTPListen: cmp.Or(opts.SFTPListen, f.Server.SFTPListen, DefaultSFTPListen),
+		HTTPListen: cmp.Or(opts.HTTPListen, f.Server.HTTPListen, DefaultHTTPListen),
 	}
-	if opts.SFTPListen != "" {
-		cfg.SFTPListen = opts.SFTPListen
+	if err := checkLoopback("sftp_listen", cfg.SFTPListen); err != nil {
+		return nil, err
 	}
-	if err := checkLoopback(cfg.SFTPListen); err != nil {
+	if err := checkLoopback("http_listen", cfg.HTTPListen); err != nil {
 		return nil, err
 	}
 	if hostKey := f.Server.HostKey; hostKey != "" && hostKey != hostKeyWorkspace {
@@ -372,15 +379,15 @@ func resolvePath(dir, name string) string {
 	return filepath.Join(dir, name)
 }
 
-// checkLoopback requires addr to be a loopback IP address or localhost and
-// a numeric port.
-func checkLoopback(addr string) error {
+// checkLoopback requires addr, the value of setting, to be a loopback IP
+// address or localhost and a numeric port.
+func checkLoopback(setting, addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("sftp_listen %q: %w", addr, err)
+		return fmt.Errorf("%s %q: %w", setting, addr, err)
 	}
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-		return fmt.Errorf("sftp_listen %q: the port must be a number from 0 to 65535", addr)
+		return fmt.Errorf("%s %q: the port must be a number from 0 to 65535", setting, addr)
 	}
 	if host == "localhost" {
 		return nil
@@ -388,7 +395,7 @@ func checkLoopback(addr string) error {
 	if ip, err := netip.ParseAddr(host); err == nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("sftp_listen %q is not a loopback address; sftpit listens only on loopback, such as 127.0.0.1:2122 or [::1]:2122", addr)
+	return fmt.Errorf("%s %q is not a loopback address; sftpit listens only on loopback, such as 127.0.0.1:%s or [::1]:%[3]s", setting, addr, port)
 }
 
 // checkSeedDir requires the seed directory to exist and refuses the

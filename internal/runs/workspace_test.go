@@ -107,6 +107,54 @@ func TestTempWorkspaceIsDeletedOnClose(t *testing.T) {
 	}
 }
 
+func TestRunsWithReadOnlyDirectoriesAreStillDeleted(t *testing.T) {
+	// A client can leave a directory that cannot be written or listed.
+	leaveLockedDirectory := func(t *testing.T, w *runs.Workspace) {
+		t.Helper()
+		r, err := w.NewRun(runs.Scenario{})
+		if err != nil {
+			t.Fatalf("NewRun: %v", err)
+		}
+		locked := filepath.Join(r.Files, "locked")
+		if err := os.MkdirAll(filepath.Join(locked, "inner"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(locked, "inner", "file"), "x")
+		for _, dir := range []string{filepath.Join(locked, "inner"), locked} {
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("temporary", func(t *testing.T) {
+		w, err := runs.TempWorkspace()
+		if err != nil {
+			t.Fatalf("TempWorkspace: %v", err)
+		}
+		leaveLockedDirectory(t, w)
+		closeWorkspace(t, w)
+		if _, err := os.Stat(w.Dir()); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("workspace %s still exists after Close (%v)", w.Dir(), err)
+		}
+	})
+	t.Run("kept", func(t *testing.T) {
+		dir := t.TempDir()
+		w := openWorkspace(t, dir)
+		defer closeWorkspace(t, w)
+		leaveLockedDirectory(t, w)
+		for range 5 {
+			time.Sleep(2 * time.Millisecond)
+			if _, err := w.NewRun(runs.Scenario{}); err != nil {
+				t.Fatalf("NewRun once the run with the locked directory is the oldest of six: %v", err)
+			}
+		}
+		if got := listDir(t, filepath.Join(dir, "runs")); len(got) != 5 {
+			t.Errorf("runs/ holds %v, want five runs", got)
+		}
+	})
+}
+
 func TestNewRunKeepsTheNewestFiveRuns(t *testing.T) {
 	dir := t.TempDir()
 	w := openWorkspace(t, dir)

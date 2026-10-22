@@ -191,6 +191,52 @@ func startLimitedServer(t testing.TB, via route, rules *faults.Engine, opts sftp
 	return s
 }
 
+// startRuns starts runs with opts, as sftpit serve does, for the test
+// user, and serves them. The server it returns describes the first run.
+func startRuns(t testing.TB, opts runs.Options) (*runs.Manager, *server) {
+	t.Helper()
+	workspace, err := runs.OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenWorkspace: %v", err)
+	}
+	t.Cleanup(func() { workspace.Close() })
+	signer, err := ssh.NewSignerFromKey(clientKey)
+	if err != nil {
+		t.Fatalf("client signer: %v", err)
+	}
+	opts.Server = sshfront.Config{
+		HostKeys: hostKeys,
+		Users:    []sshfront.User{{Name: testUser, Password: testPassword, AuthorizedKeys: []ssh.PublicKey{signer.PublicKey()}, Home: "/"}},
+	}
+	opts.Limits = defaultLimits
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	m, err := runs.Start(workspace, opts)
+	if err != nil {
+		t.Fatalf("runs.Start: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- m.Server().Serve(ln) }()
+	t.Cleanup(func() {
+		m.Close()
+		if err := <-served; !errors.Is(err, sshfront.ErrServerClosed) {
+			t.Errorf("Serve: %v", err)
+		}
+	})
+
+	run := m.Status().Run
+	s := &server{addr: ln.Addr().String(), files: run.Files, run: &run}
+	if _, s.port, err = net.SplitHostPort(s.addr); err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	return m, s
+}
+
 // treeEntry describes one file or directory under a backend directory.
 type treeEntry struct {
 	path   string

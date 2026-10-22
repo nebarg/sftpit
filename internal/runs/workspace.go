@@ -168,7 +168,11 @@ func (w *Workspace) IdentityDir() string { return filepath.Join(w.dir, identityD
 
 // Close unlocks the workspace and, if it is temporary, deletes it.
 func (w *Workspace) Close() error {
-	err := errors.Join(w.lock.Close(), w.root.Close())
+	var err error
+	if w.temporary {
+		err = makeRemovable(w.root, ".")
+	}
+	err = errors.Join(err, w.lock.Close(), w.root.Close())
 	if w.temporary {
 		err = errors.Join(err, os.RemoveAll(w.dir))
 	}
@@ -258,9 +262,29 @@ func (w *Workspace) prune(current string) error {
 	}
 	slices.Sort(ids)
 	for _, id := range ids[:max(0, len(ids)-(keptRuns-1))] {
-		if err := w.root.RemoveAll(filepath.Join(runsDir, id)); err != nil {
+		if err := removeAll(w.root, filepath.Join(runsDir, id)); err != nil {
 			return fmt.Errorf("runs: delete old run: %w", err)
 		}
 	}
 	return nil
+}
+
+// removeAll removes name, relative to root, and everything under it.
+func removeAll(root *os.Root, name string) error {
+	if err := makeRemovable(root, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return root.RemoveAll(name)
+}
+
+// makeRemovable gives the owner full access to name, relative to root, and
+// to every directory under it. A client can leave a directory that cannot
+// be listed or written, whose entries could not otherwise be removed.
+func makeRemovable(root *os.Root, name string) error {
+	return fs.WalkDir(root.FS(), name, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			err = root.Chmod(p, 0o700)
+		}
+		return err
+	})
 }
