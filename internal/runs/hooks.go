@@ -17,10 +17,10 @@ import (
 // connection as it is accepted and as its client logs in: a delay, which
 // ends early if the connection does or its rule is removed, a close, reset
 // or freeze of the connection, or an outage of the server. A frozen
-// connection is closed at its limit, when its rule is removed, or when the
-// handshake timeout ends the hook. Hooks returns no hooks if rules is nil.
-// It logs each fault it injects to logger, or to slog.Default() if logger is
-// nil.
+// connection is closed at its limit, when its rule is removed or rules
+// releases its stalls, or when the handshake timeout ends the hook. Hooks
+// returns no hooks if rules is nil. It logs each fault it injects to
+// logger, or to slog.Default() if logger is nil.
 func Hooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
 	if rules == nil {
 		return sshfront.Hooks{}
@@ -30,16 +30,16 @@ func Hooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
 	}
 	return sshfront.Hooks{
 		Connect: func(ctx context.Context, conn *sshfront.Conn) {
-			inject(ctx, logger, conn, faults.Connect, rules.Connect(faults.Client{Connection: conn.ID()}))
+			inject(ctx, logger, rules, conn, faults.Connect, rules.Connect(faults.Client{Connection: conn.ID()}))
 		},
 		Authenticate: func(ctx context.Context, conn *sshfront.Conn) {
 			client := faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID()}
-			inject(ctx, logger, conn, faults.Authenticate, rules.Authenticate(client))
+			inject(ctx, logger, rules, conn, faults.Authenticate, rules.Authenticate(client))
 		},
 	}
 }
 
-func inject(ctx context.Context, logger *slog.Logger, conn *sshfront.Conn, event faults.Operation, action sftpproxy.Action) {
+func inject(ctx context.Context, logger *slog.Logger, rules *faults.Engine, conn *sshfront.Conn, event faults.Operation, action sftpproxy.Action) {
 	attrs := []any{"conn", conn.ID(), "request", event}
 	if conn.User() != "" {
 		attrs = append(attrs, "user", conn.User())
@@ -51,7 +51,7 @@ func inject(ctx context.Context, logger *slog.Logger, conn *sshfront.Conn, event
 	case sftpproxy.Delay:
 		attrs = append(attrs, "fault", "delay", "duration", a.Duration)
 		logger.Info("injected fault", attrs...)
-		if wait(ctx, a.Duration, a.Release) {
+		if wait(ctx, a.Duration, a.Release, nil) {
 			logger.Info("fault released", attrs...)
 		}
 	case sftpproxy.Drop:
@@ -66,7 +66,7 @@ func inject(ctx context.Context, logger *slog.Logger, conn *sshfront.Conn, event
 		attrs = append(attrs, "fault", "freeze_connection", "limit", a.Limit)
 		logger.Info("injected fault", attrs...)
 		conn.Freeze()
-		if wait(ctx, a.Limit, a.Release) {
+		if wait(ctx, a.Limit, a.Release, rules.Released()) {
 			logger.Info("fault released", attrs...)
 		}
 		err = conn.Close()
@@ -130,15 +130,17 @@ func armTimers(timers []sftpproxy.Timer, srv *sshfront.Server, logger *slog.Logg
 	}
 }
 
-// wait waits for d, or until ctx is done or release is closed, and reports
-// whether release ended it.
-func wait(ctx context.Context, d time.Duration, release <-chan struct{}) (released bool) {
+// wait waits for d, or until ctx is done or release or stalls is closed,
+// and reports whether a release ended it.
+func wait(ctx context.Context, d time.Duration, release, stalls <-chan struct{}) (released bool) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 	case <-ctx.Done():
 	case <-release:
+		return true
+	case <-stalls:
 		return true
 	}
 	return false

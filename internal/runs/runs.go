@@ -24,7 +24,8 @@ import (
 // that caused it, and the server that accepted the connection as
 // opts.Listener. Its faults and timers come from rules, for the user and key
 // it logged in with and the time it did, including the timers of rules that
-// a change applies during the session, or from opts if rules is nil.
+// a change applies during the session, and its stalls and freezes end when
+// rules releases them; or they come from opts if rules is nil.
 // Snapshots hold back every session's changes to their file, and keep copies
 // in the run's snapshots directory.
 func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sftpproxy.Options) sshfront.Handler {
@@ -40,7 +41,7 @@ func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sf
 		if rules != nil {
 			s := rules.Session(faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID(), Authenticated: conn.Authenticated()})
 			defer s.End()
-			opts.Faults, opts.Timers, opts.MoreTimers = s.Decide, s.Timers(), s.MoreTimers()
+			opts.Faults, opts.Timers, opts.MoreTimers, opts.Released = s.Decide, s.Timers(), s.MoreTimers(), rules.Released
 		}
 		return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), opts)
 	}

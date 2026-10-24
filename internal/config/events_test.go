@@ -66,6 +66,7 @@ func TestLoadRejectsInvalidRulesForConnectionEvents(t *testing.T) {
 		{"a when", "match: {operation: authenticate}\n        action: {type: delay, when: before, duration: 1s}", "scenarios.s.faults[0] (r): action: when does not apply to a delay at connect or authenticate, which have no request to act before or after"},
 		{"a failure", "match: {operation: authenticate}\n        action: {type: fail, status: permission_denied}", "action: connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not a fail"},
 		{"an end of session", "match: {operation: [connect]}\n        action: {type: close_subsystem}", "not a close_subsystem"},
+		{"a stall", "match: {operation: authenticate}\n        action: {type: stall, max_stall: 1s}", "not a stall"},
 		{"file operations", "match: {operation: [authenticate, stat]}\n        action: {type: close_connection}", "connect and authenticate cannot share a rule with file operations"},
 		{"a path", "match: {operation: authenticate, path_prefix: /incoming}\n        action: {type: close_connection}", "connect and authenticate have no path"},
 		{"a user at connect", "match: {operation: connect, user: test}\n        action: {type: close_connection}", "connect comes before the client logs in, so it has no user or key"},

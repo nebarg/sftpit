@@ -45,12 +45,15 @@ func session(e *faults.Engine, user, key string) func(sftpproxy.Request) sftppro
 	return e.Session(faults.Client{User: user, KeyFingerprint: key}).Decide
 }
 
-// unreleased returns a without the release that the engine gives a delay or
-// freeze, which ends it once its rule is removed, so that it can be compared
-// with the rule's own action.
+// unreleased returns a without the release that the engine gives a delay,
+// stall or freeze, which ends it once its rule is removed, so that it can be
+// compared with the rule's own action.
 func unreleased(a sftpproxy.Action) sftpproxy.Action {
 	switch a := a.(type) {
 	case sftpproxy.Delay:
+		a.Release = nil
+		return a
+	case sftpproxy.Stall:
 		a.Release = nil
 		return a
 	case sftpproxy.Freeze:
@@ -506,7 +509,7 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"a cutoff that delays", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Write)}, Action: sftpproxy.PartialUpload{Result: sftpproxy.Delay{}}}}, "cannot end with sftpproxy.Delay"},
 		{"a corruption off reads", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Read, faults.Stat)}, Action: sftpproxy.CorruptDownload{}}}, "match the read operation only"},
 		{"a wrong size on a rename", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Stat, faults.Rename)}, Action: sftpproxy.WrongSize{}}}, "not rename"},
-		{"a stall", []faults.Rule{{ID: "r", Match: read, Action: sftpproxy.Stall{}}}, "unsupported action sftpproxy.Stall"},
+		{"an action the engine makes itself", []faults.Rule{{ID: "r", Match: read, Action: sftpproxy.Timed{Action: sftpproxy.Drop{}}}}, "unsupported action sftpproxy.Timed"},
 		{"attempts of renames", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Rename), Attempt: &faults.Attempt{Numbers: []uint64{1}}})}, "attempts count opens"},
 		{"attempts and occurrences", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.OpenRead), Attempt: &faults.Attempt{Numbers: []uint64{1}}, Occurrence: []uint64{1}})}, "cannot both be set"},
 		{"no attempt numbers", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.OpenRead), Attempt: &faults.Attempt{}})}, "attempt needs at least one number"},

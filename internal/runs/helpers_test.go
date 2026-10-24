@@ -1,12 +1,14 @@
 package runs
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,3 +140,22 @@ func (m messages) Handle(_ context.Context, r slog.Record) error {
 
 func (m messages) WithAttrs([]slog.Attr) slog.Handler { return m }
 func (m messages) WithGroup(string) slog.Handler      { return m }
+
+// syncBuffer is a bytes.Buffer that is safe for concurrent use, for logs
+// that a run's sessions write.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

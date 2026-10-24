@@ -83,12 +83,16 @@ func resetCommand(ctx context.Context, args []string, stdout, stderr io.Writer) 
 // describeRun describes a run in one line, as in
 // "run 20261024-101500.123-3f9a: scenario flaky-partner, seed 7 (pinned)".
 func describeRun(r control.RunStatus) string {
-	if r.Scenario == "" {
+	scenario := "scenario " + r.Scenario
+	switch {
+	case r.Inline:
+		scenario = "an inline scenario"
+	case r.Scenario == "":
 		return fmt.Sprintf("run %s: no faults", r.ID)
 	}
 	seed := "fresh"
 	if r.SeedPinned {
 		seed = "pinned"
 	}
-	return fmt.Sprintf("run %s: scenario %s, seed %d (%s)", r.ID, r.Scenario, uint64(r.Seed), seed)
+	return fmt.Sprintf("run %s: %s, seed %d (%s)", r.ID, scenario, uint64(r.Seed), seed)
 }

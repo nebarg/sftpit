@@ -144,6 +144,7 @@ func TestRulesForConnectionEventsThatCannotApplyAreRefused(t *testing.T) {
 		{"a key at connect", faults.Rule{Match: faults.Match{Operations: ops(faults.Connect), KeyFingerprint: "SHA256:k"}, Action: hangUp}, "connect comes before the client logs in"},
 		{"a failure", faults.Rule{Match: login, Action: failure}, "connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not sftpproxy.Fail"},
 		{"an end of session", faults.Rule{Match: connect, Action: sftpproxy.EndSession{}}, "not sftpproxy.EndSession"},
+		{"a stall", faults.Rule{Match: login, Action: sftpproxy.Stall{Limit: time.Second}}, "not sftpproxy.Stall"},
 		{"attempts", faults.Rule{Match: faults.Match{Operations: ops(faults.Authenticate), Attempt: &faults.Attempt{Numbers: []uint64{1}}}, Action: hangUp}, "attempts count opens"},
 		{"a connection's window", faults.Rule{Match: login, Trigger: &faults.Trigger{Anchor: faults.Connection, Window: &faults.Window{Until: time.Second}}, Action: slowLogin}, "connect and authenticate are timed from the run, not the connection"},
 		{"a transfer's moment", faults.Rule{Match: connect, Trigger: &faults.Trigger{Anchor: faults.Transfer, At: at(time.Second)}, Action: hangUp}, "connect and authenticate are timed from the run, not the transfer"},

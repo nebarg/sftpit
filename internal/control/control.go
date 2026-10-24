@@ -1,7 +1,7 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
 // alive and ready, the status of the current run, its rules, which can
-// change during the run, and resets that start the next run. Its Client
-// calls the API.
+// change during the run, the release of its stalls, and resets that start
+// the next run. Its Client calls the API.
 //
 // The API answers only requests addressed to a loopback host, so a web page
 // cannot reach it through DNS rebinding. It refuses a change that a browser
@@ -51,6 +51,7 @@ func Handler(m *runs.Manager) http.Handler {
 	mux.HandleFunc("POST /api/v1/reset", a.reset)
 	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
+	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
 	return protect(mux)
 }
 
@@ -82,15 +83,24 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	req := runs.ResetRequest{Run: body.Run, Scenario: body.Scenario, Seed: (*faults.Seed)(body.Seed)}
+	if len(body.Faults) > 0 && string(body.Faults) != "null" {
+		rules, err := config.ParseRules(body.Faults, a.runs.Users())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		req.Inline = &runs.InlineScenario{Rules: rules}
+	}
 	// A reset runs to its end even if the client goes away, as stopping
 	// part way would leave admission closed.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resetTimeout)
 	defer cancel()
-	_, err := a.runs.Reset(ctx, runs.ResetRequest{Run: body.Run, Scenario: body.Scenario, Seed: (*faults.Seed)(body.Seed)})
+	_, err := a.runs.Reset(ctx, req)
 	switch {
 	case errors.Is(err, runs.ErrStaleRun):
 		writeError(w, http.StatusConflict, err)
-	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario):
+	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios):
 		writeError(w, http.StatusBadRequest, err)
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
@@ -141,6 +151,14 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *api) releaseStalls(w http.ResponseWriter, r *http.Request) {
+	if err := a.runs.ReleaseStalls(r.PathValue("id")); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
+}
+
 // writeRules writes set as the reply to a request for a run's rules or a
 // change of them: the revision, the rules in the long form, in the order
 // they are tried, and what each has done, by rule ID.
@@ -170,11 +188,13 @@ type ruleCounts struct {
 
 // ResetRequest is the body of a reset, which chooses the next run as
 // runs.ResetRequest does. Every field is optional, so an empty body repeats
-// the current run.
+// the current run. Faults, if given, is an inline scenario's rules, as a
+// change of rules gives them.
 type ResetRequest struct {
-	Run      string  `json:"run,omitempty"`
-	Scenario *string `json:"scenario,omitempty"`
-	Seed     *Seed   `json:"seed,omitempty"`
+	Run      string          `json:"run,omitempty"`
+	Scenario *string         `json:"scenario,omitempty"`
+	Faults   json.RawMessage `json:"faults,omitempty"`
+	Seed     *Seed           `json:"seed,omitempty"`
 }
 
 // Status is the reply to a status request or a reset.
@@ -192,10 +212,11 @@ type SFTPStatus struct {
 }
 
 // RunStatus describes the current run: the scenario it started with, if
-// any, its seed and the revision of its rules.
+// any, named or inline, its seed and the revision of its rules.
 type RunStatus struct {
 	ID         string `json:"id"`
 	Scenario   string `json:"scenario,omitempty"`
+	Inline     bool   `json:"inline,omitempty"`
 	Seed       Seed   `json:"seed"`
 	SeedPinned bool   `json:"seed_pinned,omitempty"`
 	Revision   uint64 `json:"revision"`
@@ -215,7 +236,7 @@ func newStatus(s runs.Status) Status {
 		body.SFTP.Error = s.Err.Error()
 	}
 	sc := s.Run.Scenario
-	body.Run.Scenario, body.Run.Seed, body.Run.SeedPinned, body.Run.Revision = sc.Name, Seed(sc.Seed), sc.Pinned, s.Revision
+	body.Run.Scenario, body.Run.Inline, body.Run.Seed, body.Run.SeedPinned, body.Run.Revision = sc.Name, sc.Inline, Seed(sc.Seed), sc.Pinned, s.Revision
 	return body
 }
 

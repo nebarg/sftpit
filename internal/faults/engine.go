@@ -36,6 +36,9 @@ type Engine struct {
 	// sessions are the sessions that have not ended, which the rules a
 	// change applies are timed for.
 	sessions map[*Session]struct{}
+	// stalls is closed to release the stalls and freezes in progress, and
+	// then replaced.
+	stalls chan struct{}
 
 	// timers are the faults at moments of the run itself.
 	timers []sftpproxy.Timer
@@ -129,7 +132,7 @@ func New(rules []Rule, seed Seed, logger *slog.Logger) (*Engine, error) {
 	if err := Check(rules); err != nil {
 		return nil, err
 	}
-	e := &Engine{seed: seed, logger: logger, revision: 1, sessions: make(map[*Session]struct{})}
+	e := &Engine{seed: seed, logger: logger, revision: 1, sessions: make(map[*Session]struct{}), stalls: make(chan struct{})}
 	start := time.Now()
 	for _, r := range rules {
 		e.rules = append(e.rules, newRule(r, 0, start))
@@ -190,9 +193,9 @@ func (e *Engine) Timers() []sftpproxy.Timer {
 // was, with its counts, ordinals and moments. Any other rule starts from
 // now: its attempts and occurrences count from the change, and a trigger
 // anchored to the run measures from it. A rule that is no longer there ends
-// the delays and freezes it holds at once, and none of its moments come,
-// but a transfer that it selected keeps its fault, so that a download is
-// never corrupted only in part.
+// the delays, stalls and freezes it holds at once, and none of its moments
+// come, but a transfer that it selected keeps its fault, so that a download
+// is never corrupted only in part.
 //
 // Every session that has not ended is timed for the rules that start from
 // now, as a session that starts now would be, through its MoreTimers.
@@ -249,6 +252,26 @@ func (e *Engine) Replace(revision uint64, rules []Rule) ([]sftpproxy.Timer, erro
 	}
 	e.logger.Info("rules changed", "from", revision, "to", e.revision, "added", added, "changed", changed, "removed", removed, "kept", kept)
 	return e.runTimers(fresh), nil
+}
+
+// ReleaseStalls releases every stall and freeze in progress, whichever rule
+// chose it: a stalled request or reply goes on, and a frozen connection is
+// closed. Those that begin later hold as usual.
+func (e *Engine) ReleaseStalls() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	close(e.stalls)
+	e.stalls = make(chan struct{})
+	e.logger.Info("stalls released")
+}
+
+// Released returns the channel that the next ReleaseStalls closes, for
+// sftpproxy.Options.Released, so that a stall or freeze that begins now
+// waits on it.
+func (e *Engine) Released() <-chan struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stalls
 }
 
 // RuleSet is an engine's rules at one revision, in the order they are
@@ -350,11 +373,14 @@ func (e *Engine) drawn(r *rule, k Key) (sftpproxy.Action, []any) {
 	return r.released(r.Action), nil
 }
 
-// released returns a with the delay or freeze it holds, if any, ended when
-// the rule is removed.
+// released returns a with the delay, stall or freeze it holds, if any,
+// ended when the rule is removed.
 func (r *rule) released(a sftpproxy.Action) sftpproxy.Action {
 	switch a := a.(type) {
 	case sftpproxy.Delay:
+		a.Release = r.removed
+		return a
+	case sftpproxy.Stall:
 		a.Release = r.removed
 		return a
 	case sftpproxy.Freeze:

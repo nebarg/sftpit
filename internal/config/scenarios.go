@@ -117,6 +117,7 @@ type actionConfig struct {
 	Status        string              `yaml:"status,omitempty" json:"status,omitempty"`
 	Mode          string              `yaml:"mode,omitempty" json:"mode,omitempty"`
 	MaxFreeze     string              `yaml:"max_freeze,omitempty" json:"max_freeze,omitempty"`
+	MaxStall      string              `yaml:"max_stall,omitempty" json:"max_stall,omitempty"`
 	Transform     string              `yaml:"transform,omitempty" json:"transform,omitempty"`
 	Offset        *uint64             `yaml:"offset,omitempty" json:"offset,omitempty"`
 	Length        *uint64             `yaml:"length,omitempty" json:"length,omitempty"`
@@ -529,6 +530,7 @@ func location(fields []locationField) (faults.Location, error) {
 // actionFields are the fields each action type allows, besides type.
 var actionFields = map[string][]string{
 	"delay":             {"when", "duration"},
+	"stall":             {"when", "max_stall"},
 	"fail":              {"when", "status"},
 	"close_connection":  {"when", "mode"},
 	"freeze_connection": {"when", "max_freeze"},
@@ -555,6 +557,8 @@ func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 	switch ac.Type {
 	case "delay":
 		r.Action, r.Duration, err = ac.delay(noWhen)
+	case "stall":
+		r.Action, err = ac.stall()
 	case "fail":
 		r.Action, err = ac.fail()
 	case "close_connection":
@@ -586,6 +590,7 @@ func (ac actionConfig) set() []string {
 		"status":         ac.Status != "",
 		"mode":           ac.Mode != "",
 		"max_freeze":     ac.MaxFreeze != "",
+		"max_stall":      ac.MaxStall != "",
 		"cutoff_offset":  ac.CutoffOffset != nil,
 		"result":         ac.Result != "",
 		"transform":      ac.Transform != "",
@@ -615,6 +620,20 @@ func (ac actionConfig) delay(noWhen string) (sftpproxy.Action, *faults.Range[tim
 		return nil, nil, err
 	}
 	return sftpproxy.Delay{When: when, Duration: d}, drawn, nil
+}
+
+// stall returns the stall of ac, which holds a request or its reply until it
+// is released or max_stall passes.
+func (ac actionConfig) stall() (sftpproxy.Action, error) {
+	when, err := ac.when()
+	if err != nil {
+		return nil, err
+	}
+	limit, err := positiveDuration("max_stall", ac.MaxStall)
+	if err != nil {
+		return nil, err
+	}
+	return sftpproxy.Stall{When: when, Limit: limit}, nil
 }
 
 // listenerDown returns the outage of ac, which leaves existing connections

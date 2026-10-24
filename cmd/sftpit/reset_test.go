@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/nebarg/sftpit/internal/control"
 )
 
 func TestResetStartsTheNextRun(t *testing.T) {
@@ -70,6 +72,22 @@ func TestResetFailsClearly(t *testing.T) {
 				t.Errorf("exit %d, stderr %q, want %d and %q", code, stderr.String(), tt.code, tt.want)
 			}
 		})
+	}
+}
+
+func TestDescribeRun(t *testing.T) {
+	tests := []struct {
+		run  control.RunStatus
+		want string
+	}{
+		{control.RunStatus{ID: "r", Seed: 7}, "run r: no faults"},
+		{control.RunStatus{ID: "r", Scenario: "chaos", Seed: 7}, "run r: scenario chaos, seed 7 (fresh)"},
+		{control.RunStatus{ID: "r", Inline: true, Seed: 7, SeedPinned: true}, "run r: an inline scenario, seed 7 (pinned)"},
+	}
+	for _, tt := range tests {
+		if got := describeRun(tt.run); got != tt.want {
+			t.Errorf("describeRun(%+v) = %q, want %q", tt.run, got, tt.want)
+		}
 	}
 }
 

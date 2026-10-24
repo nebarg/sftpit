@@ -158,6 +158,40 @@ func TestATriggerAnchoredToTheRunMeasuresFromTheChange(t *testing.T) {
 	})
 }
 
+func TestReleaseStallsReleasesOnlyThoseInProgress(t *testing.T) {
+	var logs bytes.Buffer
+	stall := sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}
+	e, err := faults.New([]faults.Rule{{ID: "stuck", Match: stat, Action: stall}}, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session(e, "test", "")(on(&sftpwire.Stat{}, "/f")); unreleased(got) != stall {
+		t.Errorf("a stat got %#v, want the stall", got)
+	}
+	inProgress := e.Released()
+	e.ReleaseStalls()
+	select {
+	case <-inProgress:
+	default:
+		t.Error("ReleaseStalls left the stalls in progress held")
+	}
+	later := e.Released()
+	select {
+	case <-later:
+		t.Error("a stall that begins after ReleaseStalls is released at once")
+	default:
+	}
+	e.ReleaseStalls()
+	select {
+	case <-later:
+	default:
+		t.Error("a second ReleaseStalls left the stalls then in progress held")
+	}
+	if want := `level=INFO msg="stalls released"`; strings.Count(logs.String(), want) != 2 {
+		t.Errorf("logs lack two of %s:\n%s", want, logs.String())
+	}
+}
+
 func TestAChangeTimesTheRunsOutagesFromIt(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		someTime := faults.Range[time.Duration]{Min: time.Second, Max: time.Hour}
@@ -206,6 +240,7 @@ func TestARemovedRuleReleasesItsWaits(t *testing.T) {
 	rules = append(rules,
 		faults.Rule{ID: "slow-mkdir", Match: faults.Match{Operations: ops(faults.Mkdir)}, Duration: someTime, Action: sftpproxy.Delay{}},
 		faults.Rule{ID: "cut-somewhere", Match: faults.Match{Operations: ops(faults.Write), Path: faults.Location{Kind: faults.Exactly, Pattern: "/g"}}, Cutoff: &faults.Range[uint64]{Min: 1, Max: 9}, Action: sftpproxy.PartialUpload{Result: freeze}},
+		faults.Rule{ID: "stuck", Match: faults.Match{Operations: ops(faults.Remove)}, Action: sftpproxy.Stall{When: sftpproxy.After, Limit: time.Minute}},
 		faults.Rule{ID: "edited", Match: faults.Match{Operations: ops(faults.Rmdir)}, Action: sftpproxy.Delay{Duration: time.Minute}},
 	)
 	e := newEngine(t, rules...)
@@ -226,6 +261,7 @@ func TestARemovedRuleReleasesItsWaits(t *testing.T) {
 		"a delay of a drawn duration":       decide(on(&sftpwire.Mkdir{}, "/d")).(sftpproxy.Delay).Release,
 		"the freeze of a drawn cutoff":      decide(openFor("/g", sftpwire.OpenWrite)).(sftpproxy.PartialUpload).Result.(sftpproxy.Freeze).Release,
 		"the delay of an edited rule":       decide(on(&sftpwire.Rmdir{}, "/d")).(sftpproxy.Delay).Release,
+		"a stall":                           decide(on(&sftpwire.Remove{}, "/f")).(sftpproxy.Stall).Release,
 	}
 	edited := rules[len(rules)-1]
 	edited.Action = sftpproxy.Delay{Duration: time.Hour}

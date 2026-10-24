@@ -95,6 +95,9 @@ func TestResetRefusesABadRequest(t *testing.T) {
 		{`{"seed": -1}`, http.StatusBadRequest, "a seed is a whole number from 0 to 18446744073709551615"},
 		{`{"seed": "1.5"}`, http.StatusBadRequest, "a seed is a whole number"},
 		{`{"scenarios": "chaos"}`, http.StatusBadRequest, `unknown field "scenarios"`},
+		{`{"scenario": "chaos", "faults": []}`, http.StatusBadRequest, "a reset names a scenario or gives one inline, not both"},
+		{`{"faults": [{"id": "r"}]}`, http.StatusBadRequest, "faults[0] (r): match: operation is required"},
+		{`{"faults": [` + strings.Replace(denyStats, `"test"`, `"nobody"`, 1) + `]}`, http.StatusBadRequest, `user "nobody" is not a configured user`},
 		{`{} {}`, http.StatusBadRequest, "a single JSON object"},
 		{`[]`, http.StatusBadRequest, "invalid request body"},
 	}

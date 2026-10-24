@@ -47,15 +47,15 @@ type Rule struct {
 	// from for each transfer the rule selects, in place of its own.
 	Cutoff *Range[uint64]
 
-	// Action is what the rule does to a request it selects: a Delay or
-	// Fail; a Drop, Freeze, EndSession or ListenerDown, which are connection
-	// actions; a
-	// PartialUpload for the write operation or a CorruptDownload for the
-	// read operation, chosen when the transfer's file is opened; or a
-	// WrongSize for the stat, lstat, fstat and list operations. The engine
-	// sets the Reserve of a PartialUpload or CorruptDownload. A connection
-	// action can also fire at a moment, as Trigger says, whatever the client
-	// is doing then.
+	// Action is what the rule does to a request it selects: a Delay, Stall
+	// or Fail; a Drop, Freeze, EndSession or ListenerDown, which are
+	// connection actions; a PartialUpload for the write operation or a
+	// CorruptDownload for the read operation, chosen when the transfer's
+	// file is opened; or a WrongSize for the stat, lstat, fstat and list
+	// operations. The engine sets the Reserve of a PartialUpload or
+	// CorruptDownload, and the Release of a Delay, Stall or Freeze. A
+	// connection action can also fire at a moment, as Trigger says, whatever
+	// the client is doing then.
 	Action sftpproxy.Action
 }
 
@@ -401,7 +401,7 @@ func (r Rule) checkEvents() error {
 func (r Rule) checkAction() error {
 	ops := r.Match.Operations
 	switch a := r.Action.(type) {
-	case sftpproxy.Delay, sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession, sftpproxy.ListenerDown:
+	case sftpproxy.Delay, sftpproxy.Stall, sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze, sftpproxy.EndSession, sftpproxy.ListenerDown:
 	case sftpproxy.PartialUpload:
 		if !slices.Equal(ops, []Operation{Write}) {
 			return errors.New("a partial upload needs the rule to match the write operation only")

@@ -197,8 +197,12 @@ type Run struct {
 // Scenario is the scenario whose faults a run starts with.
 type Scenario struct {
 	// Name names the scenario, or is "" for a run that starts without
-	// faults.
+	// faults or with an inline scenario.
 	Name string
+
+	// Inline reports whether the scenario was given at the reset that
+	// started the run, rather than named in the configuration.
+	Inline bool
 
 	// Seed fixes the run's random decisions, those of rules applied during
 	// the run included, and Pinned reports whether it was given rather than
@@ -212,6 +216,7 @@ type runRecord struct {
 	ID         string      `json:"id"`
 	Started    time.Time   `json:"started"`
 	Scenario   string      `json:"scenario,omitempty"`
+	Inline     bool        `json:"inline,omitempty"`
 	Seed       faults.Seed `json:"seed"`
 	SeedPinned bool        `json:"seed_pinned,omitempty"`
 }
@@ -232,7 +237,7 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	if err := w.root.MkdirAll(filepath.Join(dir, "fs"), 0o700); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
-	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Seed: scenario.Seed, SeedPinned: scenario.Pinned}
+	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Inline: scenario.Inline, Seed: scenario.Seed, SeedPinned: scenario.Pinned}
 	b, err := json.MarshalIndent(record, "", "  ")
 	if err == nil {
 		err = w.root.WriteFile(filepath.Join(dir, "run.json"), append(b, '\n'), 0o600)

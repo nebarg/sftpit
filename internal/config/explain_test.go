@@ -105,6 +105,8 @@ scenarios:
     seed: 7
     faults:
       - {id: slow-reply, match: {operation: rename}, action: {type: delay, when: after, duration: 1500ms}}
+      - {id: stuck-open, match: {operation: open_write}, action: {type: stall, when: before, max_stall: 30s}}
+      - {id: stuck-reply, match: {operation: setstat}, action: {type: stall, when: after, max_stall: 2m}}
       - {id: slow-stat, priority: 10, match: {operation: [stat, lstat], path_prefix: /out}, decision: {probability: 0.5}, action: {type: delay, when: before, duration: {min: 200ms, max: 3s}}}
       - {id: failed-close, priority: -1, match: {operation: close, filename: orders.csv}, action: {type: fail, when: after, status: failure}}
       - {id: fin, max_triggers: 3, match: {operation: mkdir, occurrence: [2, 3]}, action: {type: close_connection, when: before}}

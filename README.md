@@ -137,6 +137,7 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 | Action | Effect | Fields |
 |---|---|---|
 | `delay` | Holds the request before the server acts, or its reply after | `when`, `duration` |
+| `stall` | Holds the request or its reply as `delay` does, until [released](#releasing-stalls) or `max_stall` passes. The SSH connection stays alive, keepalives included, so only an operation timeout notices | `when`, `max_stall` |
 | `fail` | Answers with `status`. After, the server has acted although the client is told otherwise | `when`, `status` |
 | `close_connection` | Closes the connection where the reply would be, with a FIN or, with `mode: rst`, a TCP reset | `when`, `mode` |
 | `freeze_connection` | Stops all traffic where the reply would be, keepalives included, then closes the connection after `max_freeze` | `when`, `max_freeze` |
@@ -266,6 +267,7 @@ faults:
 | `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
 | `GET /api/v1/runs/{id}/rules` | the run's rules, their revision and what each has done |
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
+| `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
 
 ```bash
 curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
@@ -290,9 +292,10 @@ The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `
 Every field of the body is optional:
 - `run` is the run the reset expects to end. If another run is current, the reset is refused with status 409.
 - `scenario` names the next run's scenario, or `""` for none. Without it, the next run repeats the current scenario, and its seed if that was pinned.
+- `faults` gives the next run's rules in place of a named scenario, as a [change of rules](#changing-the-rules-during-a-run) does, so a test can start from rules of its own. Status then shows `"inline": true`, and a reset without `scenario` or `faults` repeats them.
 - `seed` pins the next run's random decisions. Without it, the scenario's own seed does, or the run draws a fresh one.
 
-An unknown scenario, or a seed without one, is refused with status 400 and leaves the run alone. The scenarios are those of the configuration as it was at startup, so a change to the file needs a restart.
+An unknown scenario, a seed without one, both `scenario` and `faults`, or invalid rules are refused with status 400 and leave the run alone. The scenarios are those of the configuration as it was at startup, so a change to the file needs a restart.
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
@@ -333,6 +336,10 @@ It answers as `GET` on the same route does, with the rules' revision, the rules 
 - **A rule that goes** releases what it holds: a delayed request or reply goes on, and a frozen connection is closed. None of its moments come. A transfer it chose keeps its partial upload or corruption, so a download is never corrupted only in part, and an outage it started runs its course.
 - **Sessions already open** get the new rules from their next request, and a connection action at a moment of the run or the connection reaches them too.
 - **A reset** starts the next run with its scenario's rules, whatever changed during this one. Use a reset when a test needs a clean start that it can repeat.
+
+### Releasing stalls
+
+`POST /api/v1/runs/{id}/release-stalls` releases every stall and frozen connection of the run that is in progress, whichever rule chose it: a stalled request or reply goes on, and a frozen connection is closed, as at its limit. A stall that begins later holds as usual, and a delay runs its course. Each release is logged as `fault released`. A run that is no longer current is refused with status 409.
 
 ### In a test harness
 

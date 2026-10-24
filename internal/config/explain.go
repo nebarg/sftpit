@@ -198,6 +198,8 @@ func longAction(r faults.Rule) actionConfig {
 	switch a := r.Action.(type) {
 	case sftpproxy.Delay:
 		return actionConfig{Type: "delay", When: actionWhen(r, a.When), Duration: longDuration(r, a.Duration)}
+	case sftpproxy.Stall:
+		return actionConfig{Type: "stall", When: whenName(a.When), MaxStall: a.Limit.String()}
 	case sftpproxy.Fail:
 		return actionConfig{Type: "fail", When: whenName(a.When), Status: statusName(a.Status)}
 	case sftpproxy.Drop:

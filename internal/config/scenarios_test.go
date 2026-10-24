@@ -88,6 +88,12 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
         match: {operation: remove}
         decision: {scope: operation, probability: 0}
         action: {type: fail, when: after, status: failure}
+      - id: stuck-open
+        match: {operation: open_read}
+        action: {type: stall, when: before, max_stall: 30s}
+      - id: stuck-reply
+        match: {operation: rename}
+        action: {type: stall, when: after, max_stall: 1m}
   other:
     faults:
       - id: deny
@@ -189,6 +195,16 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 			Match:       faults.Match{Operations: []faults.Operation{faults.Remove}},
 			Probability: probability(0),
 			Action:      sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure},
+		},
+		{
+			ID:     "stuck-open",
+			Match:  faults.Match{Operations: []faults.Operation{faults.OpenRead}},
+			Action: sftpproxy.Stall{When: sftpproxy.Before, Limit: 30 * time.Second},
+		},
+		{
+			ID:     "stuck-reply",
+			Match:  faults.Match{Operations: []faults.Operation{faults.Rename}},
+			Action: sftpproxy.Stall{When: sftpproxy.After, Limit: time.Minute},
 		},
 	}
 	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Rules(), want) {
@@ -293,7 +309,7 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"an unknown user", rule("{operation: stat, user: nobody}", deny), "", `user "nobody" is not a configured user`},
 		{"an unknown key", rule("{operation: stat, key_fingerprint: \"SHA256:abc\"}", deny), "", `key_fingerprint "SHA256:abc" is not one of the configured users' authorized keys`},
 		{"another user's key", rule("{operation: stat, user: test, key_fingerprint: \"SHA256:abc\"}", deny), "", "is not one of test's authorized keys"},
-		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of close_connection, close_subsystem, corrupt_download, delay, fail, freeze_connection, listener_down, partial_upload, wrong_size`},
+		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of close_connection, close_subsystem, corrupt_download, delay, fail, freeze_connection, listener_down, partial_upload, stall, wrong_size`},
 		{"a field of another action", rule("{operation: stat}", "{type: fail, when: before, status: failure, duration: 1s}"), "", "action: duration does not apply to a fail"},
 		{"no when", rule("{operation: stat}", "{type: fail, status: failure}"), "", "when is required: before the server acts, or after"},
 		{"a bad when", rule("{operation: stat}", "{type: fail, when: during, status: failure}"), "", `when "during" is not before or after`},
@@ -304,6 +320,10 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"a status a server cannot send", rule("{operation: stat}", "{type: fail, when: before, status: connection_lost}"), "", `status "connection_lost" is not one of bad_message, eof, failure, no_such_file, op_unsupported, permission_denied`},
 		{"a bad mode", rule("{operation: stat}", "{type: close_connection, when: before, mode: hangup}"), "", `mode "hangup" is not fin or rst`},
 		{"a freeze without a bound", rule("{operation: stat}", "{type: freeze_connection, when: before}"), "", "max_freeze is required"},
+		{"a stall without a bound", rule("{operation: stat}", "{type: stall, when: before}"), "", "max_stall is required"},
+		{"a stall without when", rule("{operation: stat}", "{type: stall, max_stall: 1s}"), "", "when is required: before the server acts, or after"},
+		{"a duration on a stall", rule("{operation: stat}", "{type: stall, when: before, max_stall: 1s, duration: 1s}"), "", "duration does not apply to a stall"},
+		{"a stall's bound on a freeze", rule("{operation: stat}", "{type: freeze_connection, when: before, max_freeze: 1s, max_stall: 1s}"), "", "max_stall does not apply to a freeze_connection"},
 		{"a bound on a close", rule("{operation: stat}", "{type: close_connection, when: before, max_freeze: 1s}"), "", "max_freeze does not apply to a close_connection"},
 		{"a mode on a freeze", rule("{operation: stat}", "{type: freeze_connection, when: before, mode: rst, max_freeze: 1s}"), "", "mode does not apply to a freeze_connection"},
 		{"a connection action without when", rule("{operation: stat}", "{type: close_subsystem}"), "", "when is required: before the server acts, or after"},

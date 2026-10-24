@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -140,6 +141,83 @@ func TestStallEndsAtReleaseOrLimit(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestReleasedEndsTheStallsAndFreezesInProgress(t *testing.T) {
+	tests := []struct {
+		name   string
+		action sftpproxy.Action
+		// early is set if the release comes before the request, when
+		// Released has a fresh channel for it.
+		early bool
+		want  time.Duration
+		log   string
+	}{
+		{name: "a stall before", action: sftpproxy.Stall{When: sftpproxy.Before, Limit: 4 * time.Second}, want: time.Second, log: `msg="fault released"`},
+		{name: "a stall after", action: sftpproxy.Stall{When: sftpproxy.After, Limit: 4 * time.Second}, want: time.Second, log: `msg="fault released"`},
+		{name: "a stall that begins after the release", action: sftpproxy.Stall{When: sftpproxy.Before, Limit: 4 * time.Second}, early: true, want: 4 * time.Second, log: `msg="fault ended at its limit"`},
+		{name: "a delay", action: sftpproxy.Delay{When: sftpproxy.Before, Duration: 3 * time.Second}, want: 3 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var logs syncBuffer
+				var mu sync.Mutex
+				current := make(chan struct{})
+				release := func() {
+					mu.Lock()
+					defer mu.Unlock()
+					close(current)
+					current = make(chan struct{})
+				}
+				p, fb := startProxyOnFake(t, sftpproxy.Options{
+					Faults: onPath("/a", tt.action),
+					Released: func() <-chan struct{} {
+						mu.Lock()
+						defer mu.Unlock()
+						return current
+					},
+					Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+				})
+				if tt.early {
+					release()
+				}
+				start := time.Now()
+				p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
+				if !tt.early {
+					time.AfterFunc(time.Second, release)
+				}
+				fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
+				p.client.assertReplies(t, 1)
+				if got := time.Since(start); got != tt.want {
+					t.Errorf("the reply came after %v, want %v", got, tt.want)
+				}
+				if tt.log != "" && !strings.Contains(logs.String(), tt.log) {
+					t.Errorf("logs lack %s:\n%s", tt.log, logs.String())
+				}
+			})
+		})
+	}
+}
+
+func TestReleasedClosesAFrozenConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		released := make(chan struct{})
+		p, _ := startProxyOnFake(t, sftpproxy.Options{
+			Faults:   onPath("/a", sftpproxy.Freeze{When: sftpproxy.Before, Limit: time.Minute}),
+			Released: func() <-chan struct{} { return released },
+		})
+		start := time.Now()
+		p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
+		time.AfterFunc(time.Second, func() { close(released) })
+		p.client.assertClosed(t)
+		if got := time.Since(start); got != time.Second {
+			t.Errorf("the frozen connection closed after %v, want 1s", got)
+		}
+		if got := p.conn.events(); !slices.Equal(got, []string{"freeze", "close"}) {
+			t.Errorf("connection events = %v, want it frozen, then closed", got)
+		}
+	})
 }
 
 func TestFailBeforeAnswersWithoutTheBackend(t *testing.T) {

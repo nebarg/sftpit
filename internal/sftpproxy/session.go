@@ -74,6 +74,11 @@ type Options struct {
 	// passed fires as it arrives.
 	MoreTimers <-chan Timer
 
+	// Released, if set, is called as each Stall or Freeze begins, and
+	// returns a channel that is closed to release the stalls and freezes
+	// then in progress, as their own Release does.
+	Released func() <-chan struct{}
+
 	// Conn is the client's connection, which Drop and Freeze act on. It is
 	// required if Faults, Timers or MoreTimers can give either.
 	Conn Conn
@@ -150,6 +155,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		listener:  opts.Listener,
 		order:     opts.ReplyOrder,
 		snapshot:  opts.Snapshot,
+		released:  opts.Released,
 		logger:    opts.Logger,
 		replies:   make(chan slot, maxQueuedReplies),
 		moments:   make(chan *request),
@@ -198,6 +204,7 @@ type session struct {
 	listener  Listener
 	order     ReplyOrder
 	snapshot  func(string) (Snapshot, error)
+	released  func() <-chan struct{}
 	logger    *slog.Logger
 	tracker   *tracker
 
@@ -717,19 +724,28 @@ func (s *session) fire(m *request, reserve func() bool) {
 	}
 }
 
-// hold waits until limit passes or release is closed. It returns errStopped
-// if the session ends first. A Delay that lasts its Duration has run its
-// course, so only a Stall or Freeze reaching its limit is logged.
+// hold waits until limit passes or release is closed, or for a Stall or
+// Freeze, until Options.Released releases it. It returns errStopped if the
+// session ends first. A Delay that lasts its Duration has run its course,
+// so only a Stall or Freeze reaching its limit is logged.
 func (s *session) hold(req *request, limit time.Duration, release <-chan struct{}) error {
+	_, delay := req.action.(Delay)
+	var released <-chan struct{}
+	if !delay && s.released != nil {
+		released = s.released()
+	}
 	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		if _, delay := req.action.(Delay); release != nil && !delay {
+		if (release != nil || released != nil) && !delay {
 			s.logger.Info("fault ended at its limit", s.faultAttrs(req)...)
 		}
 		return nil
 	case <-release:
+		s.logger.Info("fault released", s.faultAttrs(req)...)
+		return nil
+	case <-released:
 		s.logger.Info("fault released", s.faultAttrs(req)...)
 		return nil
 	case <-s.done:

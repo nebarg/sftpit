@@ -33,6 +33,10 @@ var (
 	// ErrSeedWithoutScenario reports a reset that pins a seed for a run
 	// without a scenario.
 	ErrSeedWithoutScenario = errors.New("a seed needs a scenario, whose random decisions it pins")
+
+	// ErrTwoScenarios reports a reset that both names a scenario and gives
+	// an inline one.
+	ErrTwoScenarios = errors.New("a reset names a scenario or gives one inline, not both")
 )
 
 // Options configure a Manager.
@@ -92,6 +96,10 @@ type activeRun struct {
 	handler sshfront.Handler
 	hooks   sshfront.Hooks
 
+	// startRules are the rules the run started with, which a reset that
+	// repeats an inline scenario starts the next run with.
+	startRules []faults.Rule
+
 	// stops stop the timers armed for the run: those it started with, and
 	// those of each change of its rules.
 	stops []func()
@@ -121,11 +129,11 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if m.srv, err = sshfront.New(cfg); err != nil {
 		return nil, err
 	}
-	scenario, err := m.scenario(opts.Scenario, opts.Seed)
+	first, err := m.scenario(opts.Scenario, opts.Seed)
 	if err != nil {
 		return nil, err
 	}
-	if m.current, err = m.begin(scenario); err != nil {
+	if m.current, err = m.begin(first); err != nil {
 		return nil, err
 	}
 	m.current.stops = append(m.current.stops, ArmTimers(m.current.rules, m.srv, logger))
@@ -155,13 +163,23 @@ type ResetRequest struct {
 	Run string
 
 	// Scenario, if set, names the next run's scenario, or is "" for a run
-	// without faults. Nil repeats the current run's scenario, and its seed
-	// if that was pinned.
+	// without faults. If neither Scenario nor Inline is set, the next run
+	// repeats the current run's scenario, and its seed if that was pinned.
 	Scenario *string
+
+	// Inline, if set, is the next run's scenario, given in place of one the
+	// configuration names.
+	Inline *InlineScenario
 
 	// Seed, if set, pins the next run's random decisions. Otherwise the
 	// scenario's own seed does, or the run draws a fresh seed.
 	Seed *faults.Seed
+}
+
+// InlineScenario is a scenario given at a reset rather than named in the
+// configuration.
+type InlineScenario struct {
+	Rules []faults.Rule
 }
 
 // Reset ends the current run and starts the run that req chooses. It first
@@ -179,7 +197,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
 	if req.Run != "" && req.Run != current.run.ID {
 		return nil, staleRun(current, req.Run)
 	}
-	scenario, err := m.next(current.run.Scenario, req)
+	chosen, err := m.next(current, req)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +205,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
 	m.mu.Lock()
 	m.inReset = true
 	m.mu.Unlock()
-	next, err := m.restart(ctx, current, scenario)
+	next, err := m.restart(ctx, current, chosen)
 	m.mu.Lock()
 	m.inReset = false
 	if err != nil {
@@ -206,7 +224,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
 	}
 	m.srv.Resume()
 	next.stops = append(next.stops, ArmTimers(next.rules, m.srv, m.logger))
-	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(scenario)...)...)
+	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(chosen.scenario)...)...)
 	return next.run, nil
 }
 
@@ -241,6 +259,18 @@ func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule) 
 	return current.rules.Rules(), nil
 }
 
+// ReleaseStalls releases the stalls and freezes in progress in run, which
+// must be the current run, as faults.Engine.ReleaseStalls does, or else
+// fails with ErrStaleRun.
+func (m *Manager) ReleaseStalls(run string) error {
+	current := m.active()
+	if run != current.run.ID {
+		return staleRun(current, run)
+	}
+	current.rules.ReleaseStalls()
+	return nil
+}
+
 // Users returns the users that the Manager's server accepts, which rules
 // may refer to.
 func (m *Manager) Users() []sshfront.User { return m.opts.Server.Users }
@@ -249,14 +279,14 @@ func staleRun(current *activeRun, run string) error {
 	return fmt.Errorf("runs: %w: the current run is %s, not %s", ErrStaleRun, current.run.ID, run)
 }
 
-// restart ends current's timers and connections, and begins a run of
-// scenario once every session of current has finished.
-func (m *Manager) restart(ctx context.Context, current *activeRun, scenario Scenario) (*activeRun, error) {
+// restart ends current's timers and connections, and begins the chosen run
+// once every session of current has finished.
+func (m *Manager) restart(ctx context.Context, current *activeRun, chosen choice) (*activeRun, error) {
 	current.stopTimers()
 	if err := m.srv.Pause(ctx); err != nil {
 		return nil, fmt.Errorf("runs: wait for the run's sessions to finish: %w", err)
 	}
-	return m.begin(scenario)
+	return m.begin(chosen)
 }
 
 // State says whether clients can reach the current run.
@@ -309,26 +339,41 @@ func (m *Manager) Status() Status {
 	return s
 }
 
-// next chooses the scenario of the run after one of current, as req asks.
-func (m *Manager) next(current Scenario, req ResetRequest) (Scenario, error) {
-	if req.Scenario != nil {
+// choice is the scenario chosen for a run, with the rules it starts with.
+type choice struct {
+	scenario Scenario
+	rules    []faults.Rule
+}
+
+// next chooses the scenario of the run after current, as req asks.
+func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
+	switch {
+	case req.Scenario != nil && req.Inline != nil:
+		return choice{}, fmt.Errorf("runs: %w", ErrTwoScenarios)
+	case req.Scenario != nil:
 		return m.scenario(*req.Scenario, req.Seed)
+	case req.Inline != nil:
+		return inline(req.Inline.Rules, req.Seed)
 	}
+	last := current.run.Scenario
 	seed := req.Seed
-	if seed == nil && current.Pinned {
-		seed = &current.Seed
+	if seed == nil && last.Pinned {
+		seed = &last.Seed
 	}
-	return m.scenario(current.Name, seed)
+	if last.Inline {
+		return inline(current.startRules, seed)
+	}
+	return m.scenario(last.Name, seed)
 }
 
 // scenario chooses a run of the scenario name, whose random decisions seed
 // pins if set, or else the scenario's own seed or a fresh one.
-func (m *Manager) scenario(name string, seed *faults.Seed) (Scenario, error) {
+func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
 	if name == "" {
 		if seed != nil {
-			return Scenario{}, fmt.Errorf("runs: %w", ErrSeedWithoutScenario)
+			return choice{}, fmt.Errorf("runs: %w", ErrSeedWithoutScenario)
 		}
-		return Scenario{Seed: faults.RandomSeed()}, nil
+		return choice{scenario: Scenario{Seed: faults.RandomSeed()}}, nil
 	}
 	s, ok := m.opts.Scenarios[name]
 	if !ok {
@@ -336,19 +381,31 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (Scenario, error) {
 		if len(m.opts.Scenarios) > 0 {
 			defined = strings.Join(slices.Sorted(maps.Keys(m.opts.Scenarios)), ", ")
 		}
-		return Scenario{}, fmt.Errorf("runs: %w %q; the configuration defines %s", ErrUnknownScenario, name, defined)
+		return choice{}, fmt.Errorf("runs: %w %q; the configuration defines %s", ErrUnknownScenario, name, defined)
 	}
 	if seed = cmp.Or(seed, s.Seed); seed != nil {
-		return Scenario{Name: name, Seed: *seed, Pinned: true}, nil
+		return choice{scenario: Scenario{Name: name, Seed: *seed, Pinned: true}, rules: s.Rules}, nil
 	}
-	return Scenario{Name: name, Seed: faults.RandomSeed()}, nil
+	return choice{scenario: Scenario{Name: name, Seed: faults.RandomSeed()}, rules: s.Rules}, nil
 }
 
-// begin starts a run of scenario in the workspace, with its files restored
+// inline chooses a run of an inline scenario of rules, whose random
+// decisions seed pins if set, or else a fresh seed.
+func inline(rules []faults.Rule, seed *faults.Seed) (choice, error) {
+	if err := faults.Check(rules); err != nil {
+		return choice{}, fmt.Errorf("runs: %w", err)
+	}
+	if seed != nil {
+		return choice{scenario: Scenario{Inline: true, Seed: *seed, Pinned: true}, rules: rules}, nil
+	}
+	return choice{scenario: Scenario{Inline: true, Seed: faults.RandomSeed()}, rules: rules}, nil
+}
+
+// begin starts the chosen run in the workspace, with its files restored
 // from the seed snapshot and a home directory for each user. Its timers are
 // not armed yet.
-func (m *Manager) begin(scenario Scenario) (_ *activeRun, err error) {
-	run, err := m.workspace.NewRun(scenario)
+func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
+	run, err := m.workspace.NewRun(chosen.scenario)
 	if err != nil {
 		return nil, err
 	}
@@ -378,16 +435,17 @@ func (m *Manager) begin(scenario Scenario) (_ *activeRun, err error) {
 
 	// A run without a scenario has an engine too, for rules applied to it
 	// later.
-	rules, err := faults.New(m.opts.Scenarios[scenario.Name].Rules, scenario.Seed, m.logger)
+	rules, err := faults.New(chosen.rules, chosen.scenario.Seed, m.logger)
 	if err != nil {
 		return nil, err
 	}
 	return &activeRun{
-		run:     run,
-		root:    root,
-		rules:   rules,
-		handler: Handler(run, embedded, rules, sftpproxy.Options{Logger: m.logger}),
-		hooks:   Hooks(rules, m.logger),
+		run:        run,
+		root:       root,
+		rules:      rules,
+		handler:    Handler(run, embedded, rules, sftpproxy.Options{Logger: m.logger}),
+		hooks:      Hooks(rules, m.logger),
+		startRules: chosen.rules,
 	}, nil
 }
 
@@ -421,7 +479,10 @@ func (m *Manager) hooks() sshfront.Hooks {
 
 // scenarioAttrs are the log attributes of a run of scenario.
 func scenarioAttrs(scenario Scenario) []any {
-	if scenario.Name == "" {
+	switch {
+	case scenario.Inline:
+		return []any{"inline", true, "seed", scenario.Seed, "seed_pinned", scenario.Pinned}
+	case scenario.Name == "":
 		return nil
 	}
 	return []any{"scenario", scenario.Name, "seed", scenario.Seed, "seed_pinned", scenario.Pinned}
