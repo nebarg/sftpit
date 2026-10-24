@@ -29,7 +29,7 @@ func TestHealthReadinessAndStatus(t *testing.T) {
 	want := map[string]any{
 		"sftp":    map[string]any{"state": "up"},
 		"backend": "embedded",
-		"run":     map[string]any{"id": m.Status().Run.ID, "scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true},
+		"run":     map[string]any{"id": m.Status().Run.ID, "scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1},
 	}
 	if code != http.StatusOK || !equalJSON(body, want) {
 		t.Errorf("status = %d %v, want %v", code, body, want)
@@ -49,12 +49,15 @@ func TestResetStartsTheNextRun(t *testing.T) {
 	tests := []struct {
 		body string
 		want map[string]any
+		// fresh is set if the next run draws a fresh seed, which want
+		// leaves out.
+		fresh bool
 	}{
-		{"", map[string]any{"scenario": "chaos", "seed": "7", "seed_pinned": true}},
-		{`{"seed": "8"}`, map[string]any{"scenario": "chaos", "seed": "8", "seed_pinned": true}},
-		{`{"seed": 18446744073709551615}`, map[string]any{"scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true}},
-		{`{"scenario": "own", "seed": null}`, map[string]any{"scenario": "own", "seed": "9", "seed_pinned": true}},
-		{`{"scenario": ""}`, map[string]any{}},
+		{"", map[string]any{"scenario": "chaos", "seed": "7", "seed_pinned": true, "revision": 1}, false},
+		{`{"seed": "8"}`, map[string]any{"scenario": "chaos", "seed": "8", "seed_pinned": true, "revision": 1}, false},
+		{`{"seed": 18446744073709551615}`, map[string]any{"scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1}, false},
+		{`{"scenario": "own", "seed": null}`, map[string]any{"scenario": "own", "seed": "9", "seed_pinned": true, "revision": 1}, false},
+		{`{"scenario": ""}`, map[string]any{"revision": 1}, true},
 	}
 	for _, tt := range tests {
 		before := m.Status().Run.ID
@@ -65,6 +68,9 @@ func TestResetStartsTheNextRun(t *testing.T) {
 		run := body["run"].(map[string]any)
 		id := run["id"]
 		delete(run, "id")
+		if seed, _ := run["seed"].(string); tt.fresh && seed != "" && strings.Trim(seed, "0123456789") == "" {
+			delete(run, "seed")
+		}
 		if id == before || id != m.Status().Run.ID || !equalJSON(run, tt.want) {
 			t.Errorf("reset with %q started run %v %v after %s, want a new run with %v", tt.body, id, run, before, tt.want)
 		}

@@ -33,7 +33,7 @@ func TestConnectionEventsMatchTheirOwnRules(t *testing.T) {
 	if got := e.Connect(faults.Client{Connection: 1}); got != nil {
 		t.Errorf("the first connect got %#v, want nothing", got)
 	}
-	if got := e.Connect(faults.Client{Connection: 2}); got != slowLogin {
+	if got := e.Connect(faults.Client{Connection: 2}); unreleased(got) != slowLogin {
 		t.Errorf("the second connect got %#v, want %#v", got, slowLogin)
 	}
 	if got := e.Authenticate(faults.Client{User: "test", Connection: 1}); got != nil {
@@ -88,7 +88,7 @@ func TestConnectionEventsDrawTheirDecisions(t *testing.T) {
 	first, again := logins(), logins()
 	var delayed int
 	for i, a := range first {
-		if a != again[i] {
+		if unreleased(a) != unreleased(again[i]) {
 			t.Errorf("login %d got %#v, then %#v from the same seed", i+1, a, again[i])
 		}
 		if d, ok := a.(sftpproxy.Delay); ok {
@@ -123,7 +123,7 @@ func TestConnectionEventsAreTimedFromTheRun(t *testing.T) {
 			if got := e.Connect(faults.Client{}); got != step.connect {
 				t.Errorf("a connect got %#v, want %#v", got, step.connect)
 			}
-			if got := e.Authenticate(faults.Client{User: "test"}); got != step.login {
+			if got := e.Authenticate(faults.Client{User: "test"}); unreleased(got) != step.login {
 				t.Errorf("a login got %#v, want %#v", got, step.login)
 			}
 		}

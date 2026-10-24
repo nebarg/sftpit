@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -28,29 +30,29 @@ type scenarioConfig struct {
 }
 
 type ruleConfig struct {
-	ID          string          `yaml:"id"`
-	Priority    int             `yaml:"priority"`
-	MaxTriggers int             `yaml:"max_triggers"`
-	Match       matchConfig     `yaml:"match"`
-	Trigger     *triggerConfig  `yaml:"trigger,omitempty"`
-	Decision    *decisionConfig `yaml:"decision,omitempty"`
-	Action      actionConfig    `yaml:"action"`
+	ID          string          `yaml:"id" json:"id"`
+	Priority    int             `yaml:"priority" json:"priority"`
+	MaxTriggers int             `yaml:"max_triggers" json:"max_triggers"`
+	Match       matchConfig     `yaml:"match" json:"match"`
+	Trigger     *triggerConfig  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	Decision    *decisionConfig `yaml:"decision,omitempty" json:"decision,omitempty"`
+	Action      actionConfig    `yaml:"action" json:"action"`
 
 	// A rule gives either a match and an action, or one recipe.
-	FailUpload      *failUploadConfig      `yaml:"fail_upload,omitempty"`
-	FailRandomly    *failRandomlyConfig    `yaml:"fail_randomly,omitempty"`
-	CorruptDownload *corruptDownloadConfig `yaml:"corrupt_download,omitempty"`
+	FailUpload      *failUploadConfig      `yaml:"fail_upload,omitempty" json:"fail_upload,omitempty"`
+	FailRandomly    *failRandomlyConfig    `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
+	CorruptDownload *corruptDownloadConfig `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
 }
 
 type triggerConfig struct {
-	At     *valueRange[string] `yaml:"at,omitempty"`
-	Window *windowConfig       `yaml:"window,flow,omitempty"`
-	Anchor string              `yaml:"anchor"`
+	At     *valueRange[string] `yaml:"at,omitempty" json:"at,omitempty"`
+	Window *windowConfig       `yaml:"window,flow,omitempty" json:"window,omitempty"`
+	Anchor string              `yaml:"anchor" json:"anchor"`
 }
 
 type windowConfig struct {
-	From  string `yaml:"from"`
-	Until string `yaml:"until"`
+	From  string `yaml:"from" json:"from"`
+	Until string `yaml:"until" json:"until"`
 }
 
 var anchors = map[string]faults.Anchor{
@@ -68,59 +70,59 @@ var connectionActions = []string{"close_connection", "freeze_connection", "close
 var eventActions = []string{"delay", "close_connection", "freeze_connection", "listener_down"}
 
 type decisionConfig struct {
-	Probability *float64 `yaml:"probability,omitempty"`
-	Scope       string   `yaml:"scope,omitempty"`
+	Probability *float64 `yaml:"probability,omitempty" json:"probability,omitempty"`
+	Scope       string   `yaml:"scope,omitempty" json:"scope,omitempty"`
 }
 
 type matchConfig struct {
-	User           string     `yaml:"user,omitempty"`
-	KeyFingerprint string     `yaml:"key_fingerprint,omitempty"`
-	Operation      stringList `yaml:"operation,omitempty"`
+	User           string     `yaml:"user,omitempty" json:"user,omitempty"`
+	KeyFingerprint string     `yaml:"key_fingerprint,omitempty" json:"key_fingerprint,omitempty"`
+	Operation      stringList `yaml:"operation,omitempty" json:"operation,omitempty"`
 
-	Path         string `yaml:"path,omitempty"`
-	PathPrefix   string `yaml:"path_prefix,omitempty"`
-	PathGlob     string `yaml:"path_glob,omitempty"`
-	Filename     string `yaml:"filename,omitempty"`
-	FilenameGlob string `yaml:"filename_glob,omitempty"`
+	Path         string `yaml:"path,omitempty" json:"path,omitempty"`
+	PathPrefix   string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
+	PathGlob     string `yaml:"path_glob,omitempty" json:"path_glob,omitempty"`
+	Filename     string `yaml:"filename,omitempty" json:"filename,omitempty"`
+	FilenameGlob string `yaml:"filename_glob,omitempty" json:"filename_glob,omitempty"`
 
-	Source             string `yaml:"source,omitempty"`
-	SourcePrefix       string `yaml:"source_prefix,omitempty"`
-	SourceGlob         string `yaml:"source_glob,omitempty"`
-	SourceFilename     string `yaml:"source_filename,omitempty"`
-	SourceFilenameGlob string `yaml:"source_filename_glob,omitempty"`
+	Source             string `yaml:"source,omitempty" json:"source,omitempty"`
+	SourcePrefix       string `yaml:"source_prefix,omitempty" json:"source_prefix,omitempty"`
+	SourceGlob         string `yaml:"source_glob,omitempty" json:"source_glob,omitempty"`
+	SourceFilename     string `yaml:"source_filename,omitempty" json:"source_filename,omitempty"`
+	SourceFilenameGlob string `yaml:"source_filename_glob,omitempty" json:"source_filename_glob,omitempty"`
 
-	Target             string `yaml:"target,omitempty"`
-	TargetPrefix       string `yaml:"target_prefix,omitempty"`
-	TargetGlob         string `yaml:"target_glob,omitempty"`
-	TargetFilename     string `yaml:"target_filename,omitempty"`
-	TargetFilenameGlob string `yaml:"target_filename_glob,omitempty"`
+	Target             string `yaml:"target,omitempty" json:"target,omitempty"`
+	TargetPrefix       string `yaml:"target_prefix,omitempty" json:"target_prefix,omitempty"`
+	TargetGlob         string `yaml:"target_glob,omitempty" json:"target_glob,omitempty"`
+	TargetFilename     string `yaml:"target_filename,omitempty" json:"target_filename,omitempty"`
+	TargetFilenameGlob string `yaml:"target_filename_glob,omitempty" json:"target_filename_glob,omitempty"`
 
-	Attempt    *attemptConfig `yaml:"attempt,omitempty"`
-	Occurrence []uint64       `yaml:"occurrence,flow,omitempty"`
+	Attempt    *attemptConfig `yaml:"attempt,omitempty" json:"attempt,omitempty"`
+	Occurrence []uint64       `yaml:"occurrence,flow,omitempty" json:"occurrence,omitempty"`
 }
 
 type attemptConfig struct {
-	Per     []string `yaml:"per,flow,omitempty"`
-	Numbers []uint64 `yaml:"numbers,flow,omitempty"`
+	Per     []string `yaml:"per,flow,omitempty" json:"per,omitempty"`
+	Numbers []uint64 `yaml:"numbers,flow,omitempty" json:"numbers,omitempty"`
 }
 
 // actionConfig holds the fields of every action type. Each type allows only
 // its own fields.
 type actionConfig struct {
-	Type          string              `yaml:"type"`
-	When          string              `yaml:"when,omitempty"`
-	Duration      *valueRange[string] `yaml:"duration,omitempty"`
-	CutoffOffset  *valueRange[uint64] `yaml:"cutoff_offset,omitempty"`
-	Result        string              `yaml:"result,omitempty"`
-	Status        string              `yaml:"status,omitempty"`
-	Mode          string              `yaml:"mode,omitempty"`
-	MaxFreeze     string              `yaml:"max_freeze,omitempty"`
-	Transform     string              `yaml:"transform,omitempty"`
-	Offset        *uint64             `yaml:"offset,omitempty"`
-	Length        *uint64             `yaml:"length,omitempty"`
-	Size          *uint64             `yaml:"size,omitempty"`
-	SizeDelta     *int64              `yaml:"size_delta,omitempty"`
-	CloseExisting *bool               `yaml:"close_existing,omitempty"`
+	Type          string              `yaml:"type" json:"type"`
+	When          string              `yaml:"when,omitempty" json:"when,omitempty"`
+	Duration      *valueRange[string] `yaml:"duration,omitempty" json:"duration,omitempty"`
+	CutoffOffset  *valueRange[uint64] `yaml:"cutoff_offset,omitempty" json:"cutoff_offset,omitempty"`
+	Result        string              `yaml:"result,omitempty" json:"result,omitempty"`
+	Status        string              `yaml:"status,omitempty" json:"status,omitempty"`
+	Mode          string              `yaml:"mode,omitempty" json:"mode,omitempty"`
+	MaxFreeze     string              `yaml:"max_freeze,omitempty" json:"max_freeze,omitempty"`
+	Transform     string              `yaml:"transform,omitempty" json:"transform,omitempty"`
+	Offset        *uint64             `yaml:"offset,omitempty" json:"offset,omitempty"`
+	Length        *uint64             `yaml:"length,omitempty" json:"length,omitempty"`
+	Size          *uint64             `yaml:"size,omitempty" json:"size,omitempty"`
+	SizeDelta     *int64              `yaml:"size_delta,omitempty" json:"size_delta,omitempty"`
+	CloseExisting *bool               `yaml:"close_existing,omitempty" json:"close_existing,omitempty"`
 }
 
 // valueRange is a value, such as 2s, or a range to draw one from for each
@@ -161,6 +163,39 @@ func (r *valueRange[T]) UnmarshalYAML(n *yaml.Node) error {
 	}
 	if !hasMin || !hasMax {
 		return fmt.Errorf("line %d: a range needs both min and max", n.Line)
+	}
+	r.ranged = true
+	return nil
+}
+
+func (r *valueRange[T]) UnmarshalJSON(b []byte) error {
+	if !bytes.HasPrefix(b, []byte("{")) {
+		var v T
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		*r = valueRange[T]{Min: v, Max: v}
+		return nil
+	}
+	var bounds map[string]json.RawMessage
+	if err := json.Unmarshal(b, &bounds); err != nil {
+		return err
+	}
+	for _, key := range slices.Sorted(maps.Keys(bounds)) {
+		if key != "min" && key != "max" {
+			return fmt.Errorf("a range has min and max, not %s", key)
+		}
+	}
+	lo, hasMin := bounds["min"]
+	hi, hasMax := bounds["max"]
+	if !hasMin || !hasMax {
+		return errors.New("a range needs both min and max")
+	}
+	if err := json.Unmarshal(lo, &r.Min); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(hi, &r.Max); err != nil {
+		return err
 	}
 	r.ranged = true
 	return nil
@@ -210,9 +245,22 @@ func scenarios(defined map[string]scenarioConfig, selected string, users []sshfr
 }
 
 func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rule, error) {
+	rules, err := parseRules(field+".", s.Faults, users)
+	if err != nil {
+		return nil, err
+	}
+	if err := faults.Check(rules); err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	return rules, nil
+}
+
+// parseRules returns the rules that rcs give, naming each in errors as
+// prefix followed by faults and its index.
+func parseRules(prefix string, rcs []ruleConfig, users []sshfront.User) ([]faults.Rule, error) {
 	var rules []faults.Rule
-	for i, rc := range s.Faults {
-		field := fmt.Sprintf("%s.faults[%d]", field, i)
+	for i, rc := range rcs {
+		field := fmt.Sprintf("%sfaults[%d]", prefix, i)
 		if !namePattern.MatchString(rc.ID) {
 			return nil, fmt.Errorf("%s: id %q must hold only lowercase letters, digits and -, starting with a letter or digit", field, rc.ID)
 		}
@@ -229,9 +277,6 @@ func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rul
 			return nil, fmt.Errorf("%s: %w", field, err)
 		}
 		rules = append(rules, r)
-	}
-	if err := faults.Check(rules); err != nil {
-		return nil, fmt.Errorf("%s: %w", field, err)
 	}
 	return rules, nil
 }

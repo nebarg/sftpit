@@ -244,6 +244,47 @@ func TestEndSessionClosesTheSessionAfterEarlierReplies(t *testing.T) {
 	}
 }
 
+func TestMoreTimersArriveDuringTheSession(t *testing.T) {
+	tests := []struct {
+		name  string
+		at    time.Duration
+		ended time.Duration
+	}{
+		{"a moment to come", 2 * time.Second, 2 * time.Second},
+		{"a moment that has passed", 0, time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				more := make(chan sftpproxy.Timer)
+				start := time.Now()
+				p, _ := startProxyOnFake(t, sftpproxy.Options{MoreTimers: more})
+				time.Sleep(time.Second)
+				more <- sftpproxy.Timer{At: start.Add(tt.at), Action: sftpproxy.Drop{}}
+				p.client.assertClosed(t)
+				if got := time.Since(start); got != tt.ended {
+					t.Errorf("the session ended after %v, want %v", got, tt.ended)
+				}
+				if got := p.conn.events(); !slices.Equal(got, []string{"close"}) {
+					t.Errorf("connection events = %v, want the connection closed", got)
+				}
+			})
+		})
+	}
+}
+
+func TestASessionCarriesOnWhenMoreTimersCloses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		more := make(chan sftpproxy.Timer)
+		p, fb := startProxyOnFake(t, sftpproxy.Options{MoreTimers: more})
+		close(more)
+		synctest.Wait()
+		p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
+		fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
+		p.client.assertReplies(t, 1)
+	})
+}
+
 func TestUnusableTimersEndTheSession(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -270,6 +311,24 @@ func TestUnusableTimersEndTheSession(t *testing.T) {
 				}
 				result := serveInBackground(t.Context(), proxyEnd, backend, opts)
 				newRawClient(clientEnd).init(t, 3)
+				if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
+				}
+			})
+		})
+		t.Run(tt.name+" delivered later", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				_, backend := startFakeBackend(t, openSSHVersion, "/")
+				clientEnd, proxyEnd := net.Pipe()
+				t.Cleanup(func() { clientEnd.Close() })
+				more := make(chan sftpproxy.Timer, 1)
+				opts := sftpproxy.Options{MoreTimers: more, Logger: slog.New(slog.DiscardHandler)}
+				if tt.conn {
+					opts.Conn = &fakeConn{stream: proxyEnd}
+				}
+				result := serveInBackground(t.Context(), proxyEnd, backend, opts)
+				newRawClient(clientEnd).init(t, 3)
+				more <- sftpproxy.Timer{At: time.Now().Add(time.Hour), Action: tt.action}
 				if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
 					t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
 				}

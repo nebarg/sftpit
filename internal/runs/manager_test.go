@@ -90,8 +90,8 @@ func TestResetChoosesTheNextRunsScenarioAndSeed(t *testing.T) {
 		{name: "a named scenario draws afresh", scenario: "chaos", seed: seedOf(7), req: ResetRequest{Scenario: nameOf("chaos")}, fresh: true, want: Scenario{Name: "chaos"}},
 		{name: "a named scenario has its own seed", scenario: "chaos", seed: seedOf(7), req: ResetRequest{Scenario: nameOf("own")}, want: Scenario{Name: "own", Seed: 9, Pinned: true}},
 		{name: "a named scenario with a seed", scenario: "chaos", req: ResetRequest{Scenario: nameOf("own"), Seed: seedOf(5)}, want: Scenario{Name: "own", Seed: 5, Pinned: true}},
-		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: nameOf("")}, want: Scenario{}},
-		{name: "still no scenario", want: Scenario{}},
+		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: nameOf("")}, fresh: true, want: Scenario{}},
+		{name: "still no scenario", fresh: true, want: Scenario{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

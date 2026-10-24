@@ -45,6 +45,21 @@ func session(e *faults.Engine, user, key string) func(sftpproxy.Request) sftppro
 	return e.Session(faults.Client{User: user, KeyFingerprint: key}).Decide
 }
 
+// unreleased returns a without the release that the engine gives a delay or
+// freeze, which ends it once its rule is removed, so that it can be compared
+// with the rule's own action.
+func unreleased(a sftpproxy.Action) sftpproxy.Action {
+	switch a := a.(type) {
+	case sftpproxy.Delay:
+		a.Release = nil
+		return a
+	case sftpproxy.Freeze:
+		a.Release = nil
+		return a
+	}
+	return a
+}
+
 func failOn(id string, m faults.Match) faults.Rule {
 	return faults.Rule{ID: id, Match: m, Action: failure}
 }
@@ -391,7 +406,7 @@ func TestRangesDrawAValueForEachDecision(t *testing.T) {
 	for i := range uint64(20) {
 		key := faults.Key{Rule: "slow", Choice: "duration", User: "test", Path: "/f", Operation: "stat", Ordinal: i + 1}
 		want := sftpproxy.Delay{When: sftpproxy.After, Duration: faults.Between(testSeed.Draw(key), durations.Min, durations.Max)}
-		if got := decide(on(&sftpwire.Stat{}, "/f")); got != want {
+		if got := decide(on(&sftpwire.Stat{}, "/f")); unreleased(got) != want {
 			t.Fatalf("stat %d got %#v, want %#v", i+1, got, want)
 		}
 		seen[want.Duration] = true
@@ -437,7 +452,7 @@ func TestEachOperationCountsItsOwnDraws(t *testing.T) {
 	for _, r := range requests {
 		key := faults.Key{Rule: "slow", Choice: "duration", User: "test", Path: "/f", Operation: r.op, Ordinal: r.ordinal}
 		want := sftpproxy.Delay{Duration: faults.Between(testSeed.Draw(key), durations.Min, durations.Max)}
-		if got := decide(on(r.packet, "/f")); got != want {
+		if got := decide(on(r.packet, "/f")); unreleased(got) != want {
 			t.Errorf("%s %d got %#v, want %#v", r.op, r.ordinal, got, want)
 		}
 	}

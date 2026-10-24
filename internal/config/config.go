@@ -12,6 +12,7 @@ package config
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -196,6 +197,23 @@ func (l *stringList) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	}
 	return fmt.Errorf("line %d: expected a path or a list of paths", n.Line)
+}
+
+func (l *stringList) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*l = stringList{s}
+		return nil
+	}
+	var ss []string
+	if err := json.Unmarshal(b, &ss); err != nil {
+		return errors.New("expected a string or a list of strings")
+	}
+	*l = ss
+	return nil
 }
 
 // MarshalYAML writes a list of one as a single string.

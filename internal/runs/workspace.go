@@ -194,24 +194,26 @@ type Run struct {
 	Scenario Scenario
 }
 
-// Scenario is the scenario whose faults a run injects.
+// Scenario is the scenario whose faults a run starts with.
 type Scenario struct {
-	// Name names the scenario, or is "" for a run without faults.
+	// Name names the scenario, or is "" for a run that starts without
+	// faults.
 	Name string
 
-	// Seed fixes the scenario's random decisions in the run, and Pinned
-	// reports whether it was given rather than drawn for the run.
+	// Seed fixes the run's random decisions, those of rules applied during
+	// the run included, and Pinned reports whether it was given rather than
+	// drawn for the run.
 	Seed   faults.Seed
 	Pinned bool
 }
 
 // runRecord is the content of a run's run.json.
 type runRecord struct {
-	ID         string       `json:"id"`
-	Started    time.Time    `json:"started"`
-	Scenario   string       `json:"scenario,omitempty"`
-	Seed       *faults.Seed `json:"seed,omitempty"`
-	SeedPinned bool         `json:"seed_pinned,omitempty"`
+	ID         string      `json:"id"`
+	Started    time.Time   `json:"started"`
+	Scenario   string      `json:"scenario,omitempty"`
+	Seed       faults.Seed `json:"seed"`
+	SeedPinned bool        `json:"seed_pinned,omitempty"`
 }
 
 // runIDPattern matches the IDs NewRun gives. They sort in the order the
@@ -230,10 +232,7 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	if err := w.root.MkdirAll(filepath.Join(dir, "fs"), 0o700); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
-	record := runRecord{ID: id, Started: started}
-	if scenario.Name != "" {
-		record.Scenario, record.Seed, record.SeedPinned = scenario.Name, &scenario.Seed, scenario.Pinned
-	}
+	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Seed: scenario.Seed, SeedPinned: scenario.Pinned}
 	b, err := json.MarshalIndent(record, "", "  ")
 	if err == nil {
 		err = w.root.WriteFile(filepath.Join(dir, "run.json"), append(b, '\n'), 0o600)

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -12,17 +14,28 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
+// ErrStaleRevision reports a change of rules that expects to replace a
+// revision that is no longer current.
+var ErrStaleRevision = errors.New("stale revision")
+
 // Engine applies the rules of a scenario to the requests of one run, which
 // starts when the engine is made. Each rule counts the requests it matches
-// from the start of the run, and draws its random decisions from the run's
-// seed. Its methods are safe for concurrent use.
+// from the start of the run, or from the change that applied it, and draws
+// its random decisions from the run's seed. Its methods are safe for
+// concurrent use.
 type Engine struct {
 	seed   Seed
-	start  time.Time
 	logger *slog.Logger
 
-	mu    sync.Mutex
+	mu sync.Mutex
+	// revision numbers the rules: 1 for those the run starts with, and one
+	// more for each change.
+	revision uint64
+	// rules are in the order they are tried.
 	rules []*rule
+	// sessions are the sessions that have not ended, which the rules a
+	// change applies are timed for.
+	sessions map[*Session]struct{}
 
 	// timers are the faults at moments of the run itself.
 	timers []sftpproxy.Timer
@@ -33,6 +46,16 @@ type rule struct {
 	Rule
 	ops    []Operation
 	counts Counts
+
+	// activation is the revision that applied the rule, or 0 for a rule the
+	// run started with, and start is when it was applied, which a trigger
+	// anchored to the run measures from.
+	activation uint64
+	start      time.Time
+
+	// removed is closed once a change removes the rule, which ends the
+	// waits it holds.
+	removed chan struct{}
 
 	// attempts counts the opens of each user, path or both, for a rule with
 	// an Attempt.
@@ -106,40 +129,154 @@ func New(rules []Rule, seed Seed, logger *slog.Logger) (*Engine, error) {
 	if err := Check(rules); err != nil {
 		return nil, err
 	}
-	e := &Engine{seed: seed, start: time.Now(), logger: logger}
+	e := &Engine{seed: seed, logger: logger, revision: 1, sessions: make(map[*Session]struct{})}
+	start := time.Now()
 	for _, r := range rules {
-		ru := &rule{
-			Rule:        r,
-			ops:         r.selectedAt(),
-			attempts:    make(map[attemptKey]uint64),
-			connections: make(map[uint64]*connectionMoment),
-			users:       make(map[string]uint64),
-		}
-		if r.Probability != nil || r.Duration != nil || r.Cutoff != nil || r.Trigger != nil {
-			ru.draws = make(map[drawKey]uint64)
-		}
-		e.rules = append(e.rules, ru)
+		e.rules = append(e.rules, newRule(r, 0, start))
 	}
-	slices.SortStableFunc(e.rules, func(a, b *rule) int { return cmp.Compare(a.Priority, b.Priority) })
-	for _, ru := range e.rules {
+	slices.SortStableFunc(e.rules, byPriority)
+	e.timers = e.runTimers(e.rules)
+	return e, nil
+}
+
+func newRule(r Rule, activation uint64, start time.Time) *rule {
+	ru := &rule{
+		Rule:        r,
+		ops:         r.selectedAt(),
+		activation:  activation,
+		start:       start,
+		removed:     make(chan struct{}),
+		attempts:    make(map[attemptKey]uint64),
+		connections: make(map[uint64]*connectionMoment),
+		users:       make(map[string]uint64),
+	}
+	if r.Probability != nil || r.Duration != nil || r.Cutoff != nil || r.Trigger != nil {
+		ru.draws = make(map[drawKey]uint64)
+	}
+	return ru
+}
+
+func byPriority(a, b *rule) int { return cmp.Compare(a.Priority, b.Priority) }
+
+// runTimers returns the timers of those of rules that take the listener
+// down at a moment of the run. e.mu must be held, or e not yet shared.
+func (e *Engine) runTimers(rules []*rule) []sftpproxy.Timer {
+	var timers []sftpproxy.Timer
+	for _, ru := range rules {
 		if !ru.timedByRun() {
 			continue
 		}
 		ru.counts.Matched++
 		ru.counts.Selected++
 		after := e.runMoment(ru)
-		action, drawn := e.drawn(ru, Key{Rule: ru.ID, Ordinal: 1})
+		action, drawn := e.drawn(ru, Key{Rule: ru.ID, Activation: ru.activation, Ordinal: 1})
 		attrs := append([]any{"rule", ru.ID, "anchor", Run, "at", after}, drawn...)
-		e.timers = append(e.timers, sftpproxy.Timer{At: e.start.Add(after), Action: action, Reserve: e.reserve(ru, attrs, nil)})
+		timers = append(timers, sftpproxy.Timer{At: ru.start.Add(after), Action: action, Reserve: e.reserveMoment(ru, attrs, nil)})
 	}
-	return e, nil
+	return timers
 }
 
 // Timers returns the faults at moments of the run that act on the listener
 // rather than on a session, ListenerDowns, for the run to take whatever its
-// sessions are doing.
+// sessions are doing. Replace returns those of the rules it applies.
 func (e *Engine) Timers() []sftpproxy.Timer {
 	return e.timers
+}
+
+// Replace replaces the engine's rules with rules, all at once between two
+// requests, as the next revision, if revision is still the current one.
+//
+// A rule with the ID and the definition of a current rule carries on as it
+// was, with its counts, ordinals and moments. Any other rule starts from
+// now: its attempts and occurrences count from the change, and a trigger
+// anchored to the run measures from it. A rule that is no longer there ends
+// the delays and freezes it holds at once, and none of its moments come,
+// but a transfer that it selected keeps its fault, so that a download is
+// never corrupted only in part.
+//
+// Every session that has not ended is timed for the rules that start from
+// now, as a session that starts now would be, through its MoreTimers.
+// Replace returns the timers of those rules that take the listener down at
+// a moment of the run, for the run to take as it takes Timers.
+func (e *Engine) Replace(revision uint64, rules []Rule) ([]sftpproxy.Timer, error) {
+	if err := Check(rules); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if revision != e.revision {
+		return nil, fmt.Errorf("faults: %w: the current revision is %d, not %d", ErrStaleRevision, e.revision, revision)
+	}
+	e.revision++
+	current := make(map[string]*rule, len(e.rules))
+	for _, ru := range e.rules {
+		current[ru.ID] = ru
+	}
+	// fresh are the rules that start from now: those added, and those
+	// whose definition changed.
+	var next, fresh []*rule
+	var added, changed, kept []string
+	for _, r := range rules {
+		old := current[r.ID]
+		delete(current, r.ID)
+		if old != nil && reflect.DeepEqual(old.Rule, r) {
+			next = append(next, old)
+			kept = append(kept, r.ID)
+			continue
+		}
+		if old != nil {
+			close(old.removed)
+			changed = append(changed, r.ID)
+		} else {
+			added = append(added, r.ID)
+		}
+		ru := newRule(r, e.revision, now)
+		next = append(next, ru)
+		fresh = append(fresh, ru)
+	}
+	removed := slices.Sorted(maps.Keys(current))
+	for _, ru := range current {
+		close(ru.removed)
+	}
+	slices.SortStableFunc(next, byPriority)
+	e.rules = next
+	// A connection's moments are drawn in the order the connections came,
+	// whatever order the map gives.
+	live := slices.SortedFunc(maps.Keys(e.sessions), func(a, b *Session) int { return cmp.Compare(a.client.Connection, b.client.Connection) })
+	for _, s := range live {
+		s.timeAdded(fresh, now)
+	}
+	e.logger.Info("rules changed", "from", revision, "to", e.revision, "added", added, "changed", changed, "removed", removed, "kept", kept)
+	return e.runTimers(fresh), nil
+}
+
+// RuleSet is an engine's rules at one revision, in the order they are
+// tried, with what each has done so far, by rule ID.
+type RuleSet struct {
+	Revision uint64
+	Rules    []Rule
+	Counts   map[string]Counts
+}
+
+// Rules returns the engine's current rules.
+func (e *Engine) Rules() RuleSet {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	set := RuleSet{Revision: e.revision, Counts: make(map[string]Counts, len(e.rules))}
+	for _, ru := range e.rules {
+		set.Rules = append(set.Rules, ru.Rule)
+		set.Counts[ru.ID] = ru.counts
+	}
+	return set
+}
+
+// Revision returns the revision of the engine's rules: 1 for those the run
+// starts with, and one more for each change.
+func (e *Engine) Revision() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.revision
 }
 
 // Check reports the first of rules that an engine cannot apply as written.
@@ -160,15 +297,9 @@ func Check(rules []Rule) error {
 	return nil
 }
 
-// Counts returns what each rule has done so far, by rule ID.
+// Counts returns what each current rule has done so far, by rule ID.
 func (e *Engine) Counts() map[string]Counts {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	counts := make(map[string]Counts, len(e.rules))
-	for _, r := range e.rules {
-		counts[r.ID] = r.counts
-	}
-	return counts
+	return e.Rules().Counts
 }
 
 // fires reports whether r fires for the request of the decision k, which it
@@ -196,13 +327,14 @@ func (e *Engine) action(r *rule, k Key) (sftpproxy.Action, []any) {
 }
 
 // drawn returns r's action with the values r draws for the decision k, which
-// it also returns as log attributes.
+// it also returns as log attributes, and with its waits released when r is
+// removed.
 func (e *Engine) drawn(r *rule, k Key) (sftpproxy.Action, []any) {
 	switch a := r.Action.(type) {
 	case sftpproxy.Delay:
 		if r.Duration != nil {
 			a.Duration = drawFrom(e, k, "duration", *r.Duration)
-			return a, []any{"duration", a.Duration}
+			return r.released(a), []any{"duration", a.Duration}
 		}
 	case sftpproxy.ListenerDown:
 		if r.Duration != nil {
@@ -212,10 +344,37 @@ func (e *Engine) drawn(r *rule, k Key) (sftpproxy.Action, []any) {
 	case sftpproxy.PartialUpload:
 		if r.Cutoff != nil {
 			a.Cutoff = drawFrom(e, k, "cutoff", *r.Cutoff)
-			return a, []any{"cutoff", a.Cutoff}
+			return r.released(a), []any{"cutoff", a.Cutoff}
 		}
 	}
-	return r.Action, nil
+	return r.released(r.Action), nil
+}
+
+// released returns a with the delay or freeze it holds, if any, ended when
+// the rule is removed.
+func (r *rule) released(a sftpproxy.Action) sftpproxy.Action {
+	switch a := a.(type) {
+	case sftpproxy.Delay:
+		a.Release = r.removed
+		return a
+	case sftpproxy.Freeze:
+		a.Release = r.removed
+		return a
+	case sftpproxy.PartialUpload:
+		a.Result = r.released(a.Result)
+		return a
+	}
+	return a
+}
+
+// isRemoved reports whether a change has removed the rule.
+func (r *rule) isRemoved() bool {
+	select {
+	case <-r.removed:
+		return true
+	default:
+		return false
+	}
 }
 
 // moment returns the moment of r's trigger for the decision k: its at,
@@ -234,17 +393,18 @@ func (e *Engine) connectionMoment(r *rule, c Client) *connectionMoment {
 	m := r.connections[c.Connection]
 	if m == nil {
 		r.users[c.User]++
-		k := Key{Rule: r.ID, User: c.User, Ordinal: r.users[c.User]}
+		k := Key{Rule: r.ID, Activation: r.activation, User: c.User, Ordinal: r.users[c.User]}
 		m = &connectionMoment{at: c.Authenticated.Add(e.moment(r, k)), key: k}
 		r.connections[c.Connection] = m
 	}
 	return m
 }
 
-// runMoment returns the moment of r's trigger from the run, drawn once.
+// runMoment returns the moment of r's trigger from the run, or from the
+// change that applied r, drawn once.
 func (e *Engine) runMoment(r *rule) time.Duration {
 	if r.runAt == nil {
-		at := e.moment(r, Key{Rule: r.ID, Ordinal: 1})
+		at := e.moment(r, Key{Rule: r.ID, Activation: r.activation, Ordinal: 1})
 		r.runAt = &at
 	}
 	return *r.runAt
@@ -259,28 +419,50 @@ func drawFrom[T ~int64 | ~uint64](e *Engine, k Key, choice string, r Range[T]) T
 	return v
 }
 
-// reserve returns the Reserve of a transfer that r selected, or of a moment
-// it timed, which lets the fault take effect if r has not used up its
-// MaxTriggers by then. A moment of a connection takes effect only once,
-// whichever of the connection's sessions it is timed for.
-func (e *Engine) reserve(r *rule, attrs []any, once *connectionMoment) func() bool {
+// reserveTransfer returns the Reserve of a transfer that r selected, which
+// lets the fault take effect if r has not used up its MaxTriggers by then,
+// even once a change has removed r.
+func (e *Engine) reserveTransfer(r *rule, attrs []any) func() bool {
 	return func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		return e.fire(r, attrs)
+	}
+}
+
+// reserveMoment returns the Reserve of a moment that r timed, which lets the
+// fault take effect if r is still a current rule and has not used up its
+// MaxTriggers by then. Given once, a moment of a connection, the fault
+// takes effect only once, whichever of the connection's sessions it is
+// timed for.
+func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) func() bool {
+	return func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if r.isRemoved() {
+			e.logger.Info("rule suppressed", append(attrs, "reason", "removed")...)
+			return false
+		}
 		if once != nil {
 			if once.fired {
 				return false
 			}
 			once.fired = true
 		}
-		if r.spent() {
-			e.logger.Info("rule suppressed", append(attrs, "reason", "max_triggers")...)
-			return false
-		}
-		r.counts.Fired++
-		e.logger.Info("rule fired", attrs...)
-		return true
+		return e.fire(r, attrs)
 	}
+}
+
+// fire counts a firing of r and reports true, unless r has used up its
+// MaxTriggers. e.mu must be held.
+func (e *Engine) fire(r *rule, attrs []any) bool {
+	if r.spent() {
+		e.logger.Info("rule suppressed", append(attrs, "reason", "max_triggers")...)
+		return false
+	}
+	r.counts.Fired++
+	e.logger.Info("rule fired", attrs...)
+	return true
 }
 
 func (r *rule) matches(c Client, op Operation, req sftpproxy.Request) bool {
@@ -318,7 +500,7 @@ func (r *rule) count(user, path string) uint64 {
 // user, path and operation, and returns the key of the rule's random
 // decisions about it, without a Choice.
 func (r *rule) decisionKey(user, path string, op Operation) Key {
-	k := Key{Rule: r.ID, User: user, Path: path, Operation: string(op)}
+	k := Key{Rule: r.ID, Activation: r.activation, User: user, Path: path, Operation: string(op)}
 	if r.draws != nil {
 		dk := drawKey{user, path, op}
 		r.draws[dk]++

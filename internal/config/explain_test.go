@@ -14,6 +14,77 @@ import (
 )
 
 func TestExplainedConfigurationsLoadTheSame(t *testing.T) {
+	opts := writeEveryAction(t)
+	want, err := Load(opts)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	explained, err := Explain(opts)
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	for _, secret := range []string{"first-secret", "second-secret"} {
+		if strings.Contains(string(explained), secret) {
+			t.Errorf("the explained configuration shows the secret %q:\n%s", secret, explained)
+		}
+	}
+	for _, want := range []string{"source_glob: /in/*.part\n", "source_filename: a.part\n"} {
+		if !strings.Contains(string(explained), want) {
+			t.Errorf("the explained configuration does not name a rename's source as such, %q:\n%s", want, explained)
+		}
+	}
+	tried := []string{"id: failed-close\n", "id: slow-reply\n", "id: missing-chunk\n", "id: slow-stat\n"}
+	for i := 1; i < len(tried); i++ {
+		if strings.Index(string(explained), tried[i-1]) > strings.Index(string(explained), tried[i]) {
+			t.Errorf("the explained configuration lists %q after %q, which is tried after it:\n%s", tried[i-1], tried[i], explained)
+		}
+	}
+	elsewhere := writeTestFile(t, filepath.Join(t.TempDir(), "explained.yaml"), string(explained), 0o600)
+	got, err := Load(Options{ConfigFile: elsewhere, LookupEnv: opts.LookupEnv})
+	if err != nil {
+		t.Fatalf("Load of the explained configuration: %v\n%s", err, explained)
+	}
+	// Explain lists rules in the order they are tried, which only an
+	// engine's priorities decide.
+	for _, cfg := range []*Config{want, got} {
+		for _, s := range cfg.Scenarios {
+			slices.SortStableFunc(s.Rules, func(a, b faults.Rule) int { return cmp.Compare(a.Priority, b.Priority) })
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the explained configuration loads as\n%+v\nwant\n%+v\nexplained:\n%s", got, want, explained)
+	}
+}
+
+func TestRulesInJSONParseAsTheSameRules(t *testing.T) {
+	cfg, err := Load(writeEveryAction(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := cfg.Scenarios["every-action"].Rules
+	b, err := RulesJSON(want)
+	if err != nil {
+		t.Fatalf("RulesJSON: %v", err)
+	}
+	for _, field := range []string{`"id":"slow-stat","priority":10,"max_triggers":0,"match":{"operation":["stat","lstat"],"path_prefix":"/out"}`, `"duration":{"min":"200ms","max":"3s"}`, `"cutoff_offset":10,`} {
+		if !strings.Contains(string(b), field) {
+			t.Errorf("the rules in JSON lack %s:\n%s", field, b)
+		}
+	}
+	got, err := ParseRules(b, cfg.Users)
+	if err != nil {
+		t.Fatalf("ParseRules: %v\n%s", err, b)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the rules in JSON parse as\n%+v\nwant\n%+v\nJSON:\n%s", got, want, b)
+	}
+}
+
+// writeEveryAction writes a configuration whose scenario every-action has a
+// rule for every action and every way of matching, and returns the options
+// that load it.
+func writeEveryAction(t *testing.T) Options {
+	t.Helper()
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "keys", "partner-b.pub"), "")
 	writeAuthorizedKeys(t, filepath.Join(dir, "keys", "robot.pub"), "")
@@ -70,46 +141,7 @@ scenarios:
       - id: missing-chunk
         corrupt_download: {path_glob: /outgoing/*.csv, attempts: [1], transform: omit_range, offset: 1048576, length: 4096}
 `, 0o600)
-	opts := Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "first-secret"}.lookup}
-	want, err := Load(opts)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	explained, err := Explain(opts)
-	if err != nil {
-		t.Fatalf("Explain: %v", err)
-	}
-	for _, secret := range []string{"first-secret", "second-secret"} {
-		if strings.Contains(string(explained), secret) {
-			t.Errorf("the explained configuration shows the secret %q:\n%s", secret, explained)
-		}
-	}
-	for _, want := range []string{"source_glob: /in/*.part\n", "source_filename: a.part\n"} {
-		if !strings.Contains(string(explained), want) {
-			t.Errorf("the explained configuration does not name a rename's source as such, %q:\n%s", want, explained)
-		}
-	}
-	tried := []string{"id: failed-close\n", "id: slow-reply\n", "id: missing-chunk\n", "id: slow-stat\n"}
-	for i := 1; i < len(tried); i++ {
-		if strings.Index(string(explained), tried[i-1]) > strings.Index(string(explained), tried[i]) {
-			t.Errorf("the explained configuration lists %q after %q, which is tried after it:\n%s", tried[i-1], tried[i], explained)
-		}
-	}
-	elsewhere := writeTestFile(t, filepath.Join(t.TempDir(), "explained.yaml"), string(explained), 0o600)
-	got, err := Load(Options{ConfigFile: elsewhere, LookupEnv: opts.LookupEnv})
-	if err != nil {
-		t.Fatalf("Load of the explained configuration: %v\n%s", err, explained)
-	}
-	// Explain lists rules in the order they are tried, which only an
-	// engine's priorities decide.
-	for _, cfg := range []*Config{want, got} {
-		for _, s := range cfg.Scenarios {
-			slices.SortStableFunc(s.Rules, func(a, b faults.Rule) int { return cmp.Compare(a.Priority, b.Priority) })
-		}
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("the explained configuration loads as\n%+v\nwant\n%+v\nexplained:\n%s", got, want, explained)
-	}
+	return Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "first-secret"}.lookup}
 }
 
 func TestExplainWritesRecipesInTheLongForm(t *testing.T) {

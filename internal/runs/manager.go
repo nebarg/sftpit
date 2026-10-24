@@ -86,12 +86,22 @@ type Manager struct {
 
 // activeRun is a run that a Manager serves.
 type activeRun struct {
-	run        *Run
-	root       *os.Root
-	rules      *faults.Engine
-	handler    sshfront.Handler
-	hooks      sshfront.Hooks
-	stopTimers func()
+	run     *Run
+	root    *os.Root
+	rules   *faults.Engine
+	handler sshfront.Handler
+	hooks   sshfront.Hooks
+
+	// stops stop the timers armed for the run: those it started with, and
+	// those of each change of its rules.
+	stops []func()
+}
+
+// stopTimers stops every timer armed for the run.
+func (a *activeRun) stopTimers() {
+	for _, stop := range a.stops {
+		stop()
+	}
 }
 
 // Start snapshots the seed in the workspace w and starts the first run,
@@ -118,7 +128,7 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if m.current, err = m.begin(scenario); err != nil {
 		return nil, err
 	}
-	m.current.stopTimers = ArmTimers(m.current.rules, m.srv, logger)
+	m.current.stops = append(m.current.stops, ArmTimers(m.current.rules, m.srv, logger))
 	return m, nil
 }
 
@@ -167,7 +177,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
 	defer m.resetting.Unlock()
 	current := m.active()
 	if req.Run != "" && req.Run != current.run.ID {
-		return nil, fmt.Errorf("runs: %w: the current run is %s, not %s", ErrStaleRun, current.run.ID, req.Run)
+		return nil, staleRun(current, req.Run)
 	}
 	scenario, err := m.next(current.run.Scenario, req)
 	if err != nil {
@@ -195,9 +205,48 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
 		m.logger.Warn("closing the files of the previous run failed", "run", current.run.ID, "err", err)
 	}
 	m.srv.Resume()
-	next.stopTimers = ArmTimers(next.rules, m.srv, m.logger)
+	next.stops = append(next.stops, ArmTimers(next.rules, m.srv, m.logger))
 	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(scenario)...)...)
 	return next.run, nil
+}
+
+// Rules returns the rules of run, which must be the current run, or else
+// fails with ErrStaleRun.
+func (m *Manager) Rules(run string) (faults.RuleSet, error) {
+	current := m.active()
+	if run != current.run.ID {
+		return faults.RuleSet{}, staleRun(current, run)
+	}
+	return current.rules.Rules(), nil
+}
+
+// ChangeRules replaces the rules of run, which must be the current run, with
+// rules, as faults.Engine.Replace does if revision is still the current
+// revision, and returns the new rules. It fails with ErrStaleRun for another
+// run, and with faults.ErrStaleRevision for another revision. The run takes
+// the listener down at the moments of the rules that start afresh, as it
+// does at those of the rules it started with.
+func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
+	m.resetting.Lock()
+	defer m.resetting.Unlock()
+	current := m.active()
+	if run != current.run.ID {
+		return faults.RuleSet{}, staleRun(current, run)
+	}
+	timers, err := current.rules.Replace(revision, rules)
+	if err != nil {
+		return faults.RuleSet{}, err
+	}
+	current.stops = append(current.stops, armTimers(timers, m.srv, m.logger))
+	return current.rules.Rules(), nil
+}
+
+// Users returns the users that the Manager's server accepts, which rules
+// may refer to.
+func (m *Manager) Users() []sshfront.User { return m.opts.Server.Users }
+
+func staleRun(current *activeRun, run string) error {
+	return fmt.Errorf("runs: %w: the current run is %s, not %s", ErrStaleRun, current.run.ID, run)
 }
 
 // restart ends current's timers and connections, and begins a run of
@@ -230,6 +279,10 @@ type Status struct {
 	Run   Run
 	State State
 
+	// Revision is the revision of the run's rules, as faults.Engine.Revision
+	// numbers them.
+	Revision uint64
+
 	// DownUntil is when an outage ends, in StateDown.
 	DownUntil time.Time
 
@@ -240,7 +293,7 @@ type Status struct {
 // Status describes the current run.
 func (m *Manager) Status() Status {
 	m.mu.Lock()
-	s := Status{Run: *m.current.run, State: StateUp}
+	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision()}
 	switch {
 	case m.inReset:
 		s.State = StateResetting
@@ -275,7 +328,7 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (Scenario, error) {
 		if seed != nil {
 			return Scenario{}, fmt.Errorf("runs: %w", ErrSeedWithoutScenario)
 		}
-		return Scenario{}, nil
+		return Scenario{Seed: faults.RandomSeed()}, nil
 	}
 	s, ok := m.opts.Scenarios[name]
 	if !ok {
@@ -323,11 +376,11 @@ func (m *Manager) begin(scenario Scenario) (_ *activeRun, err error) {
 		}
 	}
 
-	var rules *faults.Engine
-	if scenario.Name != "" {
-		if rules, err = faults.New(m.opts.Scenarios[scenario.Name].Rules, scenario.Seed, m.logger); err != nil {
-			return nil, err
-		}
+	// A run without a scenario has an engine too, for rules applied to it
+	// later.
+	rules, err := faults.New(m.opts.Scenarios[scenario.Name].Rules, scenario.Seed, m.logger)
+	if err != nil {
+		return nil, err
 	}
 	return &activeRun{
 		run:     run,

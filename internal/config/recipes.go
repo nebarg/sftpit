@@ -11,13 +11,13 @@ import (
 // scopeConfig holds the fields with which a recipe narrows the requests it
 // applies to. They mean what they mean in a match.
 type scopeConfig struct {
-	User           string `yaml:"user,omitempty"`
-	KeyFingerprint string `yaml:"key_fingerprint,omitempty"`
-	Path           string `yaml:"path,omitempty"`
-	PathPrefix     string `yaml:"path_prefix,omitempty"`
-	PathGlob       string `yaml:"path_glob,omitempty"`
-	Filename       string `yaml:"filename,omitempty"`
-	FilenameGlob   string `yaml:"filename_glob,omitempty"`
+	User           string `yaml:"user,omitempty" json:"user,omitempty"`
+	KeyFingerprint string `yaml:"key_fingerprint,omitempty" json:"key_fingerprint,omitempty"`
+	Path           string `yaml:"path,omitempty" json:"path,omitempty"`
+	PathPrefix     string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
+	PathGlob       string `yaml:"path_glob,omitempty" json:"path_glob,omitempty"`
+	Filename       string `yaml:"filename,omitempty" json:"filename,omitempty"`
+	FilenameGlob   string `yaml:"filename_glob,omitempty" json:"filename_glob,omitempty"`
 }
 
 func (s scopeConfig) match(operations ...string) matchConfig {
@@ -37,33 +37,33 @@ func (s scopeConfig) match(operations ...string) matchConfig {
 // with a status, failure unless set, or closes or freezes the connection.
 type failUploadConfig struct {
 	scopeConfig `yaml:",inline"`
-	Attempts    []uint64            `yaml:"attempts,flow,omitempty"`
-	Probability *float64            `yaml:"probability,omitempty"`
-	AfterBytes  *valueRange[uint64] `yaml:"after_bytes,omitempty"`
-	Result      string              `yaml:"result,omitempty"`
-	Status      string              `yaml:"status,omitempty"`
-	Mode        string              `yaml:"mode,omitempty"`
-	MaxFreeze   string              `yaml:"max_freeze,omitempty"`
+	Attempts    []uint64            `yaml:"attempts,flow,omitempty" json:"attempts,omitempty"`
+	Probability *float64            `yaml:"probability,omitempty" json:"probability,omitempty"`
+	AfterBytes  *valueRange[uint64] `yaml:"after_bytes,omitempty" json:"after_bytes,omitempty"`
+	Result      string              `yaml:"result,omitempty" json:"result,omitempty"`
+	Status      string              `yaml:"status,omitempty" json:"status,omitempty"`
+	Mode        string              `yaml:"mode,omitempty" json:"mode,omitempty"`
+	MaxFreeze   string              `yaml:"max_freeze,omitempty" json:"max_freeze,omitempty"`
 }
 
 // failRandomlyConfig fails a share of the requests of some operations
 // before the server acts, with failure unless a status is set.
 type failRandomlyConfig struct {
 	scopeConfig `yaml:",inline"`
-	Operations  stringList `yaml:"operations,omitempty"`
-	Probability *float64   `yaml:"probability,omitempty"`
-	Status      string     `yaml:"status,omitempty"`
-	When        string     `yaml:"when,omitempty"`
+	Operations  stringList `yaml:"operations,omitempty" json:"operations,omitempty"`
+	Probability *float64   `yaml:"probability,omitempty" json:"probability,omitempty"`
+	Status      string     `yaml:"status,omitempty" json:"status,omitempty"`
+	When        string     `yaml:"when,omitempty" json:"when,omitempty"`
 }
 
 // corruptDownloadConfig changes the bytes that downloads are served.
 type corruptDownloadConfig struct {
 	scopeConfig `yaml:",inline"`
-	Attempts    []uint64 `yaml:"attempts,flow,omitempty"`
-	Probability *float64 `yaml:"probability,omitempty"`
-	Transform   string   `yaml:"transform,omitempty"`
-	Offset      *uint64  `yaml:"offset,omitempty"`
-	Length      *uint64  `yaml:"length,omitempty"`
+	Attempts    []uint64 `yaml:"attempts,flow,omitempty" json:"attempts,omitempty"`
+	Probability *float64 `yaml:"probability,omitempty" json:"probability,omitempty"`
+	Transform   string   `yaml:"transform,omitempty" json:"transform,omitempty"`
+	Offset      *uint64  `yaml:"offset,omitempty" json:"offset,omitempty"`
+	Length      *uint64  `yaml:"length,omitempty" json:"length,omitempty"`
 }
 
 // expand returns rc with its recipe, if it has one, written in the long

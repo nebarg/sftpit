@@ -264,6 +264,8 @@ faults:
 | `GET /api/v1/ready` | `{"ready": true}`, or status 503 with the error once a reset has failed |
 | `GET /api/v1/status` | the state of the SFTP server, the backend and the current run |
 | `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
+| `GET /api/v1/runs/{id}/rules` | the run's rules, their revision and what each has done |
+| `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 
 ```bash
 curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
@@ -274,11 +276,11 @@ curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
 {
   "sftp": { "state": "up" },
   "backend": "embedded",
-  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true }
+  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1 }
 }
 ```
 
-The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string.
+The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules.
 
 **A reset:**
 - **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
@@ -294,7 +296,43 @@ An unknown scenario, or a seed without one, is refused with status 400 and leave
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
-**Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. A `POST` needs the `Sftpit-Control` header, with any value, which a page on another origin cannot send, and a `POST` that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`.
+**Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. A `POST` or `PUT` needs the `Sftpit-Control` header, with any value, which a page on another origin cannot send, and one that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`.
+
+### Changing the rules during a run
+
+`PUT /api/v1/runs/{id}/rules` replaces the current run's rules, all at once between two requests, without a reset. Its body gives the `revision` of the rules it replaces, and the new rules as a scenario's `faults`, in JSON, in the long form or as recipes:
+
+```bash
+curl -X PUT -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/rules -d '{
+  "revision": 1,
+  "faults": [
+    {"id": "first-upload-cutoff", "fail_upload": {"path": "/incoming/orders.csv.part", "attempts": [1], "after_bytes": 1048576}}
+  ]
+}'
+```
+
+It answers as `GET` on the same route does, with the rules' revision, the rules in the long form, in the order they are tried, and what each has done so far:
+
+```json
+{
+  "revision": 2,
+  "faults": [
+    {
+      "id": "first-upload-cutoff", "priority": 0, "max_triggers": 0,
+      "match": { "operation": ["write"], "path": "/incoming/orders.csv.part", "attempt": { "per": ["user", "path"], "numbers": [1] } },
+      "action": { "type": "partial_upload", "cutoff_offset": 1048576, "result": "status", "status": "failure" }
+    }
+  ],
+  "counts": { "first-upload-cutoff": { "matched": 0, "selected": 0, "fired": 0 } }
+}
+```
+
+- **Revisions:** the rules a run starts with are revision 1, and each change adds one. A change based on another revision, such as from a second dashboard tab, is refused with status 409, as is one for a run that is no longer current. Invalid rules are refused with 400, with the message the config file would give. Either way, nothing changes. The `faults` that a `GET` returns can be sent back as they are.
+- **A rule that carries on**, with the same ID and definition, keeps its counts, attempts, occurrences and moments.
+- **Any other rule starts from the change.** Its first attempt is the next open, a trigger anchored to the run measures from the change, and its random decisions differ from those of an earlier rule with the same ID.
+- **A rule that goes** releases what it holds: a delayed request or reply goes on, and a frozen connection is closed. None of its moments come. A transfer it chose keeps its partial upload or corruption, so a download is never corrupted only in part, and an outage it started runs its course.
+- **Sessions already open** get the new rules from their next request, and a connection action at a moment of the run or the connection reaches them too.
+- **A reset** starts the next run with its scenario's rules, whatever changed during this one. Use a reset when a test needs a clean start that it can repeat.
 
 ### In a test harness
 

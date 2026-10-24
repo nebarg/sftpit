@@ -59,10 +59,12 @@ type Action interface {
 
 // Delay holds the request for Duration before the backend sees it, like a
 // slow server, or holds its reply for Duration, like a slow reply to an
-// operation that has already happened.
+// operation that has already happened. If Release is closed first, the
+// request or reply goes on at once.
 type Delay struct {
 	When     When
 	Duration time.Duration
+	Release  <-chan struct{}
 }
 
 // Stall holds the request or its reply as Delay does, until Release is closed

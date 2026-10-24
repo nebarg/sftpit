@@ -68,13 +68,19 @@ type Options struct {
 	// requests. A Timer whose moment has passed fires as the session starts.
 	Timers []Timer
 
+	// MoreTimers, if set, delivers Timers once the session has started, such
+	// as those of a fault added during it. The session takes each one it
+	// receives before it ends, as it takes Timers, and one whose moment has
+	// passed fires as it arrives.
+	MoreTimers <-chan Timer
+
 	// Conn is the client's connection, which Drop and Freeze act on. It is
-	// required if Faults or Timers can give either.
+	// required if Faults, Timers or MoreTimers can give either.
 	Conn Conn
 
 	// Listener is what the client's connection came in through, which
-	// ListenerDown takes down. It is required if Faults or Timers can give
-	// one.
+	// ListenerDown takes down. It is required if Faults, Timers or
+	// MoreTimers can give one.
 	Listener Listener
 
 	// ReplyOrder is the order in which replies reach the client. The zero
@@ -166,11 +172,13 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		return s.result()
 	}
 	for _, t := range opts.Timers {
-		if err := s.checkMoment(t.Action); err != nil {
+		if err := s.arm(t); err != nil {
 			s.stop(err)
 			return s.result()
 		}
-		s.wg.Go(func() { s.at(time.Until(t.At), nil, &request{action: t.Action}, t.Reserve) })
+	}
+	if opts.MoreTimers != nil {
+		s.wg.Go(func() { s.armEach(opts.MoreTimers) })
 	}
 	s.wg.Go(func() { s.stop(s.relayReplies()) })
 	s.wg.Go(func() { s.stop(s.writeReplies()) })
@@ -512,7 +520,7 @@ func (s *session) process(req *request) error {
 		s.logFault(req)
 		switch a := req.action.(type) {
 		case Delay:
-			if err := s.hold(req, a.Duration, nil); err != nil {
+			if err := s.hold(req, a.Duration, a.Release); err != nil {
 				return err
 			}
 		case Stall:
@@ -631,6 +639,34 @@ func (s *session) answered() {
 	}
 }
 
+// arm takes t's action at its moment, unless the session ends first.
+func (s *session) arm(t Timer) error {
+	if err := s.checkMoment(t.Action); err != nil {
+		return err
+	}
+	s.wg.Go(func() { s.at(time.Until(t.At), nil, &request{action: t.Action}, t.Reserve) })
+	return nil
+}
+
+// armEach arms each timer it receives from timers until the session ends or
+// timers is closed.
+func (s *session) armEach(timers <-chan Timer) {
+	for {
+		select {
+		case t, ok := <-timers:
+			if !ok {
+				return
+			}
+			if err := s.arm(t); err != nil {
+				s.stop(err)
+				return
+			}
+		case <-s.done:
+			return
+		}
+	}
+}
+
 // at takes m's action, a fault for a moment, once after passes, unless
 // closing is closed or the session ends first.
 func (s *session) at(after time.Duration, closing <-chan struct{}, m *request, reserve func() bool) {
@@ -682,13 +718,14 @@ func (s *session) fire(m *request, reserve func() bool) {
 }
 
 // hold waits until limit passes or release is closed. It returns errStopped
-// if the session ends first.
+// if the session ends first. A Delay that lasts its Duration has run its
+// course, so only a Stall or Freeze reaching its limit is logged.
 func (s *session) hold(req *request, limit time.Duration, release <-chan struct{}) error {
 	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		if release != nil {
+		if _, delay := req.action.(Delay); release != nil && !delay {
 			s.logger.Info("fault ended at its limit", s.faultAttrs(req)...)
 		}
 		return nil
@@ -777,7 +814,7 @@ func (s *session) deliver(req *request, packet []byte) {
 	s.logFault(req)
 	switch a := req.action.(type) {
 	case Delay:
-		s.wg.Go(func() { s.holdReply(req, a.Duration, nil, packet) })
+		s.wg.Go(func() { s.holdReply(req, a.Duration, a.Release, packet) })
 	case Stall:
 		s.wg.Go(func() { s.holdReply(req, a.Limit, a.Release, packet) })
 	case Fail:

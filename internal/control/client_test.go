@@ -22,11 +22,11 @@ func TestClientResets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	if run := status.Run; run.ID != m.Status().Run.ID || run.Scenario != "own" || run.Seed == nil || *run.Seed != 9 || !run.SeedPinned || status.SFTP.State != runs.StateUp {
+	if run := status.Run; run.ID != m.Status().Run.ID || run.Scenario != "own" || run.Seed != 9 || !run.SeedPinned || status.SFTP.State != runs.StateUp {
 		t.Errorf("Reset = %+v, want the next run, of own with seed 9", status)
 	}
 	seed := control.Seed(8)
-	if status, err := c.Reset(t.Context(), control.ResetRequest{Run: status.Run.ID, Seed: &seed}); err != nil || *status.Run.Seed != 8 {
+	if status, err := c.Reset(t.Context(), control.ResetRequest{Run: status.Run.ID, Seed: &seed}); err != nil || status.Run.Seed != 8 {
 		t.Errorf("Reset of the current run with seed 8 = %+v, %v", status, err)
 	}
 

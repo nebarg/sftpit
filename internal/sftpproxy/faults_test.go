@@ -55,6 +55,47 @@ func TestDelayAfterHoldsTheReplyAndEveryLaterOne(t *testing.T) {
 	})
 }
 
+func TestADelayEndsEarlyWhenReleased(t *testing.T) {
+	tests := []struct {
+		name    string
+		when    sftpproxy.When
+		release bool
+		want    time.Duration
+	}{
+		{name: "before, released", when: sftpproxy.Before, release: true, want: time.Second},
+		{name: "before, run its course", when: sftpproxy.Before, want: 3 * time.Second},
+		{name: "after, released", when: sftpproxy.After, release: true, want: time.Second},
+		{name: "after, run its course", when: sftpproxy.After, want: 3 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var logs syncBuffer
+				release := make(chan struct{})
+				p, fb := startProxyOnFake(t, sftpproxy.Options{
+					Faults: onPath("/a", sftpproxy.Delay{When: tt.when, Duration: 3 * time.Second, Release: release}),
+					Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+				})
+				start := time.Now()
+				p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
+				if tt.release {
+					time.AfterFunc(time.Second, func() { close(release) })
+				}
+
+				fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
+				p.client.assertReplies(t, 1)
+				if got := time.Since(start); got != tt.want {
+					t.Errorf("the delay ended after %v, want %v", got, tt.want)
+				}
+				released := strings.Contains(logs.String(), `msg="fault released"`)
+				if released != tt.release || strings.Contains(logs.String(), "ended at its limit") {
+					t.Errorf("logs, for a delay released %v:\n%s", tt.release, logs.String())
+				}
+			})
+		})
+	}
+}
+
 func TestStallEndsAtReleaseOrLimit(t *testing.T) {
 	tests := []struct {
 		name    string

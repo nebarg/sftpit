@@ -90,5 +90,5 @@ func describeRun(r control.RunStatus) string {
 	if r.SeedPinned {
 		seed = "pinned"
 	}
-	return fmt.Sprintf("run %s: scenario %s, seed %d (%s)", r.ID, r.Scenario, uint64(*r.Seed), seed)
+	return fmt.Sprintf("run %s: scenario %s, seed %d (%s)", r.ID, r.Scenario, uint64(r.Seed), seed)
 }

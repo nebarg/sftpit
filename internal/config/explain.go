@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -110,6 +111,17 @@ func (r valueRange[T]) MarshalYAML() (any, error) {
 	return flowNode(struct {
 		Min T `yaml:"min"`
 		Max T `yaml:"max"`
+	}{r.Min, r.Max})
+}
+
+// MarshalJSON writes a value as itself, and a range as {"min", "max"}.
+func (r valueRange[T]) MarshalJSON() ([]byte, error) {
+	if !r.ranged {
+		return json.Marshal(r.Min)
+	}
+	return json.Marshal(struct {
+		Min T `json:"min"`
+		Max T `json:"max"`
 	}{r.Min, r.Max})
 }
 

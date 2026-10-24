@@ -1,6 +1,7 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
-// alive and ready, the status of the current run, and resets that start the
-// next run. Its Client calls the API.
+// alive and ready, the status of the current run, its rules, which can
+// change during the run, and resets that start the next run. Its Client
+// calls the API.
 //
 // The API answers only requests addressed to a loopback host, so a web page
 // cannot reach it through DNS rebinding. It refuses a change that a browser
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 )
@@ -47,6 +49,8 @@ func Handler(m *runs.Manager) http.Handler {
 	mux.HandleFunc("GET /api/v1/ready", a.ready)
 	mux.HandleFunc("GET /api/v1/status", a.status)
 	mux.HandleFunc("POST /api/v1/reset", a.reset)
+	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
+	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	return protect(mux)
 }
 
@@ -95,6 +99,75 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *api) rules(w http.ResponseWriter, r *http.Request) {
+	set, err := a.runs.Rules(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeRules(w, set)
+}
+
+func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Revision *uint64         `json:"revision"`
+		Faults   json.RawMessage `json:"faults"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	switch {
+	case body.Revision == nil:
+		writeError(w, http.StatusBadRequest, errors.New("revision is required: the revision of the rules that the change replaces"))
+		return
+	case len(body.Faults) == 0 || string(body.Faults) == "null":
+		writeError(w, http.StatusBadRequest, errors.New("faults is required: the list of rules, or [] for none"))
+		return
+	}
+	rules, err := config.ParseRules(body.Faults, a.runs.Users())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	set, err := a.runs.ChangeRules(r.PathValue("id"), *body.Revision, rules)
+	switch {
+	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
+		writeError(w, http.StatusConflict, err)
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err)
+	default:
+		writeRules(w, set)
+	}
+}
+
+// writeRules writes set as the reply to a request for a run's rules or a
+// change of them: the revision, the rules in the long form, in the order
+// they are tried, and what each has done, by rule ID.
+func writeRules(w http.ResponseWriter, set faults.RuleSet) {
+	rules, err := config.RulesJSON(set.Rules)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	counts := make(map[string]ruleCounts, len(set.Counts))
+	for id, c := range set.Counts {
+		counts[id] = ruleCounts{Matched: c.Matched, Selected: c.Selected, Fired: c.Fired}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Revision uint64                `json:"revision"`
+		Faults   json.RawMessage       `json:"faults"`
+		Counts   map[string]ruleCounts `json:"counts"`
+	}{set.Revision, rules, counts})
+}
+
+// ruleCounts are what a rule has done in the run, as faults.Counts.
+type ruleCounts struct {
+	Matched  uint64 `json:"matched"`
+	Selected uint64 `json:"selected"`
+	Fired    uint64 `json:"fired"`
+}
+
 // ResetRequest is the body of a reset, which chooses the next run as
 // runs.ResetRequest does. Every field is optional, so an empty body repeats
 // the current run.
@@ -118,12 +191,14 @@ type SFTPStatus struct {
 	Error     string     `json:"error,omitempty"`
 }
 
-// RunStatus describes the current run and its scenario, if it has one.
+// RunStatus describes the current run: the scenario it started with, if
+// any, its seed and the revision of its rules.
 type RunStatus struct {
 	ID         string `json:"id"`
 	Scenario   string `json:"scenario,omitempty"`
-	Seed       *Seed  `json:"seed,omitempty"`
+	Seed       Seed   `json:"seed"`
 	SeedPinned bool   `json:"seed_pinned,omitempty"`
+	Revision   uint64 `json:"revision"`
 }
 
 func newStatus(s runs.Status) Status {
@@ -139,9 +214,8 @@ func newStatus(s runs.Status) Status {
 	if s.Err != nil {
 		body.SFTP.Error = s.Err.Error()
 	}
-	if sc := s.Run.Scenario; sc.Name != "" {
-		body.Run.Scenario, body.Run.Seed, body.Run.SeedPinned = sc.Name, (*Seed)(&sc.Seed), sc.Pinned
-	}
+	sc := s.Run.Scenario
+	body.Run.Scenario, body.Run.Seed, body.Run.SeedPinned, body.Run.Revision = sc.Name, Seed(sc.Seed), sc.Pinned, s.Revision
 	return body
 }
 

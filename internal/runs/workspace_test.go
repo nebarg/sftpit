@@ -208,7 +208,7 @@ func TestNewRunRecordsItsScenarioAndSeed(t *testing.T) {
 		scenario runs.Scenario
 		want     map[string]any
 	}{
-		{runs.Scenario{}, map[string]any{}},
+		{runs.Scenario{Seed: 12}, map[string]any{"seed": 12.0}},
 		{runs.Scenario{Name: "upload-recovery", Seed: 0, Pinned: true}, map[string]any{"scenario": "upload-recovery", "seed": 0.0, "seed_pinned": true}},
 		{runs.Scenario{Name: "dev-chaos", Seed: 4294967295}, map[string]any{"scenario": "dev-chaos", "seed": 4294967295.0}},
 	}
