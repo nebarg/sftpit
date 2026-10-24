@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,6 +49,9 @@ Flags:
                        last five runs; DIR must be empty or a workspace
   --env-file FILE      also read secrets from FILE; may be repeated, and
                        later files override earlier ones
+  --ready-file FILE    once listening, write the addresses, workspace and
+                       host-key fingerprints to FILE as JSON, for a test
+                       harness or sftpit reset; FILE is removed at exit
 `
 
 func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -61,14 +65,15 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
 	flags.StringVar(&opts.Scenario, "scenario", "", "")
 	flags.Func("seed", "", func(s string) error {
-		n, err := strconv.ParseUint(s, 10, 64)
+		seed, err := parseSeed(s)
 		if err != nil {
-			return errors.New("a seed is a whole number from 0 to 18446744073709551615")
+			return err
 		}
-		seed := faults.Seed(n)
 		opts.Seed = &seed
 		return nil
 	})
+	var readyPath string
+	flags.StringVar(&readyPath, "ready-file", "", "")
 	flags.Func("env-file", "", func(name string) error {
 		opts.EnvFiles = append(opts.EnvFiles, name)
 		return nil
@@ -89,6 +94,12 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "sftpit serve: --seed needs --scenario, whose random decisions it pins")
 		return exitUsage
 	}
+	if readyPath != "" {
+		if err := prepareReadyFile(readyPath); err != nil {
+			fmt.Fprintf(stderr, "sftpit serve: --ready-file: %v\n", err)
+			return exitUsage
+		}
+	}
 
 	cfg, err := config.Load(opts)
 	if err != nil {
@@ -98,7 +109,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "sftpit serve: warning: %s\n", warning)
 	}
-	if err := runServer(ctx, cfg, stdout, stderr); err != nil {
+	if err := runServer(ctx, cfg, readyPath, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n", err)
 		if errors.Is(err, backend.ErrUnsupportedFile) || errors.Is(err, backend.ErrLimit) ||
 			errors.Is(err, errSeedHoldsWorkspace) || errors.Is(err, runs.ErrNotWorkspace) {
@@ -113,8 +124,9 @@ var errSeedHoldsWorkspace = errors.New("the seed directory contains the workspac
 
 // runServer serves SFTP from runs in the configured workspace, or in a
 // temporary one, and the control API, until ctx is cancelled, then shuts
-// down and deletes a temporary workspace.
-func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (err error) {
+// down and deletes a temporary workspace. If readyPath is set, it writes
+// the ready file there once it listens, and removes it as it shuts down.
+func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout, stderr io.Writer) (err error) {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
 	workspace, err := openWorkspace(cfg.DataDir)
@@ -160,6 +172,16 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 		sftpLn.Close()
 		return err
 	}
+	// Clients that connect once the file exists wait in the listeners'
+	// backlogs until the servers accept them.
+	if readyPath != "" {
+		ready := newReadyFile(sftpLn.Addr().String(), httpLn.Addr().String(), workspace.Dir(), hostKeys)
+		if err := writeReadyFile(readyPath, ready); err != nil {
+			sftpLn.Close()
+			httpLn.Close()
+			return err
+		}
+	}
 
 	srv := manager.Server()
 	sftpServed := make(chan error, 1)
@@ -182,6 +204,11 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 	case err = <-apiServed:
 		apiServed = nil
 	}
+	if readyPath != "" {
+		if removeErr := os.Remove(readyPath); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove ready file: %w", removeErr))
+		}
+	}
 	err = errors.Join(err, api.Close(), srv.Close())
 	if sftpServed != nil {
 		<-sftpServed
@@ -190,6 +217,15 @@ func runServer(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer
 		<-apiServed
 	}
 	return err
+}
+
+// parseSeed parses a seed given on the command line.
+func parseSeed(s string) (faults.Seed, error) {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, errors.New("a seed is a whole number from 0 to 18446744073709551615")
+	}
+	return faults.Seed(n), nil
 }
 
 func openWorkspace(dataDir string) (*runs.Workspace, error) {

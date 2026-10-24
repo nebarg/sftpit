@@ -296,6 +296,44 @@ If a reset fails once it has closed admission, because a session outlasted the 3
 
 **Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. A `POST` needs the `Sftpit-Control` header, with any value, which a page on another origin cannot send, and a `POST` that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`.
 
+### In a test harness
+
+A harness that starts sftpit can take free ports and learn them from a ready file, rather than sleeping for a while and hoping:
+
+```bash
+sftpit serve --config ./sftpit.yaml --scenario upload-recovery --seed 481516 \
+  --sftp-listen 127.0.0.1:0 --http-listen 127.0.0.1:0 \
+  --ready-file ./work/sftpit-ready.json
+```
+
+Once both listeners are open, `serve` writes the ready file, all at once, so a reader never sees part of it:
+
+```json
+{
+  "sftp_address": "127.0.0.1:52341",
+  "http_address": "127.0.0.1:52342",
+  "workspace": "/tmp/sftpit-2585468165",
+  "host_keys": [
+    { "type": "ssh-ed25519", "fingerprint": "SHA256:..." },
+    { "type": "ssh-rsa", "fingerprint": "SHA256:..." }
+  ]
+}
+```
+
+It holds only what stays the same while sftpit runs, and no secrets; the current run comes from `status`. sftpit removes the file when it stops, and replaces a ready file that an earlier `serve` left behind, but refuses to start if the path holds any other file.
+
+Between tests, `sftpit reset` resets the run through the control API:
+
+```bash
+sftpit reset --ready-file ./work/sftpit-ready.json --scenario flaky-partner --seed 7
+```
+
+```text
+run 20261024-101500.123-3f9a: scenario flaky-partner, seed 7 (pinned)
+```
+
+`--scenario` and `--seed` choose the next run as the reset's body does, and `--scenario ""` starts one without faults. It exits with 2 when the reset is refused, such as for an unknown scenario, and with 3 when the ready file cannot be read, the server cannot be reached or the reset fails.
+
 ## Behavior
 
 With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The differences:

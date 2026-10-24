@@ -24,12 +24,13 @@ const usage = `Usage: sftpit <command>
 
 Commands:
   serve     Run the SFTP server
+  reset     Start the next run of a running server
   config    Check or explain a configuration file
   version   Print the build version
   help      Show this help
 
-Run "sftpit serve --help" for the server's flags, and "sftpit config --help"
-for the configuration commands.
+Run "sftpit serve --help" for the server's flags, "sftpit reset --help" for
+a reset's, and "sftpit config --help" for the configuration commands.
 `
 
 func main() {
@@ -51,6 +52,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "serve":
 		return serve(ctx, args[1:], stdout, stderr)
+	case "reset":
+		return resetCommand(ctx, args[1:], stdout, stderr)
 	case "config":
 		return configCommand(args[1:], stdout, stderr)
 	}

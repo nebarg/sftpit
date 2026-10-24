@@ -1,6 +1,6 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
 // alive and ready, the status of the current run, and resets that start the
-// next run.
+// next run. Its Client calls the API.
 //
 // The API answers only requests addressed to a loopback host, so a web page
 // cannot reach it through DNS rebinding. It refuses a change that a browser
@@ -69,11 +69,11 @@ func (a *api) ready(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *api) status(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, newStatusBody(a.runs.Status()))
+	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
 }
 
 func (a *api) reset(w http.ResponseWriter, r *http.Request) {
-	var body resetBody
+	var body ResetRequest
 	if err := decodeBody(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -91,42 +91,46 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
 	default:
-		writeJSON(w, http.StatusOK, newStatusBody(a.runs.Status()))
+		writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
 	}
 }
 
-// resetBody is the body of a reset. Every field is optional, so an empty
-// body repeats the current run.
-type resetBody struct {
-	Run      string  `json:"run"`
-	Scenario *string `json:"scenario"`
-	Seed     *seed   `json:"seed"`
+// ResetRequest is the body of a reset, which chooses the next run as
+// runs.ResetRequest does. Every field is optional, so an empty body repeats
+// the current run.
+type ResetRequest struct {
+	Run      string  `json:"run,omitempty"`
+	Scenario *string `json:"scenario,omitempty"`
+	Seed     *Seed   `json:"seed,omitempty"`
 }
 
-type statusBody struct {
-	SFTP    sftpStatus `json:"sftp"`
+// Status is the reply to a status request or a reset.
+type Status struct {
+	SFTP    SFTPStatus `json:"sftp"`
 	Backend string     `json:"backend"`
-	Run     runStatus  `json:"run"`
+	Run     RunStatus  `json:"run"`
 }
 
-type sftpStatus struct {
+// SFTPStatus says whether clients can reach the current run.
+type SFTPStatus struct {
 	State     runs.State `json:"state"`
 	DownUntil *time.Time `json:"down_until,omitempty"`
 	Error     string     `json:"error,omitempty"`
 }
 
-type runStatus struct {
+// RunStatus describes the current run and its scenario, if it has one.
+type RunStatus struct {
 	ID         string `json:"id"`
 	Scenario   string `json:"scenario,omitempty"`
-	Seed       *seed  `json:"seed,omitempty"`
+	Seed       *Seed  `json:"seed,omitempty"`
 	SeedPinned bool   `json:"seed_pinned,omitempty"`
 }
 
-func newStatusBody(s runs.Status) statusBody {
-	body := statusBody{
-		SFTP:    sftpStatus{State: s.State},
+func newStatus(s runs.Status) Status {
+	body := Status{
+		SFTP:    SFTPStatus{State: s.State},
 		Backend: "embedded",
-		Run:     runStatus{ID: s.Run.ID},
+		Run:     RunStatus{ID: s.Run.ID},
 	}
 	if !s.DownUntil.IsZero() {
 		until := s.DownUntil.UTC()
@@ -136,21 +140,21 @@ func newStatusBody(s runs.Status) statusBody {
 		body.SFTP.Error = s.Err.Error()
 	}
 	if sc := s.Run.Scenario; sc.Name != "" {
-		body.Run.Scenario, body.Run.Seed, body.Run.SeedPinned = sc.Name, (*seed)(&sc.Seed), sc.Pinned
+		body.Run.Scenario, body.Run.Seed, body.Run.SeedPinned = sc.Name, (*Seed)(&sc.Seed), sc.Pinned
 	}
 	return body
 }
 
-// seed is a faults.Seed in JSON. It is written as a decimal string, as the
+// Seed is a faults.Seed in JSON. It is written as a decimal string, as the
 // proto3 JSON mapping writes a uint64, since JavaScript reads a number past
 // 2^53 inexactly, and read from a string or a number.
-type seed faults.Seed
+type Seed faults.Seed
 
-func (s seed) MarshalJSON() ([]byte, error) {
+func (s Seed) MarshalJSON() ([]byte, error) {
 	return json.Marshal(strconv.FormatUint(uint64(s), 10))
 }
 
-func (s *seed) UnmarshalJSON(b []byte) error {
+func (s *Seed) UnmarshalJSON(b []byte) error {
 	text := string(b)
 	if strings.HasPrefix(text, `"`) {
 		if err := json.Unmarshal(b, &text); err != nil {
@@ -161,7 +165,7 @@ func (s *seed) UnmarshalJSON(b []byte) error {
 	if err != nil {
 		return errors.New("a seed is a whole number from 0 to 18446744073709551615")
 	}
-	*s = seed(n)
+	*s = Seed(n)
 	return nil
 }
 
