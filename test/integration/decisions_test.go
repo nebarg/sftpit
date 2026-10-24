@@ -51,7 +51,7 @@ func TestSeededFailuresRepeat(t *testing.T) {
 			Match:       faults.Match{Operations: []faults.Operation{faults.OpenWrite}},
 			Probability: &half,
 			Action:      sftpproxy.Fail{Status: sftpwire.StatusFailure},
-		}}, 481516, slog.New(slog.DiscardHandler))
+		}}, nil, 481516, slog.New(slog.DiscardHandler))
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}
@@ -118,7 +118,7 @@ func TestSeededCutoffsRepeat(t *testing.T) {
 			Probability: &half,
 			Cutoff:      &cutoffs,
 			Action:      sftpproxy.PartialUpload{Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}},
-		}}, seed, slog.New(slog.DiscardHandler))
+		}}, nil, seed, slog.New(slog.DiscardHandler))
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}

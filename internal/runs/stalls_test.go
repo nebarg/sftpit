@@ -114,7 +114,7 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 
 	// A bare reset repeats the inline scenario, with its pinned seed, and
 	// not the rules the run had come to.
-	if _, err := m.ChangeRules(run.ID, 1, nil); err != nil {
+	if _, err := m.ChangeRules(run.ID, 1, nil, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
 	run, err = m.Reset(t.Context(), ResetRequest{})
@@ -137,6 +137,7 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 	}{
 		{"a named and an inline scenario", ResetRequest{Scenario: nameOf("chaos"), Inline: inline}, ErrTwoScenarios},
 		{"rules an engine cannot apply", ResetRequest{Inline: &InlineScenario{Rules: []faults.Rule{denyStats, denyStats}}}, nil},
+		{"chaos an engine cannot apply", ResetRequest{Inline: &InlineScenario{Chaos: &faults.Chaos{Preset: "wild"}}}, nil},
 	}
 	for _, tt := range tests {
 		before := m.Status().Run.ID

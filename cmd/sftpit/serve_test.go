@@ -143,6 +143,28 @@ scenarios:
 	}
 }
 
+func TestServeShowsTheScenariosChaos(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeTestFile(t, config, `schema_version: 1
+scenarios:
+  dev-chaos:
+    chaos: {preset: moderate}
+  paused-chaos:
+    chaos: {preset: heavy, paused: true}
+`)
+	tests := []struct{ scenario, want string }{
+		{"dev-chaos", "  scenario: dev-chaos (0 fault rules)\n  chaos: moderate\n"},
+		{"paused-chaos", "  scenario: paused-chaos (0 fault rules)\n  chaos: heavy, paused\n"},
+	}
+	for _, tt := range tests {
+		s := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", tt.scenario)
+		s.stop(t)
+		if out := s.stdout.String(); !strings.Contains(out, tt.want) {
+			t.Errorf("the banner of %s lacks %q:\n%s", tt.scenario, tt.want, out)
+		}
+	}
+}
+
 func TestServeInjectsFaultsAtLogin(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	writeTestFile(t, config, `schema_version: 1

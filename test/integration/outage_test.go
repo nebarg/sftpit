@@ -55,7 +55,7 @@ func TestOpenSSHOutages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{slow, tt.rule}, 0, logs.logger())
+			rules, err := faults.New([]faults.Rule{slow, tt.rule}, nil, 0, logs.logger())
 			if err != nil {
 				t.Fatalf("faults.New: %v", err)
 			}
@@ -106,7 +106,7 @@ func TestLaravelGivesUpDuringAnOutage(t *testing.T) {
 		MaxTriggers: 1,
 		Match:       faults.Match{Operations: []faults.Operation{faults.Authenticate}},
 		Action:      sftpproxy.ListenerDown{Duration: 2 * time.Second, CloseExisting: true},
-	}}, 0, logs.logger())
+	}}, nil, 0, logs.logger())
 	if err != nil {
 		t.Fatalf("faults.New: %v", err)
 	}

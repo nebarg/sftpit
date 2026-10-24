@@ -90,7 +90,7 @@ sftpit config validate --config ./sftpit.yaml
 sftpit config explain --config ./sftpit.yaml
 ```
 
-`validate` checks everything `serve` would, every scenario included, and exits with 2 at the first problem. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, and each scenario's rules in the order they are tried. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace, and both take `--env-file`.
+`validate` checks everything `serve` would, every scenario included, and exits with 2 at the first problem. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, each scenario's rules in the order they are tried, and the rules each [chaos preset](#chaos) compiles to, in a comment. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace, and both take `--env-file`.
 
 ## Faults
 
@@ -255,6 +255,34 @@ faults:
   - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, a close or reset as the server closing or resetting the connection, and a connection refused during an outage as `connect to host 127.0.0.1 port N: Connection refused`.
   - Flysystem's SFTP adapter retries a failed connection 4 times at once, so a Laravel upload rides out four cut-off logins in a row, and fails after five. Those retries are all refused during an outage, so only an application that backs off for longer than the outage recovers from it.
 
+### Chaos
+
+A scenario's `chaos` makes random trouble over a scope, for trying an application against sftpit while developing it:
+
+```yaml
+scenarios:
+  dev-chaos:
+    chaos:
+      preset: "moderate" # light, moderate or heavy
+      scope: { user: "partner-b" } # optional: user, key_fingerprint and one location field, as a recipe takes
+      extras: ["corrupt_download"] # optional
+```
+
+A preset compiles to ordinary rules, which are tried after the scenario's own `faults`, so a scripted rule wins on a request that both match:
+
+| Rule | `light` | `moderate` | `heavy` |
+|---|---|---|---|
+| `chaos-delay`: a `delay` of 0.2–2 s before the server acts, on any request | 5% | 10% | 20% |
+| `chaos-fail`: a `fail` before the server acts, with `failure` | 1% | 3% | 8% |
+| `chaos-drop`: a `close_connection` at a moment up to 1 s after a transfer's file opens | | 2% of transfers | 5% of transfers |
+| `chaos-freeze`: a `freeze_connection` before the server acts, for up to 15 s | | | 0.5% |
+
+- **What draws:** any request can be delayed, reads and writes included, as on a slow link. Only the other operations fail or freeze, so a transfer is decided at its open and close, and a large file is no likelier to fail than a small one. The drops make trouble during a transfer, but only if it is still open at its moment, so a small file usually finishes first unless a delay holds it open.
+- **Extras:** corruption and wrong sizes are never part of a preset, since silently corrupted data surprises in a long session. `corrupt_download` changes the first 64 bytes served of a download (`chaos-corrupt-download`), and `wrong_size` reports sizes 1 KiB short in stat replies and listings (`chaos-wrong-size`), each as often as the preset fails operations.
+- **Seeds:** without a pinned seed, each run draws a fresh one, so chaos differs from run to run. The banner shows the preset, and the logs name the rule behind each fault, such as `rule fired rule=chaos-fail`.
+- **Names:** `sftpit config explain` shows the rules a preset compiles to. Rule IDs that start with `chaos-` are kept for them.
+- **Pausing:** with `paused: true`, chaos's rules match nothing, and a drop it chose does not come, until a [change of rules](#changing-the-rules-during-a-run) resumes them with their counts. A delay or freeze already under way runs its course.
+
 ## Control API
 
 `sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names. Port `0` picks a free port, and the banner shows the address.
@@ -265,7 +293,7 @@ faults:
 | `GET /api/v1/ready` | `{"ready": true}`, or status 503 with the error once a reset has failed |
 | `GET /api/v1/status` | the state of the SFTP server, the backend and the current run |
 | `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
-| `GET /api/v1/runs/{id}/rules` | the run's rules, their revision and what each has done |
+| `GET /api/v1/runs/{id}/rules` | the run's rules and chaos, their revision and what each rule has done |
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 | `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
 
@@ -292,10 +320,10 @@ The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `
 Every field of the body is optional:
 - `run` is the run the reset expects to end. If another run is current, the reset is refused with status 409.
 - `scenario` names the next run's scenario, or `""` for none. Without it, the next run repeats the current scenario, and its seed if that was pinned.
-- `faults` gives the next run's rules in place of a named scenario, as a [change of rules](#changing-the-rules-during-a-run) does, so a test can start from rules of its own. Status then shows `"inline": true`, and a reset without `scenario` or `faults` repeats them.
+- `faults` and `chaos` give the next run's rules and [chaos](#chaos) in place of a named scenario, as a [change of rules](#changing-the-rules-during-a-run) does, so a test can start from rules of its own. Status then shows `"inline": true`, and a reset without `scenario`, `faults` or `chaos` repeats them.
 - `seed` pins the next run's random decisions. Without it, the scenario's own seed does, or the run draws a fresh one.
 
-An unknown scenario, a seed without one, both `scenario` and `faults`, or invalid rules are refused with status 400 and leave the run alone. The scenarios are those of the configuration as it was at startup, so a change to the file needs a restart.
+An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, or invalid rules or chaos are refused with status 400 and leave the run alone. The scenarios are those of the configuration as it was at startup, so a change to the file needs a restart.
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
@@ -303,7 +331,7 @@ If a reset fails once it has closed admission, because a session outlasted the 3
 
 ### Changing the rules during a run
 
-`PUT /api/v1/runs/{id}/rules` replaces the current run's rules, all at once between two requests, without a reset. Its body gives the `revision` of the rules it replaces, and the new rules as a scenario's `faults`, in JSON, in the long form or as recipes:
+`PUT /api/v1/runs/{id}/rules` replaces the current run's rules, all at once between two requests, without a reset. Its body gives the `revision` of the rules it replaces, the new rules as a scenario's `faults`, in JSON, in the long form or as recipes, and optionally the run's [`chaos`](#chaos):
 
 ```bash
 curl -X PUT -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/rules -d '{
@@ -314,7 +342,7 @@ curl -X PUT -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/runs/20261024-19
 }'
 ```
 
-It answers as `GET` on the same route does, with the rules' revision, the rules in the long form, in the order they are tried, and what each has done so far:
+It answers as `GET` on the same route does, with the rules' revision, the run's `chaos`, if it has any, with every default spelled out, the rules in the long form, in the order they are tried, and what each rule has done so far, chaos's included:
 
 ```json
 {
@@ -330,7 +358,8 @@ It answers as `GET` on the same route does, with the rules' revision, the rules 
 }
 ```
 
-- **Revisions:** the rules a run starts with are revision 1, and each change adds one. A change based on another revision, such as from a second dashboard tab, is refused with status 409, as is one for a run that is no longer current. Invalid rules are refused with 400, with the message the config file would give. Either way, nothing changes. The `faults` that a `GET` returns can be sent back as they are.
+- **Revisions:** the rules a run starts with are revision 1, and each change adds one. A change based on another revision, such as from a second dashboard tab, is refused with status 409, as is one for a run that is no longer current. Invalid rules are refused with 400, with the message the config file would give. Either way, nothing changes. The `faults` and `chaos` that a `GET` returns can be sent back as they are.
+- **Chaos** is replaced as the rules are: a change without `chaos` ends it, and one that only sets `paused` pauses or resumes it, keeping its rules' counts.
 - **A rule that carries on**, with the same ID and definition, keeps its counts, attempts, occurrences and moments.
 - **Any other rule starts from the change.** Its first attempt is the next open, a trigger anchored to the run measures from the change, and its random decisions differ from those of an earlier rule with the same ID.
 - **A rule that goes** releases what it holds: a delayed request or reply goes on, and a frozen connection is closed. None of its moments come. A transfer it chose keeps its partial upload or corruption, so a download is never corrupted only in part, and an outage it started runs its course.

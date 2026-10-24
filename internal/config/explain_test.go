@@ -33,6 +33,13 @@ func TestExplainedConfigurationsLoadTheSame(t *testing.T) {
 			t.Errorf("the explained configuration does not name a rename's source as such, %q:\n%s", want, explained)
 		}
 	}
+	// The comment ends with chaos-wrong-size, whatever order the extras are
+	// listed in.
+	for _, want := range []string{"    # Chaos applies these rules, after the scenario's own:\n    # - id: chaos-delay\n", "    #   match:\n    #     user: partner-b\n    #     operation: any\n    #     filename: orders.csv\n", "    #     size_delta: -1024\n    chaos:\n      preset: heavy\n"} {
+		if !strings.Contains(string(explained), want) {
+			t.Errorf("the explained configuration does not show chaos's rules before it, %q:\n%s", want, explained)
+		}
+	}
 	tried := []string{"id: failed-close\n", "id: slow-reply\n", "id: missing-chunk\n", "id: slow-stat\n"}
 	for i := 1; i < len(tried); i++ {
 		if strings.Index(string(explained), tried[i-1]) > strings.Index(string(explained), tried[i]) {
@@ -101,6 +108,10 @@ users:
 scenarios:
   empty: {faults: []}
   zero: {seed: 0, faults: []}
+  dev-chaos:
+    chaos: {preset: heavy, scope: {user: partner-b, filename: orders.csv}, extras: [wrong_size, corrupt_download], paused: true}
+    faults:
+      - {id: deny, match: {operation: remove}, action: {type: fail, when: before, status: permission_denied}}
   every-action:
     seed: 7
     faults:

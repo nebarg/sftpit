@@ -1,7 +1,7 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
-// alive and ready, the status of the current run, its rules, which can
-// change during the run, the release of its stalls, and resets that start
-// the next run. Its Client calls the API.
+// alive and ready, the status of the current run, its rules and chaos, which
+// can change during the run, the release of its stalls, and resets that
+// start the next run. Its Client calls the API.
 //
 // The API answers only requests addressed to a loopback host, so a web page
 // cannot reach it through DNS rebinding. It refuses a change that a browser
@@ -84,13 +84,13 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := runs.ResetRequest{Run: body.Run, Scenario: body.Scenario, Seed: (*faults.Seed)(body.Seed)}
-	if len(body.Faults) > 0 && string(body.Faults) != "null" {
-		rules, err := config.ParseRules(body.Faults, a.runs.Users())
+	if given(body.Faults) || given(body.Chaos) {
+		inline, err := a.inline(body.Faults, body.Chaos)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		req.Inline = &runs.InlineScenario{Rules: rules}
+		req.Inline = inline
 	}
 	// A reset runs to its end even if the client goes away, as stopping
 	// part way would leave admission closed.
@@ -122,6 +122,7 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Revision *uint64         `json:"revision"`
 		Faults   json.RawMessage `json:"faults"`
+		Chaos    json.RawMessage `json:"chaos"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -131,7 +132,7 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 	case body.Revision == nil:
 		writeError(w, http.StatusBadRequest, errors.New("revision is required: the revision of the rules that the change replaces"))
 		return
-	case len(body.Faults) == 0 || string(body.Faults) == "null":
+	case !given(body.Faults):
 		writeError(w, http.StatusBadRequest, errors.New("faults is required: the list of rules, or [] for none"))
 		return
 	}
@@ -140,7 +141,12 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	set, err := a.runs.ChangeRules(r.PathValue("id"), *body.Revision, rules)
+	chaos, err := a.chaos(body.Chaos)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	set, err := a.runs.ChangeRules(r.PathValue("id"), *body.Revision, rules, chaos)
 	switch {
 	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
 		writeError(w, http.StatusConflict, err)
@@ -149,6 +155,36 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeRules(w, set)
 	}
+}
+
+// inline returns the inline scenario of a reset that gives rules, chaos or
+// both.
+func (a *api) inline(rules, chaos json.RawMessage) (*runs.InlineScenario, error) {
+	s := &runs.InlineScenario{}
+	var err error
+	if given(rules) {
+		if s.Rules, err = config.ParseRules(rules, a.runs.Users()); err != nil {
+			return nil, err
+		}
+	}
+	if s.Chaos, err = a.chaos(chaos); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// chaos returns the chaos that raw gives, or nil if it gives none.
+func (a *api) chaos(raw json.RawMessage) (*faults.Chaos, error) {
+	if !given(raw) {
+		return nil, nil
+	}
+	return config.ParseChaos(raw, a.runs.Users())
+}
+
+// given reports whether a field of a request body is set, to anything but
+// null.
+func given(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 func (a *api) releaseStalls(w http.ResponseWriter, r *http.Request) {
@@ -160,13 +196,21 @@ func (a *api) releaseStalls(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeRules writes set as the reply to a request for a run's rules or a
-// change of them: the revision, the rules in the long form, in the order
-// they are tried, and what each has done, by rule ID.
+// change of them: the revision, the chaos, if any, the rules in the long
+// form, in the order they are tried, and what each rule has done, those of
+// chaos included, by rule ID.
 func writeRules(w http.ResponseWriter, set faults.RuleSet) {
 	rules, err := config.RulesJSON(set.Rules)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	var chaos json.RawMessage
+	if set.Chaos != nil {
+		if chaos, err = config.ChaosJSON(set.Chaos); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	counts := make(map[string]ruleCounts, len(set.Counts))
 	for id, c := range set.Counts {
@@ -174,9 +218,10 @@ func writeRules(w http.ResponseWriter, set faults.RuleSet) {
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Revision uint64                `json:"revision"`
+		Chaos    json.RawMessage       `json:"chaos,omitempty"`
 		Faults   json.RawMessage       `json:"faults"`
 		Counts   map[string]ruleCounts `json:"counts"`
-	}{set.Revision, rules, counts})
+	}{set.Revision, chaos, rules, counts})
 }
 
 // ruleCounts are what a rule has done in the run, as faults.Counts.
@@ -188,12 +233,13 @@ type ruleCounts struct {
 
 // ResetRequest is the body of a reset, which chooses the next run as
 // runs.ResetRequest does. Every field is optional, so an empty body repeats
-// the current run. Faults, if given, is an inline scenario's rules, as a
-// change of rules gives them.
+// the current run. Faults and Chaos, if either is given, are an inline
+// scenario's rules and chaos, as a change of rules gives them.
 type ResetRequest struct {
 	Run      string          `json:"run,omitempty"`
 	Scenario *string         `json:"scenario,omitempty"`
 	Faults   json.RawMessage `json:"faults,omitempty"`
+	Chaos    json.RawMessage `json:"chaos,omitempty"`
 	Seed     *Seed           `json:"seed,omitempty"`
 }
 

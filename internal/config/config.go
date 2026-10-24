@@ -105,6 +105,10 @@ type Scenario struct {
 
 	// Rules are the scenario's fault rules, in the order they were given.
 	Rules []faults.Rule
+
+	// Chaos is the scenario's chaos, whose rules are tried after its own, or
+	// nil.
+	Chaos *faults.Chaos
 }
 
 // Rules returns the fault rules of the chosen scenario, if any.

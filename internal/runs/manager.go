@@ -96,9 +96,11 @@ type activeRun struct {
 	handler sshfront.Handler
 	hooks   sshfront.Hooks
 
-	// startRules are the rules the run started with, which a reset that
-	// repeats an inline scenario starts the next run with.
+	// startRules and startChaos are the rules and chaos the run started
+	// with, which a reset that repeats an inline scenario starts the next
+	// run with.
 	startRules []faults.Rule
+	startChaos *faults.Chaos
 
 	// stops stop the timers armed for the run: those it started with, and
 	// those of each change of its rules.
@@ -177,9 +179,10 @@ type ResetRequest struct {
 }
 
 // InlineScenario is a scenario given at a reset rather than named in the
-// configuration.
+// configuration: its rules, and its chaos, or nil.
 type InlineScenario struct {
 	Rules []faults.Rule
+	Chaos *faults.Chaos
 }
 
 // Reset ends the current run and starts the run that req chooses. It first
@@ -239,19 +242,19 @@ func (m *Manager) Rules(run string) (faults.RuleSet, error) {
 }
 
 // ChangeRules replaces the rules of run, which must be the current run, with
-// rules, as faults.Engine.Replace does if revision is still the current
-// revision, and returns the new rules. It fails with ErrStaleRun for another
-// run, and with faults.ErrStaleRevision for another revision. The run takes
-// the listener down at the moments of the rules that start afresh, as it
-// does at those of the rules it started with.
-func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
+// rules, and its chaos with chaos, as faults.Engine.Replace does if revision
+// is still the current revision, and returns the new rules. It fails with
+// ErrStaleRun for another run, and with faults.ErrStaleRevision for another
+// revision. The run takes the listener down at the moments of the rules
+// that start afresh, as it does at those of the rules it started with.
+func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
 	current := m.active()
 	if run != current.run.ID {
 		return faults.RuleSet{}, staleRun(current, run)
 	}
-	timers, err := current.rules.Replace(revision, rules)
+	timers, err := current.rules.Replace(revision, rules, chaos)
 	if err != nil {
 		return faults.RuleSet{}, err
 	}
@@ -339,10 +342,12 @@ func (m *Manager) Status() Status {
 	return s
 }
 
-// choice is the scenario chosen for a run, with the rules it starts with.
+// choice is the scenario chosen for a run, with the rules and chaos it
+// starts with.
 type choice struct {
 	scenario Scenario
 	rules    []faults.Rule
+	chaos    *faults.Chaos
 }
 
 // next chooses the scenario of the run after current, as req asks.
@@ -353,7 +358,7 @@ func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
 	case req.Scenario != nil:
 		return m.scenario(*req.Scenario, req.Seed)
 	case req.Inline != nil:
-		return inline(req.Inline.Rules, req.Seed)
+		return inline(*req.Inline, req.Seed)
 	}
 	last := current.run.Scenario
 	seed := req.Seed
@@ -361,7 +366,7 @@ func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
 		seed = &last.Seed
 	}
 	if last.Inline {
-		return inline(current.startRules, seed)
+		return inline(InlineScenario{Rules: current.startRules, Chaos: current.startChaos}, seed)
 	}
 	return m.scenario(last.Name, seed)
 }
@@ -384,21 +389,26 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
 		return choice{}, fmt.Errorf("runs: %w %q; the configuration defines %s", ErrUnknownScenario, name, defined)
 	}
 	if seed = cmp.Or(seed, s.Seed); seed != nil {
-		return choice{scenario: Scenario{Name: name, Seed: *seed, Pinned: true}, rules: s.Rules}, nil
+		return choice{scenario: Scenario{Name: name, Seed: *seed, Pinned: true}, rules: s.Rules, chaos: s.Chaos}, nil
 	}
-	return choice{scenario: Scenario{Name: name, Seed: faults.RandomSeed()}, rules: s.Rules}, nil
+	return choice{scenario: Scenario{Name: name, Seed: faults.RandomSeed()}, rules: s.Rules, chaos: s.Chaos}, nil
 }
 
-// inline chooses a run of an inline scenario of rules, whose random
-// decisions seed pins if set, or else a fresh seed.
-func inline(rules []faults.Rule, seed *faults.Seed) (choice, error) {
-	if err := faults.Check(rules); err != nil {
+// inline chooses a run of the inline scenario s, whose random decisions
+// seed pins if set, or else a fresh seed.
+func inline(s InlineScenario, seed *faults.Seed) (choice, error) {
+	if err := faults.Check(s.Rules); err != nil {
 		return choice{}, fmt.Errorf("runs: %w", err)
 	}
-	if seed != nil {
-		return choice{scenario: Scenario{Inline: true, Seed: *seed, Pinned: true}, rules: rules}, nil
+	if s.Chaos != nil {
+		if err := s.Chaos.Check(); err != nil {
+			return choice{}, fmt.Errorf("runs: %w", err)
+		}
 	}
-	return choice{scenario: Scenario{Inline: true, Seed: faults.RandomSeed()}, rules: rules}, nil
+	if seed != nil {
+		return choice{scenario: Scenario{Inline: true, Seed: *seed, Pinned: true}, rules: s.Rules, chaos: s.Chaos}, nil
+	}
+	return choice{scenario: Scenario{Inline: true, Seed: faults.RandomSeed()}, rules: s.Rules, chaos: s.Chaos}, nil
 }
 
 // begin starts the chosen run in the workspace, with its files restored
@@ -435,7 +445,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 
 	// A run without a scenario has an engine too, for rules applied to it
 	// later.
-	rules, err := faults.New(chosen.rules, chosen.scenario.Seed, m.logger)
+	rules, err := faults.New(chosen.rules, chosen.chaos, chosen.scenario.Seed, m.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -446,6 +456,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		handler:    Handler(run, embedded, rules, sftpproxy.Options{Logger: m.logger}),
 		hooks:      Hooks(rules, m.logger),
 		startRules: chosen.rules,
+		startChaos: chosen.chaos,
 	}, nil
 }
 

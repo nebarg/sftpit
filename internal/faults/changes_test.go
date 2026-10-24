@@ -20,7 +20,7 @@ func TestAChangeReplacesTheRulesAsTheNextRevision(t *testing.T) {
 	kept := faults.Rule{ID: "kept", Match: faults.Match{Operations: ops(faults.Stat), Occurrence: []uint64{2}}, Action: failure}
 	edited := faults.Rule{ID: "edited", Priority: 1, Match: faults.Match{Operations: ops(faults.LStat), Occurrence: []uint64{1}}, Action: failure}
 	removed := failOn("removed", faults.Match{Operations: ops(faults.Mkdir)})
-	e, err := faults.New([]faults.Rule{edited, kept, removed}, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	e, err := faults.New([]faults.Rule{edited, kept, removed}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestAChangeReplacesTheRulesAsTheNextRevision(t *testing.T) {
 
 	edited.Action = denied
 	added := failOn("added", faults.Match{Operations: ops(faults.Rmdir)})
-	if _, err := e.Replace(1, []faults.Rule{edited, added, kept}); err != nil {
+	if _, err := e.Replace(1, []faults.Rule{edited, added, kept}, nil); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	set := e.Rules()
@@ -75,16 +75,16 @@ func TestAChangeReplacesTheRulesAsTheNextRevision(t *testing.T) {
 
 func TestAChangeNeedsTheCurrentRevisionAndValidRules(t *testing.T) {
 	e := newEngine(t, failOn("r", stat))
-	if _, err := e.Replace(2, nil); !errors.Is(err, faults.ErrStaleRevision) || !strings.Contains(err.Error(), "the current revision is 1, not 2") {
+	if _, err := e.Replace(2, nil, nil); !errors.Is(err, faults.ErrStaleRevision) || !strings.Contains(err.Error(), "the current revision is 1, not 2") {
 		t.Errorf("Replace with a revision to come = %v, want ErrStaleRevision", err)
 	}
-	if _, err := e.Replace(1, []faults.Rule{failOn("r", stat), failOn("r", stat)}); err == nil || !strings.Contains(err.Error(), `rule ID "r" is used twice`) {
+	if _, err := e.Replace(1, []faults.Rule{failOn("r", stat), failOn("r", stat)}, nil); err == nil || !strings.Contains(err.Error(), `rule ID "r" is used twice`) {
 		t.Errorf("Replace with a repeated ID = %v, want it refused", err)
 	}
-	if _, err := e.Replace(1, nil); err != nil {
+	if _, err := e.Replace(1, nil, nil); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	if _, err := e.Replace(1, nil); !errors.Is(err, faults.ErrStaleRevision) || !strings.Contains(err.Error(), "the current revision is 2, not 1") {
+	if _, err := e.Replace(1, nil, nil); !errors.Is(err, faults.ErrStaleRevision) || !strings.Contains(err.Error(), "the current revision is 2, not 1") {
 		t.Errorf("Replace with a revision that has gone = %v, want ErrStaleRevision", err)
 	}
 	if got := session(e, "test", "")(on(&sftpwire.Stat{}, "/f")); got != nil || len(e.Rules().Rules) != 0 {
@@ -114,7 +114,7 @@ func TestARuleAppliedLiveDrawsAfresh(t *testing.T) {
 		{[]faults.Rule{slow}, 4, 1},
 	} {
 		if step.rules != nil {
-			if _, err := e.Replace(e.Revision(), step.rules); err != nil {
+			if _, err := e.Replace(e.Revision(), step.rules, nil); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -135,7 +135,7 @@ func TestATriggerAnchoredToTheRunMeasuresFromTheChange(t *testing.T) {
 		e := newEngine(t)
 		decide := session(e, "test", "")
 		time.Sleep(20 * time.Second)
-		if _, err := e.Replace(1, []faults.Rule{window, moment}); err != nil {
+		if _, err := e.Replace(1, []faults.Rule{window, moment}, nil); err != nil {
 			t.Fatal(err)
 		}
 		for i, step := range []struct {
@@ -161,7 +161,7 @@ func TestATriggerAnchoredToTheRunMeasuresFromTheChange(t *testing.T) {
 func TestReleaseStallsReleasesOnlyThoseInProgress(t *testing.T) {
 	var logs bytes.Buffer
 	stall := sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}
-	e, err := faults.New([]faults.Rule{{ID: "stuck", Match: stat, Action: stall}}, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	e, err := faults.New([]faults.Rule{{ID: "stuck", Match: stat, Action: stall}}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,11 +198,11 @@ func TestAChangeTimesTheRunsOutagesFromIt(t *testing.T) {
 		outage := faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: &someTime}, Duration: &someTime, Action: drawnOutage}
 		e := newEngine(t, outage)
 		time.Sleep(time.Minute)
-		if _, err := e.Replace(1, nil); err != nil {
+		if _, err := e.Replace(1, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		changed := time.Now()
-		timers, err := e.Replace(2, []faults.Rule{outage})
+		timers, err := e.Replace(2, []faults.Rule{outage}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -265,7 +265,7 @@ func TestARemovedRuleReleasesItsWaits(t *testing.T) {
 	}
 	edited := rules[len(rules)-1]
 	edited.Action = sftpproxy.Delay{Duration: time.Hour}
-	if _, err := e.Replace(1, []faults.Rule{slow, edited}); err != nil {
+	if _, err := e.Replace(1, []faults.Rule{slow, edited}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for name, release := range waits {
@@ -293,7 +293,7 @@ func TestTheMomentsOfARemovedRuleDoNotCome(t *testing.T) {
 			{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Action: cutOff},
 			{ID: "corrupt", Match: faults.Match{Operations: ops(faults.Read)}, Action: sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate}},
 		}
-		e, err := faults.New(rules, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+		e, err := faults.New(rules, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -313,7 +313,7 @@ func TestTheMomentsOfARemovedRuleDoNotCome(t *testing.T) {
 			"a partial upload":   s.Decide(openFor("/w", sftpwire.OpenWrite)).(sftpproxy.PartialUpload).Reserve,
 			"a corrupt download": s.Decide(openFor("/r", sftpwire.OpenRead)).(sftpproxy.CorruptDownload).Reserve,
 		}
-		if _, err := e.Replace(1, nil); err != nil {
+		if _, err := e.Replace(1, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		for name, reserve := range moments {
@@ -356,7 +356,7 @@ func TestOpenSessionsAreTimedForRulesAddedLive(t *testing.T) {
 			{ID: "per-connection", Match: faults.Match{User: "a"}, Trigger: &faults.Trigger{Anchor: faults.Connection, At: &someTime}, Action: sftpproxy.Drop{}},
 			{ID: "soon", Trigger: &faults.Trigger{Anchor: faults.Run, At: at(5 * time.Second)}, Action: sftpproxy.EndSession{}},
 		}
-		if _, err := e.Replace(1, rules); err != nil {
+		if _, err := e.Replace(1, rules, nil); err != nil {
 			t.Fatal(err)
 		}
 		changed := time.Now()

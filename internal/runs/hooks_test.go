@@ -91,7 +91,7 @@ func TestArmTimersStartsNoOutageOnceStopped(t *testing.T) {
 	moment := &faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Millisecond}
 	outage := faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.ListenerDown{Duration: time.Minute}}
 	for attempt := range 300 {
-		rules, err := faults.New([]faults.Rule{outage}, 0, logger)
+		rules, err := faults.New([]faults.Rule{outage}, nil, 0, logger)
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}
@@ -113,7 +113,7 @@ func serveWithHooks(t *testing.T, action sftpproxy.Action, handshakeTimeout time
 	t.Helper()
 	logs := make(messages, 64)
 	logger := slog.New(logs)
-	rules, err := faults.New([]faults.Rule{{ID: "connect", Match: faults.Match{Operations: []faults.Operation{faults.Connect}}, Action: action}}, 0, logger)
+	rules, err := faults.New([]faults.Rule{{ID: "connect", Match: faults.Match{Operations: []faults.Operation{faults.Connect}}, Action: action}}, nil, 0, logger)
 	if err != nil {
 		t.Fatalf("faults.New: %v", err)
 	}

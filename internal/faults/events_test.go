@@ -24,7 +24,7 @@ func TestConnectionEventsMatchTheirOwnRules(t *testing.T) {
 		{ID: "second-connect", Match: faults.Match{Operations: ops(faults.Connect), Occurrence: []uint64{2}}, Action: slowLogin},
 		{ID: "partner-login", MaxTriggers: 1, Match: faults.Match{Operations: ops(faults.Authenticate), KeyFingerprint: "SHA256:partner"}, Action: hangUp},
 		{ID: "every-request", Match: faults.Match{Operations: ops(faults.Any)}, Action: failure},
-	}, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestRulesForConnectionEventsThatCannotApplyAreRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.rule.ID = "r"
-			_, err := faults.New([]faults.Rule{tt.rule}, testSeed, nil)
+			_, err := faults.New([]faults.Rule{tt.rule}, nil, testSeed, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.err) {
 				t.Errorf("New = %v, want an error about %q", err, tt.err)
 			}

@@ -28,7 +28,7 @@ func TestRulesChangeDuringARun(t *testing.T) {
 		t.Fatalf("a stat before the change = %v", err)
 	}
 
-	set, err := m.ChangeRules(run, 1, []faults.Rule{denyStats})
+	set, err := m.ChangeRules(run, 1, []faults.Rule{denyStats}, nil)
 	if err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
@@ -45,10 +45,10 @@ func TestRulesChangeDuringARun(t *testing.T) {
 		t.Errorf("a stat after the change = %v, want it denied on the session already open", err)
 	}
 
-	if _, err := m.ChangeRules(run, 1, nil); !errors.Is(err, faults.ErrStaleRevision) {
+	if _, err := m.ChangeRules(run, 1, nil, nil); !errors.Is(err, faults.ErrStaleRevision) {
 		t.Errorf("a change from revision 1 = %v, want ErrStaleRevision", err)
 	}
-	if _, err := m.ChangeRules("20261024-101500.123-3f9a", 2, nil); !errors.Is(err, ErrStaleRun) {
+	if _, err := m.ChangeRules("20261024-101500.123-3f9a", 2, nil, nil); !errors.Is(err, ErrStaleRun) {
 		t.Errorf("a change to another run = %v, want ErrStaleRun", err)
 	}
 	if _, err := m.Rules("20261024-101500.123-3f9a"); !errors.Is(err, ErrStaleRun) {
@@ -90,7 +90,7 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 			defer raw.Close()
 			for msg := ""; msg != "injected fault"; msg = receive(t, logs) {
 			}
-			if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil); err != nil {
+			if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil, nil); err != nil {
 				t.Fatalf("ChangeRules: %v", err)
 			}
 			if err := raw.SetDeadline(time.Now().Add(waitTimeout)); err != nil {
@@ -113,10 +113,10 @@ func TestALiveRuleTakesTheServerDownAtItsMoment(t *testing.T) {
 	m, _ := startManager(t, Options{})
 	run := m.Status().Run.ID
 	// A moment that a change removes before it comes never comes.
-	if _, err := m.ChangeRules(run, 1, []faults.Rule{outageAt(300 * time.Millisecond)}); err != nil {
+	if _, err := m.ChangeRules(run, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
-	if _, err := m.ChangeRules(run, 2, nil); err != nil {
+	if _, err := m.ChangeRules(run, 2, nil, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
 	time.Sleep(600 * time.Millisecond)
@@ -125,7 +125,7 @@ func TestALiveRuleTakesTheServerDownAtItsMoment(t *testing.T) {
 	}
 
 	changed := time.Now()
-	if _, err := m.ChangeRules(run, 3, []faults.Rule{outageAt(300 * time.Millisecond)}); err != nil {
+	if _, err := m.ChangeRules(run, 3, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
 	awaitState(t, m, StateDown)
@@ -136,7 +136,7 @@ func TestALiveRuleTakesTheServerDownAtItsMoment(t *testing.T) {
 
 func TestResetStopsTheTimersOfLiveRules(t *testing.T) {
 	m, _ := startManager(t, Options{})
-	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{outageAt(300 * time.Millisecond)}); err != nil {
+	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
 	if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
@@ -162,7 +162,7 @@ func TestALiveRuleIsNotTimedForSessionsThatHaveEnded(t *testing.T) {
 	deadline := time.Now().Add(waitTimeout)
 	for revision := uint64(1); ; revision++ {
 		later := faults.Rule{ID: fmt.Sprintf("later-%d", revision), Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.EndSession{}}
-		set, err := m.ChangeRules(run, revision, []faults.Rule{later})
+		set, err := m.ChangeRules(run, revision, []faults.Rule{later}, nil)
 		if err != nil {
 			t.Fatalf("ChangeRules: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestALiveRuleClosesConnectionsAlreadyOpenAtItsMoment(t *testing.T) {
 	}
 	moment := &faults.Range[time.Duration]{Min: 100 * time.Millisecond, Max: 100 * time.Millisecond}
 	hangUp := faults.Rule{ID: "hang-up", Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.Drop{}}
-	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{hangUp}); err != nil {
+	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{hangUp}, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
 	receive(t, ended)

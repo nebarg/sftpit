@@ -5,8 +5,10 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -19,8 +21,9 @@ import (
 // Explain returns the configuration that Load reads for opts, written as a
 // configuration file: every default filled in, every path absolute, recipes
 // in the long form and each scenario's rules in the order they are tried.
-// Comments say where each secret comes from, without its value. Loading the
-// result gives the same configuration. Unlike Load, Explain reports a
+// Comments say where each secret comes from, without its value, and show the
+// rules that each chaos applies. Loading the result gives the same
+// configuration. Unlike Load, Explain reports a
 // missing or empty secret in a comment rather than as an error.
 func Explain(opts Options) ([]byte, error) {
 	r, err := read(opts, false)
@@ -57,20 +60,67 @@ func Explain(opts Options) ([]byte, error) {
 		for _, rule := range rules {
 			sc.Faults = append(sc.Faults, longForm(rule))
 		}
+		if s.Chaos != nil {
+			sc.Chaos = longChaos(s.Chaos)
+		}
 		f.Scenarios[name] = sc
 	}
 
-	var b bytes.Buffer
-	b.WriteString(r.header(opts.ConfigFile))
-	enc := yaml.NewEncoder(&b)
-	enc.SetIndent(2)
-	if err := enc.Encode(f); err != nil {
+	var doc yaml.Node
+	if err := doc.Encode(f); err != nil {
 		return nil, fmt.Errorf("config: write the configuration: %w", err)
 	}
-	if err := enc.Close(); err != nil {
+	for name, s := range cfg.Scenarios {
+		if s.Chaos == nil {
+			continue
+		}
+		if err := explainChaos(&doc, name, s.Chaos); err != nil {
+			return nil, fmt.Errorf("config: write the chaos of scenario %s: %w", name, err)
+		}
+	}
+	b := bytes.NewBufferString(r.header(opts.ConfigFile))
+	if err := encodeYAML(b, &doc); err != nil {
 		return nil, fmt.Errorf("config: write the configuration: %w", err)
 	}
 	return b.Bytes(), nil
+}
+
+// explainChaos comments the chaos of the scenario name in doc, the explained
+// configuration, with the rules that c applies.
+func explainChaos(doc *yaml.Node, name string, c *faults.Chaos) error {
+	var rules []ruleConfig
+	for _, r := range c.Rules() {
+		rules = append(rules, longForm(r))
+	}
+	var b bytes.Buffer
+	if err := encodeYAML(&b, rules); err != nil {
+		return err
+	}
+	_, scenarios := entry(doc, "scenarios")
+	_, scenario := entry(scenarios, name)
+	key, _ := entry(scenario, "chaos")
+	key.HeadComment = "Chaos applies these rules, after the scenario's own:\n" + strings.TrimSuffix(b.String(), "\n")
+	return nil
+}
+
+// entry returns the key and value of key in the mapping n.
+func entry(n *yaml.Node, key string) (k, v *yaml.Node) {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return n.Content[i], n.Content[i+1]
+		}
+	}
+	return nil, nil
+}
+
+// encodeYAML writes v to w as YAML, indented by two spaces.
+func encodeYAML(w io.Writer, v any) error {
+	enc := yaml.NewEncoder(w)
+	enc.SetIndent(2)
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	return enc.Close()
 }
 
 // header returns the comments that open an explained configuration.
@@ -81,7 +131,7 @@ func (r *reading) header(configFile string) string {
 	} else {
 		fmt.Fprintf(&b, "# The configuration sftpit reads from %s.\n", configFile)
 	}
-	b.WriteString("# Every default is filled in, every path is absolute, recipes are in the\n# long form and each scenario's rules are in the order they are tried.\n")
+	b.WriteString("# Every default is filled in, every path is absolute, recipes are in the\n# long form and each scenario's rules are in the order they are tried. A\n# comment shows the rules that each chaos applies.\n")
 	if r.cfg.DefaultCredentials {
 		fmt.Fprintf(&b, "#\n# No users are configured, so sftpit accepts the user %s with the password %s.\n", DefaultUser, DefaultPassword)
 	}

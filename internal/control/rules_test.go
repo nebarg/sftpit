@@ -83,6 +83,10 @@ func TestRuleChangesFailClearly(t *testing.T) {
 		{"PUT", path, `{"revision": 1, "faults": [{"id": "r"}]}`, http.StatusBadRequest, "faults[0] (r): match: operation is required"},
 		{"PUT", path, `{"revision": 1, "faults": [` + strings.Replace(denyStats, `"test"`, `"nobody"`, 1) + `]}`, http.StatusBadRequest, `user "nobody" is not a configured user`},
 		{"PUT", path, `{"revision": 1, "faults": [` + denyStats + `, ` + denyStats + `]}`, http.StatusBadRequest, `faults: rule ID "deny-stats" is used twice`},
+		{"PUT", path, `{"revision": 1, "faults": [` + strings.Replace(denyStats, `"deny-stats"`, `"chaos-stats"`, 1) + `]}`, http.StatusBadRequest, `faults: rule ID "chaos-stats" starts with chaos-`},
+		{"PUT", path, `{"revision": 1, "faults": [], "chaos": {"preset": "light", "extras": ["corrupt_upload"]}}`, http.StatusBadRequest, `chaos: faults: chaos extra "corrupt_upload" is not corrupt_download or wrong_size`},
+		{"PUT", path, `{"revision": 1, "faults": [], "chaos": {"preset": "light", "level": 3}}`, http.StatusBadRequest, `chaos: json: unknown field "level"`},
+		{"PUT", path, `{"revision": 1, "chaos": {"preset": "light"}}`, http.StatusBadRequest, "faults is required"},
 	}
 	for _, tt := range tests {
 		code, body := call(t, api, tt.method, tt.path, tt.body)

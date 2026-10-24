@@ -82,7 +82,7 @@ func TestAListenerDownAtLogin(t *testing.T) {
 }
 
 func TestARunWideOutageMatchesNoUser(t *testing.T) {
-	_, err := faults.New([]faults.Rule{{ID: "r", Match: faults.Match{User: "test"}, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: outage}}, testSeed, nil)
+	_, err := faults.New([]faults.Rule{{ID: "r", Match: faults.Match{User: "test"}, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: outage}}, nil, testSeed, nil)
 	if want := "a listener_down at a moment of the run takes the listener down for everyone, so it matches no user or key"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("New = %v, want an error about %q", err, want)
 	}

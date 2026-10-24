@@ -35,7 +35,7 @@ func TestOpenSSHUntilAStallIsReleased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{{ID: "held", Match: list, Action: tt.action}}, 0, logs.logger())
+			rules, err := faults.New([]faults.Rule{{ID: "held", Match: list, Action: tt.action}}, nil, 0, logs.logger())
 			if err != nil {
 				t.Fatalf("faults.New: %v", err)
 			}

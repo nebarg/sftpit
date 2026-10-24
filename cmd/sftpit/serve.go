@@ -279,6 +279,13 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 			rules = "rule"
 		}
 		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", s.Name, len(cfg.Rules()), rules)
+		if c := cfg.Scenarios[s.Name].Chaos; c != nil {
+			paused := ""
+			if c.Paused {
+				paused = ", paused"
+			}
+			fmt.Fprintf(w, "  chaos: %s%s\n", c.Preset, paused)
+		}
 		if s.Pinned {
 			fmt.Fprintf(w, "  seed: %d (pinned)\n", s.Seed)
 		} else {

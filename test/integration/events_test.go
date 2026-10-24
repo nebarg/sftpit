@@ -93,7 +93,7 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, 0, logs.logger())
+			rules, err := faults.New([]faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, nil, 0, logs.logger())
 			if err != nil {
 				t.Fatalf("faults.New: %v", err)
 			}
@@ -127,7 +127,7 @@ func TestOpenSSHWaitsForASlowLogin(t *testing.T) {
 		ID:     "slow-login",
 		Match:  faults.Match{Operations: []faults.Operation{faults.Authenticate}},
 		Action: sftpproxy.Delay{Duration: time.Second},
-	}}, 0, logs.logger())
+	}}, nil, 0, logs.logger())
 	if err != nil {
 		t.Fatalf("faults.New: %v", err)
 	}

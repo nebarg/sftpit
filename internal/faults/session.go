@@ -145,8 +145,8 @@ func (s *Session) End() {
 // Decide returns the action of the first rule that selects r and fires for
 // it, if any, for sftpproxy.Options.Faults. Every rule that matches r counts
 // it, whichever rule is chosen, so a rule's attempts, occurrences and draws
-// do not depend on the rules before it. A rule whose trigger is not active
-// does not match.
+// do not depend on the rules before it. A rule whose trigger is not active,
+// or a rule of chaos while it is paused, does not match.
 func (s *Session) Decide(r sftpproxy.Request) sftpproxy.Action {
 	return s.decide(operationOf(r), r)
 }
@@ -181,7 +181,7 @@ func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
 	var ordinal uint64
 	var key Key
 	for _, ru := range e.rules {
-		if !ru.matches(s.client, op, r) || !s.active(ru, now) {
+		if e.paused(ru) || !ru.matches(s.client, op, r) || !s.active(ru, now) {
 			continue
 		}
 		n := ru.count(s.client.User, r.Path)

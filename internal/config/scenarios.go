@@ -27,6 +27,7 @@ var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 type scenarioConfig struct {
 	Seed   *faults.Seed `yaml:"seed,omitempty"`
 	Faults []ruleConfig `yaml:"faults"`
+	Chaos  *chaosConfig `yaml:"chaos,omitempty"`
 }
 
 type ruleConfig struct {
@@ -236,24 +237,30 @@ func scenarios(defined map[string]scenarioConfig, selected string, users []sshfr
 		if !namePattern.MatchString(name) {
 			return nil, fmt.Errorf("%s: a scenario name may hold only lowercase letters, digits and -, starting with a letter or digit", field)
 		}
-		rules, err := defined[name].rules(field, users)
+		s, err := defined[name].scenario(field, users)
 		if err != nil {
 			return nil, err
 		}
-		valid[name] = Scenario{Seed: defined[name].Seed, Rules: rules}
+		valid[name] = s
 	}
 	return valid, nil
 }
 
-func (s scenarioConfig) rules(field string, users []sshfront.User) ([]faults.Rule, error) {
+func (s scenarioConfig) scenario(field string, users []sshfront.User) (Scenario, error) {
 	rules, err := parseRules(field+".", s.Faults, users)
 	if err != nil {
-		return nil, err
+		return Scenario{}, err
 	}
 	if err := faults.Check(rules); err != nil {
-		return nil, fmt.Errorf("%s: %w", field, err)
+		return Scenario{}, fmt.Errorf("%s: %w", field, err)
 	}
-	return rules, nil
+	valid := Scenario{Seed: s.Seed, Rules: rules}
+	if s.Chaos != nil {
+		if valid.Chaos, err = s.Chaos.chaos(users); err != nil {
+			return Scenario{}, fmt.Errorf("%s.chaos: %w", field, err)
+		}
+	}
+	return valid, nil
 }
 
 // parseRules returns the rules that rcs give, naming each in errors as

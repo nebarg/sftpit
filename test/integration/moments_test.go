@@ -55,7 +55,7 @@ func TestOpenSSHMoments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{slow, tt.rule}, 0, logs.logger())
+			rules, err := faults.New([]faults.Rule{slow, tt.rule}, nil, 0, logs.logger())
 			if err != nil {
 				t.Fatalf("faults.New: %v", err)
 			}
@@ -94,7 +94,7 @@ func TestEachOpenSSHConnectionHasItsOwnMoment(t *testing.T) {
 	rules, err := faults.New([]faults.Rule{
 		{ID: "slow", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Delay{When: sftpproxy.Before, Duration: 20 * time.Millisecond}},
 		{ID: "moment", Trigger: &faults.Trigger{Anchor: faults.Connection, At: &faults.Range[time.Duration]{Min: 300 * time.Millisecond, Max: 300 * time.Millisecond}}, Action: sftpproxy.Drop{}},
-	}, 0, nil)
+	}, nil, 0, nil)
 	if err != nil {
 		t.Fatalf("faults.New: %v", err)
 	}

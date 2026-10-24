@@ -98,6 +98,10 @@ func TestResetRefusesABadRequest(t *testing.T) {
 		{`{"scenario": "chaos", "faults": []}`, http.StatusBadRequest, "a reset names a scenario or gives one inline, not both"},
 		{`{"faults": [{"id": "r"}]}`, http.StatusBadRequest, "faults[0] (r): match: operation is required"},
 		{`{"faults": [` + strings.Replace(denyStats, `"test"`, `"nobody"`, 1) + `]}`, http.StatusBadRequest, `user "nobody" is not a configured user`},
+		{`{"scenario": "chaos", "chaos": {"preset": "light"}}`, http.StatusBadRequest, "a reset names a scenario or gives one inline, not both"},
+		{`{"chaos": {"preset": "wild"}}`, http.StatusBadRequest, `chaos: faults: chaos preset "wild" is not light, moderate or heavy`},
+		{`{"faults": [], "chaos": {"preset": "light", "scope": {"user": "nobody"}}}`, http.StatusBadRequest, `chaos: scope: user "nobody" is not a configured user`},
+		{`{"faults": [{"id": "r"}], "chaos": {"preset": "light"}}`, http.StatusBadRequest, "faults[0] (r): match: operation is required"},
 		{`{} {}`, http.StatusBadRequest, "a single JSON object"},
 		{`[]`, http.StatusBadRequest, "invalid request body"},
 	}
