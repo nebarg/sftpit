@@ -12,7 +12,7 @@ func TestChaosIsPausedAndResumedDuringARun(t *testing.T) {
 	light := &faults.Chaos{Preset: faults.Light}
 	paused := &faults.Chaos{Preset: faults.Light, Paused: true}
 	heavy := &faults.Chaos{Preset: faults.Heavy}
-	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"dev": {Seed: seedOf(7), Chaos: light}, "unpinned": {Chaos: heavy}}, Scenario: "dev"})
+	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"dev": {Seed: new(faults.Seed(7)), Chaos: light}, "unpinned": {Chaos: heavy}}, Scenario: "dev"})
 	run := m.Status().Run.ID
 	if set, err := m.Rules(run); err != nil || !reflect.DeepEqual(set.Chaos, light) || len(set.Rules) != 0 || len(set.Counts) != 2 {
 		t.Errorf("the run starts with %+v (%v), want the scenario's chaos and its two rules", set, err)
@@ -40,7 +40,7 @@ func TestChaosIsPausedAndResumedDuringARun(t *testing.T) {
 		t.Errorf("once resumed, the rules are %+v (%v), want chaos to have matched the stat", set, err)
 	}
 
-	next, err := m.Reset(t.Context(), ResetRequest{Scenario: nameOf("unpinned")})
+	next, err := m.Reset(t.Context(), ResetRequest{Scenario: new("unpinned")})
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestResetStartsAnInlineScenarioWithChaos(t *testing.T) {
 	m, _ := startManager(t, Options{})
 	moderate := &faults.Chaos{Preset: faults.Moderate}
 	inline := &InlineScenario{Chaos: moderate}
-	for _, seed := range []*faults.Seed{nil, seedOf(7)} {
+	for _, seed := range []*faults.Seed{nil, new(faults.Seed(7))} {
 		run, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: seed})
 		if err != nil {
 			t.Fatalf("Reset: %v", err)

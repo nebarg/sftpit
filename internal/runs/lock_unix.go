@@ -9,8 +9,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var errLocked = errors.New("runs: file locked")
-
 // lockFile takes an exclusive lock on f, which lasts until f is closed or
 // the process ends, or returns errLocked if another holds one.
 func lockFile(f *os.File) error {

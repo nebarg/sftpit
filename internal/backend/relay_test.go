@@ -33,6 +33,10 @@ func TestRequestsThatDoNotSuitTheirHandleGetOpenSSHsAnswer(t *testing.T) {
 		{"fsetstat a directory handle", dir, func(h string) sftpwire.Packet {
 			return &sftpwire.FSetStat{Handle: h, Attrs: sftpwire.Attrs{Flags: sftpwire.AttrPermissions, Permissions: 0o700}}
 		}, sftpwire.StatusFailure},
+		// pkg/sftp's request server would truncate the file by its path.
+		{"fsetstat the size through a handle open only for reading", file(sftpwire.OpenRead), func(h string) sftpwire.Packet {
+			return &sftpwire.FSetStat{Handle: h, Attrs: sftpwire.Attrs{Flags: sftpwire.AttrSize, Size: 2}}
+		}, sftpwire.StatusBadMessage},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,6 +97,9 @@ func TestEveryStatusCarriesOpenSSHsMessage(t *testing.T) {
 		request sftpwire.Packet
 		want    sftpwire.StatusCode
 	}{
+		{&sftpwire.Stat{Path: "/missing/orders.csv"}, sftpwire.StatusNoSuchFile},
+		// A file used as a directory.
+		{&sftpwire.Stat{Path: "/orders.csv/inner"}, sftpwire.StatusNoSuchFile},
 		{&sftpwire.Read{Handle: handle, Offset: 4, Length: 10}, sftpwire.StatusEOF},
 		{&sftpwire.Close{Handle: handle}, sftpwire.StatusOK},
 		// pkg/sftp's own message for an unknown handle is "bad file

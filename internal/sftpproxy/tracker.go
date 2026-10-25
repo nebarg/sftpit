@@ -223,11 +223,15 @@ func (t *tracker) use(req *request, id string) {
 }
 
 // watchClose returns the open handle id and a channel that is closed when
-// the handle's CLOSE is sent.
+// the handle's CLOSE is sent, or nil if its CLOSE has been sent already: a
+// client can close a handle before it has seen the reply that opened it.
 func (t *tracker) watchClose(id string) (*handle, <-chan struct{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	h := t.handles[id]
+	if h == nil {
+		return nil, nil
+	}
 	h.closing = make(chan struct{})
 	return h, h.closing
 }

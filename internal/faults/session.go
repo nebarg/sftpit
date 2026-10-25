@@ -152,15 +152,16 @@ func (s *Session) Decide(r sftpproxy.Request) sftpproxy.Action {
 }
 
 // Connect returns the action of the first rule that selects a connection of
-// c as it is accepted, before the SSH handshake, if any: a Delay, Drop or
-// Freeze. The client has not logged in yet, so c has only its Connection.
+// c as it is accepted, before the SSH handshake, if any: a Delay, Drop,
+// Freeze or ListenerDown. The client has not logged in yet, so c has only
+// its Connection.
 func (e *Engine) Connect(c Client) sftpproxy.Action {
 	return e.event(Connect, c)
 }
 
 // Authenticate returns the action of the first rule that selects c's login
-// as the server accepts it, before telling the client, if any: a Delay, Drop
-// or Freeze.
+// as the server accepts it, before telling the client, if any: a Delay,
+// Drop, Freeze or ListenerDown.
 func (e *Engine) Authenticate(c Client) sftpproxy.Action {
 	return e.event(Authenticate, c)
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -23,6 +24,9 @@ var (
 
 	// ErrInUse reports a workspace that another process has locked.
 	ErrInUse = errors.New("workspace in use by another sftpit process")
+
+	// errLocked reports a lock that another process holds.
+	errLocked = errors.New("runs: file locked")
 )
 
 const (
@@ -132,14 +136,19 @@ func (w *Workspace) claim() error {
 	if _, err := w.root.Stat(markerName); err == nil {
 		return w.checkMarker()
 	}
-	b, err := json.Marshal(marker{Owner: "sftpit", Version: workspaceVersion})
-	if err == nil {
-		err = w.root.WriteFile(markerName, append(b, '\n'), 0o600)
-	}
-	if err != nil {
+	if err := writeJSON(w.root, markerName, marker{Owner: "sftpit", Version: workspaceVersion}); err != nil {
 		return fmt.Errorf("runs: mark workspace: %w", err)
 	}
 	return nil
+}
+
+// writeJSON writes v, indented, to the file name under root.
+func writeJSON(root *os.Root, name string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return root.WriteFile(name, append(b, '\n'), 0o600)
 }
 
 func (w *Workspace) checkMarker() error {
@@ -233,22 +242,20 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	rand.Read(suffix)
 	id := started.Format("20060102-150405.000") + "-" + hex.EncodeToString(suffix)
 
-	dir := filepath.Join(runsDir, id)
-	if err := w.root.MkdirAll(filepath.Join(dir, "fs"), 0o700); err != nil {
+	// Names under the root are slash-separated on every OS.
+	rel := path.Join(runsDir, id)
+	if err := w.root.MkdirAll(path.Join(rel, "fs"), 0o700); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
 	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Inline: scenario.Inline, Seed: scenario.Seed, SeedPinned: scenario.Pinned}
-	b, err := json.MarshalIndent(record, "", "  ")
-	if err == nil {
-		err = w.root.WriteFile(filepath.Join(dir, "run.json"), append(b, '\n'), 0o600)
-	}
-	if err != nil {
+	if err := writeJSON(w.root, path.Join(rel, "run.json"), record); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
 	if err := w.prune(id); err != nil {
 		return nil, err
 	}
-	return &Run{ID: id, Dir: filepath.Join(w.dir, dir), Files: filepath.Join(w.dir, dir, "fs"), Scenario: scenario}, nil
+	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
+	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Scenario: scenario}, nil
 }
 
 // prune deletes the oldest runs beyond the newest keptRuns, never current.
@@ -266,7 +273,7 @@ func (w *Workspace) prune(current string) error {
 	}
 	slices.Sort(ids)
 	for _, id := range ids[:max(0, len(ids)-(keptRuns-1))] {
-		if err := removeAll(w.root, filepath.Join(runsDir, id)); err != nil {
+		if err := removeAll(w.root, path.Join(runsDir, id)); err != nil {
 			return fmt.Errorf("runs: delete old run: %w", err)
 		}
 	}

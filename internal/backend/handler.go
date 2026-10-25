@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"syscall"
 	"time"
 
@@ -111,6 +112,7 @@ func (h *handler) open(name string, flag int, perm os.FileMode) (*os.File, error
 // function is called, counting what the caller changes at names. Empty names
 // are ignored.
 func (h *handler) changing(names ...string) (done func()) {
+	names = slices.DeleteFunc(names, func(name string) bool { return name == "" })
 	released := h.holds.change(names...)
 	counted := h.usage.change(names...)
 	return func() {
@@ -392,7 +394,11 @@ func (f *file) WriteAt(p []byte, off int64) (int, error) {
 		return 0, f.usage.refuse(f.name, limit)
 	}
 	n, err := f.f.WriteAt(p, off)
-	f.usage.grew(max(0, off+int64(n)-size))
+	// A file removed or replaced while the handle kept it open no longer
+	// counts, and drops out of the tree when the handle closes.
+	if linked(info) {
+		f.usage.grew(max(0, off+int64(n)-size))
+	}
 	return n, statusError(err)
 }
 

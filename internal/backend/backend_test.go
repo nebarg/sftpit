@@ -1,8 +1,8 @@
 package backend_test
 
 import (
-	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -98,6 +98,9 @@ func TestPathsStayInsideTheRoot(t *testing.T) {
 	if f, err := c.OpenFile("/escape", os.O_WRONLY|os.O_TRUNC); err == nil {
 		f.Close()
 		t.Fatal("OpenFile followed a symlink out of the root")
+	}
+	if info, err := c.Lstat("/escape"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("Lstat(/escape) = %v, %v; want the symlink itself", info, err)
 	}
 	assertFile(t, outside, "outside the root")
 }
@@ -407,21 +410,6 @@ func TestVersionAdvertisesNoLinks(t *testing.T) {
 	}
 }
 
-func TestStatusesCarryOpenSSHMessages(t *testing.T) {
-	dir, e := newBackend(t)
-	s := startRaw(t, e)
-
-	reply := s.wantStatus(&sftpwire.Stat{Path: "/missing/orders.csv"}, sftpwire.StatusNoSuchFile)
-	if reply.Message != "No such file" {
-		t.Errorf("message = %q, want %q", reply.Message, "No such file")
-	}
-	writeHostFile(t, filepath.Join(dir, "orders.csv"), "data")
-	reply = s.wantStatus(&sftpwire.Stat{Path: "/orders.csv/inner"}, sftpwire.StatusNoSuchFile)
-	if reply.Message != "No such file" {
-		t.Errorf("message for a file used as a directory = %q, want %q", reply.Message, "No such file")
-	}
-}
-
 func TestListing(t *testing.T) {
 	dir, e := newBackend(t)
 	writeHostFile(t, filepath.Join(dir, "in", "a.csv"), "a")
@@ -580,138 +568,33 @@ func TestCloseEndsTheSession(t *testing.T) {
 	}
 }
 
-// roomy are limits that no test reaches unless it means to.
-var roomy = backend.Limits{MaxFileBytes: 1 << 30, MaxTotalBytes: 1 << 32, MaxFiles: 1 << 20, MaxOpenFiles: 1 << 10}
-
-func newBackend(t *testing.T) (string, *backend.Embedded) {
-	t.Helper()
-	dir := t.TempDir()
-	return dir, newBackendIn(t, dir, backend.Options{Limits: roomy})
-}
-
-// newBackendIn returns a backend with opts that serves the files in dir.
-func newBackendIn(t *testing.T, dir string, opts backend.Options) *backend.Embedded {
-	t.Helper()
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
-	t.Cleanup(func() { root.Close() })
-	e, err := backend.New(root, opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return e
-}
-
-func newClient(t *testing.T, e *backend.Embedded, home string) *sftp.Client {
-	t.Helper()
-	conn := e.Open(home)
-	c, err := sftp.NewClientPipe(conn, conn, sftp.UseConcurrentWrites(true))
-	if err != nil {
-		t.Fatalf("NewClientPipe: %v", err)
-	}
-	t.Cleanup(func() {
-		c.Close()
-		if err := conn.Close(); err != nil {
-			t.Errorf("backend session: %v", err)
+func TestCloseReturnsTheErrorTheSessionEndedWith(t *testing.T) {
+	t.Run("a packet over the limit", func(t *testing.T) {
+		_, e := newBackend(t)
+		conn := e.Open("/")
+		if _, err := conn.Write(binary.BigEndian.AppendUint32(nil, 1<<20)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := conn.Close(); err == nil {
+			t.Error("Close = nil, want the length limit error")
 		}
 	})
-	return c
-}
-
-// rawSession speaks the protocol directly, for requests pkg/sftp's client
-// cannot send or would retry differently.
-type rawSession struct {
-	t       *testing.T
-	conn    io.ReadWriteCloser
-	in      *bufio.Reader
-	version sftpwire.Version
-	nextID  uint32
-}
-
-func startRaw(t *testing.T, e *backend.Embedded) *rawSession {
-	t.Helper()
-	conn := e.Open("/")
-	t.Cleanup(func() { conn.Close() })
-	s := &rawSession{t: t, conn: conn, in: bufio.NewReader(conn)}
-	if _, err := conn.Write(sftpwire.AppendInit(nil, sftpwire.Init{Version: 3})); err != nil {
-		t.Fatalf("write INIT: %v", err)
-	}
-	b := s.read()
-	v, err := sftpwire.DecodeVersion(b)
-	if err != nil {
-		t.Fatalf("DecodeVersion: %v", err)
-	}
-	s.version = v
-	return s
-}
-
-func (s *rawSession) read() []byte {
-	s.t.Helper()
-	b, err := sftpwire.ReadPacket(s.in, 256*1024)
-	if err != nil {
-		s.t.Fatalf("ReadPacket: %v", err)
-	}
-	return b
-}
-
-// send sends p and returns the reply.
-func (s *rawSession) send(p sftpwire.Packet) sftpwire.Packet {
-	s.t.Helper()
-	s.nextID++
-	if _, err := s.conn.Write(sftpwire.AppendPacket(nil, s.nextID, p)); err != nil {
-		s.t.Fatalf("write %v: %v", p.Type(), err)
-	}
-	id, reply, err := sftpwire.DecodeReply(s.read())
-	if err != nil {
-		s.t.Fatalf("DecodeReply: %v", err)
-	}
-	if id != s.nextID {
-		s.t.Fatalf("%v: reply to request %d, want %d", p.Type(), id, s.nextID)
-	}
-	return reply
-}
-
-func (s *rawSession) wantStatus(p sftpwire.Packet, want sftpwire.StatusCode) *sftpwire.StatusReply {
-	s.t.Helper()
-	reply := s.send(p)
-	st, ok := reply.(*sftpwire.StatusReply)
-	if !ok || st.Code != want {
-		s.t.Fatalf("%v: reply %#v, want %v", p.Type(), reply, want)
-	}
-	return st
-}
-
-// handle sends an OPEN or OPENDIR and returns the handle it opens.
-func (s *rawSession) handle(p sftpwire.Packet) string {
-	s.t.Helper()
-	reply, ok := s.send(p).(*sftpwire.HandleReply)
-	if !ok {
-		s.t.Fatalf("%v: reply %#v, want a handle", p.Type(), reply)
-	}
-	return reply.Handle
-}
-
-// assertStatus checks the status behind an error from pkg/sftp's client,
-// which reports NO_SUCH_FILE and PERMISSION_DENIED as os.ErrNotExist and
-// os.ErrPermission.
-func assertStatus(t *testing.T, err error, want sftpwire.StatusCode) {
-	t.Helper()
-	var got sftpwire.StatusCode
-	switch st, ok := errors.AsType[*sftp.StatusError](err); {
-	case ok:
-		got = sftpwire.StatusCode(st.Code)
-	case errors.Is(err, os.ErrNotExist):
-		got = sftpwire.StatusNoSuchFile
-	case errors.Is(err, os.ErrPermission):
-		got = sftpwire.StatusPermissionDenied
-	default:
-		t.Fatalf("error = %v, want status %v", err, want)
-	}
-	if got != want {
-		t.Fatalf("status = %v (%v), want %v", got, err, want)
-	}
+	t.Run("a request the request server cannot parse", func(t *testing.T) {
+		_, e := newBackend(t)
+		conn := e.Open("/")
+		if _, err := conn.Write(sftpwire.AppendInit(nil, sftpwire.Init{Version: 3})); err != nil {
+			t.Fatalf("Write INIT: %v", err)
+		}
+		if _, err := sftpwire.ReadPacket(conn, 256*1024); err != nil {
+			t.Fatalf("reading VERSION: %v", err)
+		}
+		if _, err := conn.Write([]byte{0, 0, 0, 6, byte(sftpwire.TypeOpen), 0, 0, 0, 1, 0}); err != nil {
+			t.Fatalf("Write OPEN: %v", err)
+		}
+		if err := conn.Close(); err == nil || strings.Contains(err.Error(), "request server ended the session") {
+			t.Errorf("Close = %v, want the request server's own error", err)
+		}
+	})
 }
 
 func writeRemote(t *testing.T, c *sftp.Client, name, content string) {
@@ -742,33 +625,5 @@ func mkdirRemote(t *testing.T, c *sftp.Client, name string) {
 	t.Helper()
 	if err := c.Mkdir(name); err != nil {
 		t.Fatalf("Mkdir %s: %v", name, err)
-	}
-}
-
-func writeHostFile(t *testing.T, name, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func assertFile(t *testing.T, name, want string) {
-	t.Helper()
-	got, err := os.ReadFile(name)
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
-	}
-	if string(got) != want {
-		t.Fatalf("%s = %q, want %q", name, got, want)
-	}
-}
-
-func assertMissing(t *testing.T, name string) {
-	t.Helper()
-	if _, err := os.Lstat(name); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("%s still exists (Lstat error %v)", name, err)
 	}
 }

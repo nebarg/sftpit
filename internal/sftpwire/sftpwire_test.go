@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -115,6 +114,9 @@ func TestInitAndVersionRoundTrip(t *testing.T) {
 
 	if _, err := sftpwire.DecodeVersion(readOne(t, sftpwire.AppendInit(nil, sftpwire.Init{Version: 3}))); err == nil {
 		t.Error("DecodeVersion accepted an INIT packet")
+	}
+	if _, err := sftpwire.DecodeInit(readOne(t, sftpwire.AppendVersion(nil, sftpwire.Version{Version: 3}))); err == nil {
+		t.Error("DecodeInit accepted a VERSION packet")
 	}
 }
 
@@ -227,6 +229,7 @@ func TestDecodeRejectsMalformedPackets(t *testing.T) {
 		{name: "extended attribute count past the end", decode: decodeRequest, b: wire{}.byte(9).u32(1).str("/a").u32(sftpwire.AttrExtended).u32(0x7fffffff)},
 		{name: "name count past the end", decode: decodeReply, b: wire{}.byte(104).u32(1).u32(0x7fffffff)},
 		{name: "status without a language tag", decode: decodeReply, b: wire{}.byte(101).u32(1).u32(0).str("Success")},
+		{name: "truncated init extension", decode: decodeInit, b: wire{}.byte(1).u32(3).str(sftpwire.ExtStatVFS)},
 		{name: "truncated version extension", decode: decodeVersion, b: wire{}.byte(2).u32(3).str(sftpwire.ExtStatVFS)},
 	}
 
@@ -311,6 +314,7 @@ func TestReadPacket(t *testing.T) {
 		{name: "one packet", input: stat.framed(), want: stat},
 		{name: "end before a packet", input: nil, wantErr: io.EOF},
 		{name: "end inside the length", input: []byte{0, 0}, wantErr: io.ErrUnexpectedEOF},
+		{name: "end after the length", input: stat.framed()[:4], wantErr: io.ErrUnexpectedEOF},
 		{name: "end inside the body", input: stat.framed()[:8], wantErr: io.ErrUnexpectedEOF},
 		{name: "empty packet", input: wire{}.u32(0), wantErr: sftpwire.ErrMalformed},
 	}
@@ -324,10 +328,13 @@ func TestReadPacket(t *testing.T) {
 		})
 	}
 
-	t.Run("packet over the limit", func(t *testing.T) {
-		_, err := sftpwire.ReadPacket(bytes.NewReader(wire{}.u32(maxLength+1)), maxLength)
-		if err == nil || !strings.Contains(err.Error(), "exceeds") {
-			t.Errorf("ReadPacket error = %v, want a length limit error", err)
+	t.Run("length limit", func(t *testing.T) {
+		limit := uint32(len(stat))
+		if _, err := sftpwire.ReadPacket(bytes.NewReader(stat.framed()), limit); err != nil {
+			t.Errorf("ReadPacket of a packet at the limit: %v", err)
+		}
+		if b, err := sftpwire.ReadPacket(bytes.NewReader(stat.framed()), limit-1); err == nil {
+			t.Errorf("ReadPacket = %x, want a length limit error", b)
 		}
 	})
 }
@@ -352,6 +359,11 @@ func decodeRequest(b []byte) error {
 
 func decodeReply(b []byte) error {
 	_, _, err := sftpwire.DecodeReply(b)
+	return err
+}
+
+func decodeInit(b []byte) error {
+	_, err := sftpwire.DecodeInit(b)
 	return err
 }
 

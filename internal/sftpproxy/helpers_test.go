@@ -12,10 +12,13 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/pkg/sftp"
 
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -44,8 +47,7 @@ type proxy struct {
 // startProxy runs Serve with opts between a raw test client and backend
 // until the test ends or p.cancel is called. opts.Conn and opts.Listener are
 // set to a fakeConn over the client's pipe, and a nil opts.Logger discards
-// the logs. The
-// client has not sent INIT.
+// the logs. The client has not sent INIT.
 func startProxy(t *testing.T, backend net.Conn, opts sftpproxy.Options) *proxy {
 	t.Helper()
 	if opts.Logger == nil {
@@ -313,9 +315,22 @@ func (fb *fakeBackend) serve(version sftpwire.Version, realPath sftpwire.Packet)
 	}
 }
 
+// receive returns the next request the backend receives, or false once the
+// backend connection has closed.
+func (fb *fakeBackend) receive(t *testing.T) (backendRequest, bool) {
+	t.Helper()
+	select {
+	case req, ok := <-fb.requests:
+		return req, ok
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting")
+		return backendRequest{}, false
+	}
+}
+
 func (fb *fakeBackend) next(t *testing.T) backendRequest {
 	t.Helper()
-	req, ok := receive(t, fb.requests)
+	req, ok := fb.receive(t)
 	if !ok {
 		t.Fatal("backend connection closed, want a request")
 	}
@@ -402,18 +417,6 @@ func sameElements[T cmp.Ordered](got []T, want ...T) bool {
 	return slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want)))
 }
 
-func receive[T any](t *testing.T, ch <-chan T) (T, bool) {
-	t.Helper()
-	select {
-	case v, ok := <-ch:
-		return v, ok
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting")
-		var zero T
-		return zero, false
-	}
-}
-
 // wire builds packet bytes field by field, for packets the codec does not
 // encode.
 type wire []byte
@@ -441,4 +444,158 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// logger returns a logger that writes text records to b.
+func (b *syncBuffer) logger() *slog.Logger { return slog.New(slog.NewTextHandler(b, nil)) }
+
+// assertLogged checks that the logs in b contain want.
+func (b *syncBuffer) assertLogged(t *testing.T, want string) {
+	t.Helper()
+	if logs := b.String(); !strings.Contains(logs, want) {
+		t.Errorf("logs lack %s:\n%s", want, logs)
+	}
+}
+
+// assertOnlyFault checks that the logs in b record one injected fault, and
+// that they contain want.
+func (b *syncBuffer) assertOnlyFault(t *testing.T, want string) {
+	t.Helper()
+	logs := b.String()
+	if got := strings.Count(logs, "injected fault"); got != 1 || !strings.Contains(logs, want) {
+		t.Errorf("logs have %d faults, want only %q:\n%s", got, want, logs)
+	}
+}
+
+var replyOrders = []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder}
+
+const cutoff = 100
+
+// answerAll answers every request the backend receives until the session
+// ends: an OPEN or OPENDIR with handle "h", a READDIR with EOF, a STAT, LSTAT
+// or FSTAT with a size of 10, and anything else with success.
+func (fb *fakeBackend) answerAll() {
+	for req := range fb.requests {
+		var reply sftpwire.Packet = status(sftpwire.StatusOK)
+		switch req.packet.(type) {
+		case *sftpwire.Open, *sftpwire.OpenDir:
+			reply = &sftpwire.HandleReply{Handle: "h"}
+		case *sftpwire.ReadDir:
+			reply = status(sftpwire.StatusEOF)
+		case *sftpwire.Stat, *sftpwire.LStat, *sftpwire.FStat:
+			reply = &sftpwire.AttrsReply{Attrs: sftpwire.Attrs{Flags: sftpwire.AttrSize, Size: 10}}
+		}
+		if _, err := fb.conn.Write(sftpwire.AppendPacket(nil, req.id, reply)); err != nil {
+			return
+		}
+	}
+}
+
+// openForUpload opens /f for writing as request 1, with the backend
+// answering handle.
+func openForUpload(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
+	t.Helper()
+	p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate | sftpwire.OpenTruncate})
+	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: handle})
+	p.client.assertReplies(t, 1)
+}
+
+func openForDownload(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
+	t.Helper()
+	p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenRead})
+	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: handle})
+	p.client.assertReplies(t, 1)
+}
+
+// write returns a WRITE of length bytes at offset whose every byte is the
+// low byte of its own offset, so any part of it can be told apart.
+func write(handle string, offset uint64, length int) *sftpwire.Write {
+	data := make([]byte, length)
+	for i := range data {
+		data[i] = byte(offset + uint64(i))
+	}
+	return &sftpwire.Write{Handle: handle, Offset: offset, Data: data}
+}
+
+func status(code sftpwire.StatusCode) *sftpwire.StatusReply {
+	return &sftpwire.StatusReply{Code: code, Message: code.Message()}
+}
+
+func equalReplies(a, b sftpwire.Packet) bool {
+	return bytes.Equal(sftpwire.AppendPacket(nil, 0, a), sftpwire.AppendPacket(nil, 0, b))
+}
+
+// on returns faults that apply action to every request of type P.
+func on[P sftpwire.Packet](action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
+	return func(r sftpproxy.Request) sftpproxy.Action {
+		if _, ok := r.Packet.(P); ok {
+			return action
+		}
+		return nil
+	}
+}
+
+// inMemoryBackend serves pkg/sftp's in-memory filesystem over a pipe and
+// returns the client's end.
+func inMemoryBackend(t *testing.T) net.Conn {
+	t.Helper()
+	clientEnd, serverEnd := net.Pipe()
+	srv := sftp.NewRequestServer(serverEnd, sftp.InMemHandler())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve() }()
+	t.Cleanup(func() {
+		srv.Close()
+		if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("backend Serve: %v", err)
+		}
+	})
+	return clientEnd
+}
+
+// snapshotTime is how long each snapshot takes in these tests, as it might
+// for a large file.
+const snapshotTime = time.Second
+
+// snapshots is a Snapshot hook that records the paths it is called with.
+// Each snapshot takes snapshotTime.
+type snapshots struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (s *snapshots) take(path string) (sftpproxy.Snapshot, error) {
+	time.Sleep(snapshotTime)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paths = append(s.paths, path)
+	return snapshotOf(path), nil
+}
+
+func (s *snapshots) taken() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.paths)
+}
+
+// snapshotLog is the log line for snapshotOf(path), closed as closedBy says,
+// quoted as the log quotes it.
+func snapshotLog(path, closedBy string) string {
+	snap := snapshotOf(path)
+	return fmt.Sprintf("level=INFO msg=snapshot path=%s closed_by=%s size=%d sha256=%x", path, closedBy, snap.Size, snap.SHA256)
+}
+
+// assertSnapshotsLogged checks that logs has exactly the snapshot lines in
+// want.
+func assertSnapshotsLogged(t *testing.T, logs string, want ...string) {
+	t.Helper()
+	var got []string
+	for line := range strings.Lines(logs) {
+		if strings.Contains(line, "msg=snapshot") {
+			_, after, _ := strings.Cut(strings.TrimSpace(line), " ")
+			got = append(got, after)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("snapshots logged:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
 }

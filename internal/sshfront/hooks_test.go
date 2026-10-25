@@ -114,7 +114,6 @@ func TestHooksCanEndTheHandshake(t *testing.T) {
 			handler, conns, _ := connPublisher()
 			logs := make(messages, 16)
 			addr, _ := startServer(t, sshfront.Config{
-				Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 				Handler: handler,
 				Hooks:   tt.hooks,
 				Logger:  slog.New(logs),
@@ -137,12 +136,9 @@ func TestHooksCanEndTheHandshake(t *testing.T) {
 }
 
 func TestHandshakeFailureIsLogged(t *testing.T) {
-	handler, _, _ := connPublisher()
 	logs := make(messages, 16)
 	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: handler,
-		Logger:  slog.New(logs),
+		Logger: slog.New(logs),
 	})
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -159,12 +155,9 @@ func TestHandshakeFailureIsLogged(t *testing.T) {
 }
 
 func TestServerCloseEndsHandshakesWithoutFailures(t *testing.T) {
-	handler, _, _ := connPublisher()
 	logs := make(messages, 16)
 	entered := make(chan struct{})
 	addr, srv := startServer(t, sshfront.Config{
-		Users:            []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler:          handler,
 		HandshakeTimeout: time.Minute,
 		Logger:           slog.New(logs),
 		Hooks:            sshfront.Hooks{Connect: func(context.Context, *sshfront.Conn) { close(entered) }},
@@ -220,10 +213,7 @@ func TestHookContextEnds(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			entered := make(chan struct{}, 1)
 			ended := make(chan error, 1)
-			handler, _, _ := connPublisher()
 			addr, srv := startServer(t, sshfront.Config{
-				Users:            []sshfront.User{{Name: "test", Password: testPassword}},
-				Handler:          handler,
 				HandshakeTimeout: cmp.Or(tt.timeout, time.Minute),
 				Hooks: sshfront.Hooks{Connect: func(ctx context.Context, conn *sshfront.Conn) {
 					entered <- struct{}{}
@@ -247,17 +237,3 @@ func TestHookContextEnds(t *testing.T) {
 		})
 	}
 }
-
-// messages is a slog handler that sends the level and message of each
-// record to it.
-type messages chan string
-
-func (m messages) Enabled(context.Context, slog.Level) bool { return true }
-
-func (m messages) Handle(_ context.Context, r slog.Record) error {
-	m <- r.Level.String() + " " + r.Message
-	return nil
-}
-
-func (m messages) WithAttrs([]slog.Attr) slog.Handler { return m }
-func (m messages) WithGroup(string) slog.Handler      { return m }

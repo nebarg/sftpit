@@ -3,6 +3,7 @@ package sftpproxy_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"reflect"
@@ -75,7 +76,7 @@ func TestADelayEndsEarlyWhenReleased(t *testing.T) {
 				release := make(chan struct{})
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
 					Faults: onPath("/a", sftpproxy.Delay{When: tt.when, Duration: 3 * time.Second, Release: release}),
-					Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger: logs.logger(),
 				})
 				start := time.Now()
 				p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
@@ -118,7 +119,7 @@ func TestStallEndsAtReleaseOrLimit(t *testing.T) {
 				stall := sftpproxy.Stall{When: tt.when, Release: release, Limit: 4 * time.Second}
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
 					Faults: onPath("/a", stall),
-					Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger: logs.logger(),
 				})
 				start := time.Now()
 				p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
@@ -135,9 +136,7 @@ func TestStallEndsAtReleaseOrLimit(t *testing.T) {
 				if tt.release {
 					wantLog = "msg=\"fault released\""
 				}
-				if !strings.Contains(logs.String(), wantLog) {
-					t.Errorf("log does not contain %s:\n%s", wantLog, logs.String())
-				}
+				logs.assertLogged(t, wantLog)
 			})
 		})
 	}
@@ -177,7 +176,7 @@ func TestReleasedEndsTheStallsAndFreezesInProgress(t *testing.T) {
 						defer mu.Unlock()
 						return current
 					},
-					Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger: logs.logger(),
 				})
 				if tt.early {
 					release()
@@ -192,8 +191,8 @@ func TestReleasedEndsTheStallsAndFreezesInProgress(t *testing.T) {
 				if got := time.Since(start); got != tt.want {
 					t.Errorf("the reply came after %v, want %v", got, tt.want)
 				}
-				if tt.log != "" && !strings.Contains(logs.String(), tt.log) {
-					t.Errorf("logs lack %s:\n%s", tt.log, logs.String())
+				if tt.log != "" {
+					logs.assertLogged(t, tt.log)
 				}
 			})
 		})
@@ -225,7 +224,7 @@ func TestFailBeforeAnswersWithoutTheBackend(t *testing.T) {
 		var logs syncBuffer
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
 			Faults: onPath("/a", sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}),
-			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			Logger: logs.logger(),
 		})
 		p.client.sendTogether(t, &sftpwire.Rename{OldPath: "/a", NewPath: "/b"}, &sftpwire.Stat{Path: "/c"})
 
@@ -236,9 +235,7 @@ func TestFailBeforeAnswersWithoutTheBackend(t *testing.T) {
 		p.client.assertReplies(t, 2)
 
 		want := "msg=\"injected fault\" request=SSH_FXP_RENAME path=/a target=/b fault=fail when=before status=SSH_FX_PERMISSION_DENIED"
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("log does not contain %q:\n%s", want, logs.String())
-		}
+		logs.assertLogged(t, want)
 	})
 }
 
@@ -309,57 +306,96 @@ func TestFaultsSeeResolvedPaths(t *testing.T) {
 	})
 }
 
-func TestDropComesAfterEarlierRepliesAndBeforeLaterRequests(t *testing.T) {
+// TestSessionEndingFaultsComeAfterEarlierRepliesAndBeforeLaterRequests
+// checks that a fault that ends the session, before or after the backend
+// acts, ends it where the request's reply would be: every earlier reply is
+// written first, and no later request reaches the backend.
+func TestSessionEndingFaultsComeAfterEarlierRepliesAndBeforeLaterRequests(t *testing.T) {
 	tests := []struct {
-		name  string
-		drop  sftpproxy.Drop
-		event string
+		name   string
+		action func(sftpproxy.When) sftpproxy.Action
+		events []string
+		// log, if set, is a format for part of what the fault logs, given
+		// its When.
+		log string
 	}{
-		{name: "before, FIN", drop: sftpproxy.Drop{When: sftpproxy.Before}, event: "close"},
-		{name: "before, RST", drop: sftpproxy.Drop{When: sftpproxy.Before, Reset: true}, event: "reset"},
-		{name: "after, FIN", drop: sftpproxy.Drop{When: sftpproxy.After}, event: "close"},
-		{name: "after, RST", drop: sftpproxy.Drop{When: sftpproxy.After, Reset: true}, event: "reset"},
+		{
+			name:   "FIN",
+			action: func(w sftpproxy.When) sftpproxy.Action { return sftpproxy.Drop{When: w} },
+			events: []string{"close"},
+		},
+		{
+			name:   "RST",
+			action: func(w sftpproxy.When) sftpproxy.Action { return sftpproxy.Drop{When: w, Reset: true} },
+			events: []string{"reset"},
+		},
+		{
+			name:   "end session",
+			action: func(w sftpproxy.When) sftpproxy.Action { return sftpproxy.EndSession{When: w} },
+		},
+		{
+			name: "listener down closing every connection",
+			action: func(w sftpproxy.When) sftpproxy.Action {
+				return sftpproxy.ListenerDown{When: w, Duration: 5 * time.Second, CloseExisting: true}
+			},
+			events: []string{"down 5s, closing every connection"},
+			log:    `msg="injected fault" request=SSH_FXP_RENAME path=/a target=/b fault=listener_down when=%v duration=5s close_existing=true`,
+		},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/a", tt.drop)})
-				p.client.sendTogether(t,
-					&sftpwire.Stat{Path: "/first"},
-					&sftpwire.Rename{OldPath: "/a", NewPath: "/b"},
-					&sftpwire.Stat{Path: "/last"},
-				)
+		for _, when := range []sftpproxy.When{sftpproxy.Before, sftpproxy.After} {
+			t.Run(tt.name+"/"+when.String(), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var logs syncBuffer
+					p, fb := startProxyOnFake(t, sftpproxy.Options{
+						Faults: onPath("/a", tt.action(when)),
+						Logger: logs.logger(),
+					})
+					p.client.sendTogether(t,
+						&sftpwire.Stat{Path: "/first"},
+						&sftpwire.Rename{OldPath: "/a", NewPath: "/b"},
+						&sftpwire.Stat{Path: "/last"},
+					)
 
-				first := fb.next(t)
-				if tt.drop.When == sftpproxy.After {
-					rename := fb.next(t)
-					fb.reply(t, rename.id, &sftpwire.StatusReply{Code: sftpwire.StatusOK})
-				}
-				fb.assertNoRequest(t)
-				if got := p.conn.events(); len(got) != 0 {
-					t.Fatalf("connection %v before the earlier reply was written", got)
-				}
+					first := fb.next(t)
+					if when == sftpproxy.After {
+						fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
+					}
+					fb.assertNoRequest(t)
+					if got := p.conn.events(); len(got) != 0 {
+						t.Fatalf("connection events %v before the earlier reply was written", got)
+					}
 
-				fb.reply(t, first.id, &sftpwire.AttrsReply{})
-				p.client.assertReplies(t, 1)
-				p.client.assertClosed(t)
-				if err := p.result.wait(t); err != nil {
-					t.Errorf("Serve after a drop = %v, want nil", err)
-				}
-				if got := p.conn.events(); !slices.Equal(got, []string{tt.event}) {
-					t.Errorf("connection events = %v, want [%s]", got, tt.event)
-				}
-				fb.assertNoRequest(t)
+					fb.reply(t, first.id, &sftpwire.AttrsReply{})
+					p.client.assertReplies(t, 1)
+					p.client.assertClosed(t)
+					if err := p.result.wait(t); err != nil {
+						t.Errorf("Serve = %v, want nil", err)
+					}
+					if got := p.conn.events(); !slices.Equal(got, tt.events) {
+						t.Errorf("connection events = %v, want %v", got, tt.events)
+					}
+					fb.assertNoRequest(t)
+					if tt.log != "" {
+						logs.assertLogged(t, fmt.Sprintf(tt.log, when))
+					}
+				})
 			})
-		})
+		}
 	}
 }
 
 func TestFreezeClosesAtReleaseOrLimit(t *testing.T) {
-	for _, release := range []bool{true, false} {
-		name := map[bool]string{true: "released", false: "at the limit"}[release]
-		t.Run(name, func(t *testing.T) {
+	tests := []struct {
+		name    string
+		release bool
+		want    time.Duration
+	}{
+		{name: "released", release: true, want: time.Second},
+		{name: "at the limit", want: 4 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				releaseCh := make(chan struct{})
 				freeze := sftpproxy.Freeze{When: sftpproxy.After, Release: releaseCh, Limit: 4 * time.Second}
@@ -372,15 +408,13 @@ func TestFreezeClosesAtReleaseOrLimit(t *testing.T) {
 				if got := p.conn.events(); !slices.Equal(got, []string{"freeze"}) {
 					t.Fatalf("connection events = %v, want [freeze]", got)
 				}
-				want := 4 * time.Second
-				if release {
-					want = time.Second
-					time.Sleep(want)
+				if tt.release {
+					time.Sleep(tt.want)
 					close(releaseCh)
 				}
 				p.client.assertClosed(t)
-				if got := time.Since(start); got != want {
-					t.Errorf("connection closed after %v, want %v", got, want)
+				if got := time.Since(start); got != tt.want {
+					t.Errorf("connection closed after %v, want %v", got, tt.want)
 				}
 				if got := p.conn.events(); !slices.Equal(got, []string{"freeze", "close"}) {
 					t.Errorf("connection events = %v, want [freeze close]", got)
@@ -433,8 +467,7 @@ func TestFaultWaitsEndWithTheSession(t *testing.T) {
 		},
 	}
 
-	orders := []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder}
-	for _, order := range orders {
+	for _, order := range replyOrders {
 		for _, tt := range tests {
 			t.Run(order.String()+"/"+tt.name, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
@@ -471,7 +504,7 @@ func TestFaultWaitsEndWithTheSession(t *testing.T) {
 
 // TestUnusableFaultsEndTheSession checks that a fault the session cannot
 // apply ends it with an error before the request reaches the backend. The
-// session has no Options.Conn.
+// session has neither Options.Conn nor Options.Listener.
 func TestUnusableFaultsEndTheSession(t *testing.T) {
 	open := &sftpwire.Open{Path: "/a", Flags: sftpwire.OpenWrite}
 	fail := sftpproxy.Fail{Status: sftpwire.StatusFailure}
@@ -585,7 +618,7 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 				if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
 					t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
 				}
-				if req, ok := receive(t, fb.requests); ok {
+				if req, ok := fb.receive(t); ok {
 					t.Errorf("backend received %#v", req.packet)
 				}
 			})

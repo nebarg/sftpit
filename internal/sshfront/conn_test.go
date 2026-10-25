@@ -76,7 +76,6 @@ func TestConnCloseStopsWaitingForTheClient(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler, conns, returned := connPublisher()
 			addr, srv := startServer(t, sshfront.Config{
-				Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 				Handler: handler,
 			})
 			client, _ := lingeringClient(t, addr)
@@ -106,7 +105,6 @@ func TestConnCloseStopsWaitingForTheClient(t *testing.T) {
 func TestConnCloseAfterTheClientResets(t *testing.T) {
 	handler, conns, returned := connPublisher()
 	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 	})
 	client, raw := lingeringClient(t, addr)
@@ -140,7 +138,7 @@ func TestConnReset(t *testing.T) {
 	receive(t, returned)
 }
 
-func TestConnFreezeWithholdsKeepalivesUntilThaw(t *testing.T) {
+func TestConnFreezeWithholdsKeepalives(t *testing.T) {
 	client, conn, _ := connectedClient(t)
 
 	conn.Freeze()
@@ -156,9 +154,11 @@ func TestConnFreezeWithholdsKeepalivesUntilThaw(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	conn.Thaw()
-	if err := receive(t, replied); err != nil {
-		t.Fatalf("keepalive after thaw: %v", err)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := receive(t, replied); err == nil {
+		t.Error("keepalive answered once the frozen connection closed")
 	}
 }
 
@@ -181,7 +181,6 @@ func connectedClient(t *testing.T) (*ssh.Client, *sshfront.Conn, <-chan struct{}
 	t.Helper()
 	handler, conns, returned := connPublisher()
 	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 	})
 	client := mustDial(t, addr, "test", ssh.Password(testPassword))
@@ -212,9 +211,3 @@ func lingeringClient(t *testing.T, addr string) (*ssh.Client, *net.TCPConn) {
 type lingeringConn struct{ net.Conn }
 
 func (lingeringConn) Close() error { return nil }
-
-func waitForClient(client *ssh.Client) <-chan error {
-	done := make(chan error, 1)
-	go func() { done <- client.Wait() }()
-	return done
-}

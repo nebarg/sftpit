@@ -51,8 +51,8 @@ func (w When) String() string {
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze,
 // EndSession or ListenerDown, for an OPEN, a PartialUpload, CorruptDownload
-// or Timed, or for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize. What else an action
-// holds back depends on the session's ReplyOrder.
+// or Timed, or for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize. What
+// else an action holds back depends on the session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -121,9 +121,9 @@ type ListenerDown struct {
 	CloseExisting bool
 }
 
-// PartialUpload, chosen for an OPEN, cuts off uploads through the handle it
-// opens at Cutoff, so that no write on the handle changes a byte at or beyond
-// it. Each write is decided by its offset and length alone. A write below
+// PartialUpload is chosen for an OPEN to cut off uploads through the handle
+// it opens at Cutoff, so that no write on the handle changes a byte at or
+// beyond it. Each write is decided by its offset and length alone. A write below
 // Cutoff goes through. A write that crosses Cutoff is trimmed to the bytes
 // below it and gets Result once the backend has stored them. A write at or
 // beyond Cutoff gets Result without reaching the backend. Result is a Fail,
@@ -144,7 +144,7 @@ type PartialUpload struct {
 	Reserve func() bool
 }
 
-// CorruptDownload, chosen for an OPEN, corrupts what reads through the
+// CorruptDownload is chosen for an OPEN to corrupt what reads through the
 // handle it opens return, while the file stays unchanged and every reply
 // reports success. What a read returns depends only on the file and the
 // read's own offset and length, so a client gets the same corrupted file
@@ -195,11 +195,11 @@ func (c Corruption) String() string {
 	return fmt.Sprintf("Corruption(%d)", int(c))
 }
 
-// Timed, chosen for an OPEN, takes Action once the handle the OPEN returns
-// has been open for After, unless the handle is closed first, whatever the
-// client is doing then. Action is a Drop, Freeze, EndSession or
-// ListenerDown, and its When is ignored. Reserve, if set, is called as the moment comes; if it returns
-// false, nothing happens.
+// Timed is chosen for an OPEN to take Action once the handle the OPEN
+// returns has been open for After, unless the handle is closed first,
+// whatever the client is doing then. Action is a Drop, Freeze, EndSession
+// or ListenerDown, and its When is ignored. Reserve, if set, is called as
+// the moment comes; if it returns false, nothing happens.
 type Timed struct {
 	After   time.Duration
 	Action  Action
@@ -208,18 +208,18 @@ type Timed struct {
 
 // Timer is a fault for a moment in a session rather than for a request. At
 // At, whatever the client is doing, the session takes Action, a Drop,
-// Freeze, EndSession or ListenerDown, whose When is ignored. Reserve, if set, is called as the
-// moment comes; if it returns false, nothing happens.
+// Freeze, EndSession or ListenerDown, whose When is ignored. Reserve, if
+// set, is called as the moment comes; if it returns false, nothing happens.
 type Timer struct {
 	At      time.Time
 	Action  Action
 	Reserve func() bool
 }
 
-// WrongSize, chosen for a STAT, LSTAT or FSTAT, or for an entry of a
-// READDIR reply, misreports the size in the backend's reply: as Size or, if
-// Delta is not zero, as the true size plus Delta, but never below 0 or above
-// the largest uint64. In a READDIR entry, the size in the longname changes
+// WrongSize is chosen for a STAT, LSTAT or FSTAT, or for an entry of a
+// READDIR reply, to misreport the size in the backend's reply: as Size or,
+// if Delta is not zero, as the true size plus Delta, but never below 0 or
+// above the largest uint64. In a READDIR entry, the size in the longname changes
 // too, if the longname shows the true size where ls -l does. The file itself
 // is unchanged.
 type WrongSize struct {

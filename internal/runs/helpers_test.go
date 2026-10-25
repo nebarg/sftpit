@@ -16,6 +16,9 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
@@ -25,9 +28,10 @@ const (
 	waitTimeout  = 5 * time.Second
 )
 
-// startManager starts runs in a new workspace with opts, for testUser, and
-// serves them on a loopback port, returning the manager and the address.
-func startManager(t *testing.T, opts Options) (*Manager, string) {
+// newManager starts runs in a new workspace with opts, for testUser, and
+// closes them when the test ends. Nothing serves them, so a test of their
+// timers alone can run in a synctest bubble.
+func newManager(t *testing.T, opts Options) *Manager {
 	t.Helper()
 	w, err := OpenWorkspace(t.TempDir())
 	if err != nil {
@@ -48,16 +52,28 @@ func startManager(t *testing.T, opts Options) (*Manager, string) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return m
+}
+
+// startManager starts runs as newManager does, and serves them on a
+// loopback port, returning the manager and the address.
+func startManager(t *testing.T, opts Options) (*Manager, string) {
+	t.Helper()
+	m := newManager(t, opts)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	served := make(chan error, 1)
 	go func() { served <- m.Server().Serve(ln) }()
+	// This runs before newManager's cleanup, so the server must close here.
 	t.Cleanup(func() {
-		if err := m.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
+		m.Server().Close()
 		if err := <-served; !errors.Is(err, sshfront.ErrServerClosed) {
 			t.Errorf("Serve: %v", err)
 		}
@@ -159,3 +175,21 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// connectRule is a rule, held, that gives action to every connection as it
+// is accepted.
+func connectRule(action sftpproxy.Action) faults.Rule {
+	return faults.Rule{ID: "held", Match: faults.Match{Operations: []faults.Operation{faults.Connect}}, Action: action}
+}
+
+// outageAt is a rule that takes the server down for a minute, at moment
+// into the run.
+func outageAt(moment time.Duration) faults.Rule {
+	return faults.Rule{
+		ID:      "outage",
+		Trigger: &faults.Trigger{Anchor: faults.Run, At: &faults.Range[time.Duration]{Min: moment, Max: moment}},
+		Action:  sftpproxy.ListenerDown{Duration: time.Minute},
+	}
+}
+
+var denyStats = faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}

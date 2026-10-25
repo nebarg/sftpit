@@ -54,15 +54,11 @@ func (c *Conn) Close() error { return c.gate.closeNormally() }
 // normal close.
 func (c *Conn) Reset() error { return c.gate.reset() }
 
-// Freeze stops traffic in both directions until Thaw or Close. The client
-// sees neither data nor a close, so its SSH keepalives go unanswered. A write
+// Freeze stops traffic in both directions until Close. The client sees
+// neither data nor a close, so its SSH keepalives go unanswered. A write
 // already in progress is not interrupted. Callers must bound how long a
 // connection stays frozen.
 func (c *Conn) Freeze() { c.gate.freeze() }
-
-// Thaw resumes traffic after Freeze. Data that arrived while frozen is then
-// delivered in order.
-func (c *Conn) Thaw() { c.gate.thaw() }
 
 // drainTimeout bounds how long a normal close waits for the client to close
 // its end, which a client that has seen the FIN does at once.
@@ -71,8 +67,10 @@ const drainTimeout = time.Second
 type gate struct {
 	net.Conn
 
-	mu      sync.Mutex
-	flowing chan struct{}
+	frozen     chan struct{}
+	freezeOnce sync.Once
+
+	mu sync.Mutex
 	// draining is set by a normal close, which leaves the connection open
 	// for Close to drain.
 	draining bool
@@ -87,9 +85,7 @@ type gate struct {
 }
 
 func newGate(c net.Conn) *gate {
-	flowing := make(chan struct{})
-	close(flowing)
-	return &gate{Conn: c, flowing: flowing, closed: make(chan struct{})}
+	return &gate{Conn: c, frozen: make(chan struct{}), closed: make(chan struct{})}
 }
 
 func (g *gate) Read(p []byte) (int, error) {
@@ -97,8 +93,8 @@ func (g *gate) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	n, err := g.Conn.Read(p)
-	// A read that was already blocked when Freeze was called must not hand
-	// its data to the SSH layer until the connection thaws.
+	// A read that was already blocked when Freeze or a normal close was
+	// called must not hand its data to the SSH layer.
 	if werr := g.wait(); werr != nil {
 		return 0, werr
 	}
@@ -139,15 +135,9 @@ func (g *gate) closeNormally() error {
 	if !ok {
 		return g.Close()
 	}
-	g.mu.Lock()
-	again := g.draining
-	g.draining = true
-	g.mu.Unlock()
-	if again {
-		return nil
-	}
-	if err := tcp.SetReadDeadline(time.Now().Add(drainTimeout)); err != nil {
-		return fmt.Errorf("sshfront: close: %w", err)
+	again, err := g.startDrain(tcp)
+	if again || err != nil {
+		return err
 	}
 	if err := tcp.CloseWrite(); err != nil {
 		// The connection is already closed or reset, so there is nothing to
@@ -160,41 +150,52 @@ func (g *gate) closeNormally() error {
 	return nil
 }
 
+// startDrain begins a normal close and sets the read deadline that bounds
+// its drain, under mu so that endHandshake cannot clear it. It reports
+// whether a normal close had already begun.
+func (g *gate) startDrain(tcp *net.TCPConn) (again bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.draining {
+		return true, nil
+	}
+	g.draining = true
+	if err := tcp.SetReadDeadline(time.Now().Add(drainTimeout)); err != nil {
+		return false, fmt.Errorf("sshfront: close: %w", err)
+	}
+	return false, nil
+}
+
+// endHandshake clears the handshake's deadline, unless a normal close has
+// begun and set the one that bounds its drain.
+func (g *gate) endHandshake() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.draining {
+		return nil
+	}
+	return g.Conn.SetDeadline(time.Time{})
+}
+
 func (g *gate) isDraining() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.draining
 }
 
-func (g *gate) freeze() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	select {
-	case <-g.flowing:
-		g.flowing = make(chan struct{})
-	default:
-	}
-}
+func (g *gate) freeze() { g.freezeOnce.Do(func() { close(g.frozen) }) }
 
-func (g *gate) thaw() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	select {
-	case <-g.flowing:
-	default:
-		close(g.flowing)
-	}
-}
-
+// wait returns net.ErrClosed once the connection is closed, and until then
+// blocks while it is frozen.
 func (g *gate) wait() error {
-	g.mu.Lock()
-	flowing := g.flowing
-	g.mu.Unlock()
 	select {
-	case <-flowing:
-		return nil
 	case <-g.closed:
 		return net.ErrClosed
+	case <-g.frozen:
+		<-g.closed
+		return net.ErrClosed
+	default:
+		return nil
 	}
 }
 

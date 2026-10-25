@@ -24,7 +24,7 @@ func TestSnapshotSeedKeepsWhatEachRunStartsWith(t *testing.T) {
 	setMetadata(t, filepath.Join(seed, "outgoing"), 0o555, stamp.Add(time.Hour))
 	w := tempWorkspace(t)
 
-	s, err := w.SnapshotSeed(seed)
+	s, err := w.snapshotSeed(seed)
 	if err != nil {
 		t.Fatalf("SnapshotSeed: %v", err)
 	}
@@ -81,10 +81,10 @@ func TestSnapshotSeedReplacesTheLastSnapshot(t *testing.T) {
 	makeSeed(t, second, map[string]string{"b.txt": "b"})
 	w := tempWorkspace(t)
 
-	if _, err := w.SnapshotSeed(first); err != nil {
+	if _, err := w.snapshotSeed(first); err != nil {
 		t.Fatalf("SnapshotSeed: %v", err)
 	}
-	s, err := w.SnapshotSeed(second)
+	s, err := w.snapshotSeed(second)
 	if err != nil {
 		t.Fatalf("SnapshotSeed over a snapshot with a read-only directory: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestSnapshotSeedReplacesTheLastSnapshot(t *testing.T) {
 		t.Errorf("the run holds %v, want only the second seed", got)
 	}
 
-	if s, err := w.SnapshotSeed(""); s != nil || err != nil {
+	if s, err := w.snapshotSeed(""); s != nil || err != nil {
 		t.Fatalf("SnapshotSeed without a seed = %v, %v, want no seed", s, err)
 	}
 	if got := listTree(t, filepath.Join(w.Dir(), "fixtures")); len(got) != 0 {
@@ -132,14 +132,14 @@ func TestRestoreRefusesASnapshotThatHasChanged(t *testing.T) {
 			makeSeed(t, seed, map[string]string{"in/a.txt": "a"})
 			setMetadata(t, filepath.Join(seed, "in"), 0o755, time.Now())
 			w := tempWorkspace(t)
-			s, err := w.SnapshotSeed(seed)
+			s, err := w.snapshotSeed(seed)
 			if err != nil {
 				t.Fatalf("SnapshotSeed: %v", err)
 			}
 			tt.change(t, filepath.Join(w.Dir(), "fixtures", "seed"))
 
 			embedded, files := newBackend(t, w)
-			if err := s.Restore(embedded); err == nil || !strings.Contains(err.Error(), tt.want) {
+			if err := s.restore(embedded); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Restore = %v, want %q", err, tt.want)
 			}
 			if got := listTree(t, files); len(got) != 0 {
@@ -155,7 +155,7 @@ func TestSnapshotSeedRefusesLinks(t *testing.T) {
 	if err := os.Symlink("orders.csv", filepath.Join(seed, "link.csv")); err != nil {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
-	_, err := tempWorkspace(t).SnapshotSeed(seed)
+	_, err := tempWorkspace(t).snapshotSeed(seed)
 	if !errors.Is(err, backend.ErrUnsupportedFile) || !strings.Contains(err.Error(), filepath.Join(seed, "link.csv")) {
 		t.Errorf("SnapshotSeed = %v, want ErrUnsupportedFile naming the link", err)
 	}
@@ -236,10 +236,10 @@ func newBackend(t *testing.T, w *Workspace) (*backend.Embedded, string) {
 }
 
 // restore restores s into a new run in w, returning the run's files.
-func restore(t *testing.T, w *Workspace, s *Seed) string {
+func restore(t *testing.T, w *Workspace, s *seedSnapshot) string {
 	t.Helper()
 	embedded, files := newBackend(t, w)
-	if err := s.Restore(embedded); err != nil {
+	if err := s.restore(embedded); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	return files

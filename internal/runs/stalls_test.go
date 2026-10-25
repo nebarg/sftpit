@@ -59,7 +59,7 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logs := make(messages, 64)
-			held := faults.Rule{ID: "held", Match: faults.Match{Operations: []faults.Operation{faults.Connect}}, Action: tt.action}
+			held := connectRule(tt.action)
 			m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"held": {Rules: []faults.Rule{held}}}, Scenario: "held", Logger: slog.New(logs)})
 			raw, err := net.Dial("tcp", addr)
 			if err != nil {
@@ -97,7 +97,7 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 	var logs syncBuffer
 	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"chaos": {}}, Scenario: "chaos", Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	inline := &InlineScenario{Rules: []faults.Rule{denyStats}}
-	run, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: seedOf(7)})
+	run, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: new(faults.Seed(7))})
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 		req  ResetRequest
 		want error
 	}{
-		{"a named and an inline scenario", ResetRequest{Scenario: nameOf("chaos"), Inline: inline}, ErrTwoScenarios},
+		{"a named and an inline scenario", ResetRequest{Scenario: new("chaos"), Inline: inline}, ErrTwoScenarios},
 		{"rules an engine cannot apply", ResetRequest{Inline: &InlineScenario{Rules: []faults.Rule{denyStats, denyStats}}}, nil},
 		{"chaos an engine cannot apply", ResetRequest{Inline: &InlineScenario{Chaos: &faults.Chaos{Preset: "wild"}}}, nil},
 	}

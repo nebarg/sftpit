@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -70,8 +71,7 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 }
 
 func TestResetChoosesTheNextRunsScenarioAndSeed(t *testing.T) {
-	ownSeed := faults.Seed(9)
-	scenarios := map[string]config.Scenario{"chaos": {}, "own": {Seed: &ownSeed}}
+	scenarios := map[string]config.Scenario{"chaos": {}, "own": {Seed: new(faults.Seed(9))}}
 	tests := []struct {
 		name     string
 		scenario string
@@ -83,14 +83,14 @@ func TestResetChoosesTheNextRunsScenarioAndSeed(t *testing.T) {
 		fresh bool
 	}{
 		{name: "a fresh seed is drawn again", scenario: "chaos", fresh: true, want: Scenario{Name: "chaos"}},
-		{name: "a pinned seed is kept", scenario: "chaos", seed: seedOf(7), want: Scenario{Name: "chaos", Seed: 7, Pinned: true}},
+		{name: "a pinned seed is kept", scenario: "chaos", seed: new(faults.Seed(7)), want: Scenario{Name: "chaos", Seed: 7, Pinned: true}},
 		{name: "the scenario's seed is kept", scenario: "own", want: Scenario{Name: "own", Seed: 9, Pinned: true}},
-		{name: "a seed is pinned", scenario: "chaos", req: ResetRequest{Seed: seedOf(8)}, want: Scenario{Name: "chaos", Seed: 8, Pinned: true}},
-		{name: "a seed overrides the scenario's", scenario: "own", req: ResetRequest{Seed: seedOf(8)}, want: Scenario{Name: "own", Seed: 8, Pinned: true}},
-		{name: "a named scenario draws afresh", scenario: "chaos", seed: seedOf(7), req: ResetRequest{Scenario: nameOf("chaos")}, fresh: true, want: Scenario{Name: "chaos"}},
-		{name: "a named scenario has its own seed", scenario: "chaos", seed: seedOf(7), req: ResetRequest{Scenario: nameOf("own")}, want: Scenario{Name: "own", Seed: 9, Pinned: true}},
-		{name: "a named scenario with a seed", scenario: "chaos", req: ResetRequest{Scenario: nameOf("own"), Seed: seedOf(5)}, want: Scenario{Name: "own", Seed: 5, Pinned: true}},
-		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: nameOf("")}, fresh: true, want: Scenario{}},
+		{name: "a seed is pinned", scenario: "chaos", req: ResetRequest{Seed: new(faults.Seed(8))}, want: Scenario{Name: "chaos", Seed: 8, Pinned: true}},
+		{name: "a seed overrides the scenario's", scenario: "own", req: ResetRequest{Seed: new(faults.Seed(8))}, want: Scenario{Name: "own", Seed: 8, Pinned: true}},
+		{name: "a named scenario draws afresh", scenario: "chaos", seed: new(faults.Seed(7)), req: ResetRequest{Scenario: new("chaos")}, fresh: true, want: Scenario{Name: "chaos"}},
+		{name: "a named scenario has its own seed", scenario: "chaos", seed: new(faults.Seed(7)), req: ResetRequest{Scenario: new("own")}, want: Scenario{Name: "own", Seed: 9, Pinned: true}},
+		{name: "a named scenario with a seed", scenario: "chaos", req: ResetRequest{Scenario: new("own"), Seed: new(faults.Seed(5))}, want: Scenario{Name: "own", Seed: 5, Pinned: true}},
+		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: new("")}, fresh: true, want: Scenario{}},
 		{name: "still no scenario", fresh: true, want: Scenario{}},
 	}
 	for _, tt := range tests {
@@ -124,9 +124,9 @@ func TestResetRefusesARunItCannotStart(t *testing.T) {
 		err      error
 		want     string
 	}{
-		{name: "an unknown scenario", req: ResetRequest{Scenario: nameOf("flaky")}, err: ErrUnknownScenario, want: `runs: unknown scenario "flaky"; the configuration defines chaos, own`},
-		{name: "a seed without a scenario", scenario: "chaos", req: ResetRequest{Scenario: nameOf(""), Seed: seedOf(7)}, err: ErrSeedWithoutScenario, want: "a seed needs a scenario"},
-		{name: "a seed for a run without one", req: ResetRequest{Seed: seedOf(7)}, err: ErrSeedWithoutScenario, want: "a seed needs a scenario"},
+		{name: "an unknown scenario", req: ResetRequest{Scenario: new("flaky")}, err: ErrUnknownScenario, want: `runs: unknown scenario "flaky"; the configuration defines chaos, own`},
+		{name: "a seed without a scenario", scenario: "chaos", req: ResetRequest{Scenario: new(""), Seed: new(faults.Seed(7))}, err: ErrSeedWithoutScenario, want: "a seed needs a scenario"},
+		{name: "a seed for a run without one", req: ResetRequest{Seed: new(faults.Seed(7))}, err: ErrSeedWithoutScenario, want: "a seed needs a scenario"},
 		{name: "a stale run", req: ResetRequest{Run: "20260101-000000.000-0000"}, err: ErrStaleRun, want: "the current run is "},
 	}
 	for _, tt := range tests {
@@ -172,23 +172,27 @@ func TestResetStartsTheRulesAgain(t *testing.T) {
 }
 
 func TestResetEndsAnOutageAndTimesTheNextRunFromItsStart(t *testing.T) {
-	m, _ := startManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(time.Second)}}}, Scenario: "outage"})
-	for run := 1; run <= 2; run++ {
-		start := time.Now()
-		down := awaitState(t, m, StateDown)
-		if took := time.Since(start); took < 900*time.Millisecond {
-			t.Errorf("run %d: the server went down after %v, want a second into the run", run, took)
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(time.Second)}}}, Scenario: "outage"})
+		for run := 1; run <= 2; run++ {
+			time.Sleep(time.Second - time.Nanosecond)
+			synctest.Wait()
+			if s := m.Status(); s.State != StateUp {
+				t.Errorf("run %d: just before a second into the run, the status is %+v, want up", run, s)
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			if s := m.Status(); s.State != StateDown || !s.DownUntil.Equal(time.Now().Add(time.Minute)) {
+				t.Errorf("run %d: a second into the run, the status is %+v, want down for a minute", run, s)
+			}
+			if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+				t.Fatalf("Reset: %v", err)
+			}
+			if s := m.Status(); s.State != StateUp {
+				t.Errorf("run %d: after the reset, the status is %+v, want the next run up", run, s)
+			}
 		}
-		if left := time.Until(down.DownUntil); left < 50*time.Second {
-			t.Errorf("run %d: the outage ends in %v, want about a minute", run, left)
-		}
-		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
-			t.Fatalf("Reset: %v", err)
-		}
-		if s := m.Status(); s.State != StateUp {
-			t.Errorf("run %d: after the reset, the status is %+v, want the next run up", run, s)
-		}
-	}
+	})
 }
 
 func TestAnOutageAtTheStartOfARunBeginsWithIt(t *testing.T) {
@@ -204,25 +208,28 @@ func TestAnOutageAtTheStartOfARunBeginsWithIt(t *testing.T) {
 }
 
 func TestResetStopsTheRunsTimers(t *testing.T) {
-	m, _ := startManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(300 * time.Millisecond)}}}, Scenario: "outage"})
-	if _, err := m.Reset(t.Context(), ResetRequest{Scenario: nameOf("")}); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	time.Sleep(600 * time.Millisecond)
-	if s := m.Status(); s.State != StateUp {
-		t.Errorf("the status is %+v, want the next run, which has no faults, up", s)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(300 * time.Millisecond)}}}, Scenario: "outage"})
+		if _, err := m.Reset(t.Context(), ResetRequest{Scenario: new("")}); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		time.Sleep(time.Hour)
+		if s := m.Status(); s.State != StateUp {
+			t.Errorf("the status is %+v, want the next run, which has no faults, up", s)
+		}
+	})
 }
 
 func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 	slowWrites := faults.Rule{ID: "slow-writes", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Delay{Duration: 20 * time.Millisecond}}
 	tests := []struct {
-		name string
-		rule faults.Rule
+		name   string
+		rule   faults.Rule
+		upload bool
 	}{
-		{"a slow upload", slowWrites},
-		{"a delayed read", faults.Rule{ID: "slow", Match: faults.Match{Operations: []faults.Operation{faults.Read}}, Action: sftpproxy.Delay{When: sftpproxy.After, Duration: time.Minute}}},
-		{"a frozen connection", faults.Rule{ID: "freeze", Match: faults.Match{Operations: []faults.Operation{faults.Read}}, Action: sftpproxy.Freeze{Limit: time.Minute}}},
+		{"a slow upload", slowWrites, true},
+		{"a delayed read", faults.Rule{ID: "slow", Match: faults.Match{Operations: []faults.Operation{faults.Read}}, Action: sftpproxy.Delay{When: sftpproxy.After, Duration: time.Minute}}, false},
+		{"a frozen connection", faults.Rule{ID: "freeze", Match: faults.Match{Operations: []faults.Operation{faults.Read}}, Action: sftpproxy.Freeze{Limit: time.Minute}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -240,7 +247,7 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 			first := m.Status().Run
 			c, _ := dialSFTP(t, addr)
 			go func() {
-				if tt.rule.ID == "slow-writes" {
+				if tt.upload {
 					f, err := c.Create("/upload.bin")
 					if err == nil {
 						for err == nil {
@@ -264,7 +271,7 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 			if took := time.Since(start); took > waitTimeout {
 				t.Errorf("Reset took %v, want it to end the fault", took)
 			}
-			if tt.rule.ID != "slow-writes" {
+			if !tt.upload {
 				return
 			}
 			uploaded := filepath.Join(first.Files, "upload.bin")
@@ -337,12 +344,7 @@ func TestAFailedResetLeavesTheRunUnavailableUntilOneSucceeds(t *testing.T) {
 }
 
 func TestCloseEndsTheRun(t *testing.T) {
-	logs := make(messages, 64)
-	m, addr := startManager(t, Options{
-		Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(300 * time.Millisecond)}}},
-		Scenario:  "outage",
-		Logger:    slog.New(logs),
-	})
+	m, addr := startManager(t, Options{})
 	_, ended := dialSFTP(t, addr)
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -351,22 +353,19 @@ func TestCloseEndsTheRun(t *testing.T) {
 	if _, err := m.current.root.Stat("."); err == nil {
 		t.Error("the run's files are still open after Close")
 	}
-	time.Sleep(600 * time.Millisecond)
-	for len(logs) > 0 {
-		if msg := <-logs; msg == "injected fault" {
-			t.Error("the run's timer fired after Close")
-		}
-	}
 }
 
-// outageAt is a rule that takes the server down for a minute, at moment
-// into the run.
-func outageAt(moment time.Duration) faults.Rule {
-	return faults.Rule{
-		ID:      "outage",
-		Trigger: &faults.Trigger{Anchor: faults.Run, At: &faults.Range[time.Duration]{Min: moment, Max: moment}},
-		Action:  sftpproxy.ListenerDown{Duration: time.Minute},
-	}
+func TestCloseStopsTheRunsTimers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(300 * time.Millisecond)}}}, Scenario: "outage"})
+		if err := m.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		time.Sleep(time.Hour)
+		if fired := m.current.rules.Counts()["outage"].Fired; fired != 0 {
+			t.Errorf("the run's timer fired %d times after Close", fired)
+		}
+	})
 }
 
 func awaitState(t *testing.T, m *Manager, want State) Status {
@@ -428,7 +427,3 @@ func download(t *testing.T, c *sftp.Client, name string) string {
 	}
 	return string(b)
 }
-
-func seedOf(n faults.Seed) *faults.Seed { return &n }
-
-func nameOf(name string) *string { return &name }

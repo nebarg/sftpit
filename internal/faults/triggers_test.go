@@ -13,12 +13,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-func at(d time.Duration) *faults.Range[time.Duration] {
-	return &faults.Range[time.Duration]{Min: d, Max: d}
-}
-
-var stat = faults.Match{Operations: ops(faults.Stat)}
-
 func TestAWindowLimitsARuleToASpan(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
@@ -104,7 +98,7 @@ func TestEachConnectionHasItsOwnMoment(t *testing.T) {
 
 func TestAMissedMomentIsUsedUp(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Probability: probability(0), Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: failure},
+		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Probability: new(0.0), Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: failure},
 			faults.Rule{ID: "after", Priority: 1, Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: denied})
 		time.Sleep(time.Second)
 		decide := session(e, "test", "")
@@ -158,19 +152,19 @@ func TestConnectionActionsAreTimedForEachSession(t *testing.T) {
 				t.Fatalf("session %d of %s got %d timers, want %d", i+1, user, len(got), len(want))
 			}
 			for j := range want {
-				if got[j].At != want[j].At || got[j].Action != want[j].Action || got[j].Reserve == nil {
+				if !got[j].At.Equal(want[j].At) || got[j].Action != want[j].Action || got[j].Reserve == nil {
 					t.Errorf("session %d of %s timer %d = %+v, want %+v with a Reserve", i+1, user, j, got[j], want[j])
 				}
 			}
 		}
-		if timers[0][0].At == timers[1][0].At {
+		if timers[0][0].At.Equal(timers[1][0].At) {
 			t.Errorf("both of a's sessions drew the moment %v", timers[0][0].At)
 		}
 
 		if !timers[0][1].Reserve() || timers[2][0].Reserve() {
 			t.Error("the run's moment fired in more than one session, beyond max_triggers")
 		}
-		if shared[0].At != timers[0][0].At {
+		if !shared[0].At.Equal(timers[0][0].At) {
 			t.Errorf("a second session on a connection was timed for %v, want the connection's moment, %v", shared[0].At, timers[0][0].At)
 		}
 		if !timers[0][0].Reserve() || shared[0].Reserve() {

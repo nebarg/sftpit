@@ -3,10 +3,8 @@ package sshfront_test
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -24,30 +22,6 @@ import (
 
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
-
-const (
-	testPassword = "test-password"
-	waitTimeout  = 5 * time.Second
-)
-
-var hostKeys []ssh.Signer
-
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "sshfront-hostkeys-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	code := 1
-	hostKeys, err = sshfront.LoadOrCreateHostKeys(dir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-	} else {
-		code = m.Run()
-	}
-	os.RemoveAll(dir)
-	os.Exit(code)
-}
 
 func TestNewRejectsInvalidConfig(t *testing.T) {
 	handler := func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error { return nil }
@@ -116,7 +90,6 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 func TestPasswordLogin(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 	})
 
@@ -158,7 +131,6 @@ func TestPasswordLogin(t *testing.T) {
 func TestKeyboardInteractiveLogin(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 	})
 	answer := func(password string) ssh.AuthMethod {
@@ -228,11 +200,7 @@ func TestPublicKeyLogin(t *testing.T) {
 }
 
 func TestHostKeyAlgorithms(t *testing.T) {
-	handler, _, _ := connPublisher()
-	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: handler,
-	})
+	addr, _ := startServer(t, sshfront.Config{})
 
 	tests := []struct {
 		algorithm string
@@ -266,7 +234,6 @@ func TestHostKeyAlgorithms(t *testing.T) {
 func TestOnlySFTPSubsystemIsServed(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 	})
 	client := mustDial(t, addr, "test", ssh.Password(testPassword))
@@ -317,10 +284,7 @@ func TestOnlySFTPSubsystemIsServed(t *testing.T) {
 }
 
 func TestSFTPTransferThroughFrontEnd(t *testing.T) {
-	addr, _ := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: inMemorySFTP,
-	})
+	addr, _ := startServer(t, sshfront.Config{})
 	client := mustDial(t, addr, "test", ssh.Password(testPassword))
 	sftpClient, err := sftp.NewClient(client, sftp.UseConcurrentWrites(true))
 	if err != nil {
@@ -369,7 +333,6 @@ func TestHandlerResultSetsExitStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			addr, _ := startServer(t, sshfront.Config{
-				Users: []sshfront.User{{Name: "test", Password: testPassword}},
 				Handler: func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error {
 					return tt.handlerErr
 				},
@@ -428,7 +391,6 @@ func TestHandlerFailuresAreLogged(t *testing.T) {
 func TestHandlerPanicIsContained(t *testing.T) {
 	var logs syncBuffer
 	addr, _ := startServer(t, sshfront.Config{
-		Users: []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error {
 			panic("proxy bug")
 		},
@@ -452,12 +414,9 @@ func TestHandlerPanicIsContained(t *testing.T) {
 
 func TestServeRetriesFailedAccepts(t *testing.T) {
 	ln := newFlakyListener(t, 3)
-	addr := startServerOn(t, ln, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: inMemorySFTP,
-	})
+	serve(t, ln, sshfront.Config{})
 
-	client := mustDial(t, addr, "test", ssh.Password(testPassword))
+	client := mustDial(t, ln.Addr().String(), "test", ssh.Password(testPassword))
 	if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 		t.Fatalf("connection after accept failures: %v", err)
 	}
@@ -465,15 +424,7 @@ func TestServeRetriesFailedAccepts(t *testing.T) {
 
 func TestCloseInterruptsAcceptRetry(t *testing.T) {
 	ln := newFlakyListener(t, math.MaxInt32)
-	srv, err := sshfront.New(sshfront.Config{
-		HostKeys: hostKeys,
-		Users:    []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler:  inMemorySFTP,
-		Logger:   slog.New(slog.DiscardHandler),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	srv := newServer(t, sshfront.Config{})
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	for range 3 {
@@ -493,15 +444,7 @@ func TestCloseInterruptsAcceptRetry(t *testing.T) {
 }
 
 func TestServeReturnsWhenListenerClosedElsewhere(t *testing.T) {
-	srv, err := sshfront.New(sshfront.Config{
-		HostKeys: hostKeys,
-		Users:    []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler:  inMemorySFTP,
-		Logger:   slog.New(slog.DiscardHandler),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	srv := newServer(t, sshfront.Config{})
 	t.Cleanup(func() { srv.Close() })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -519,10 +462,7 @@ func TestServeReturnsWhenListenerClosedElsewhere(t *testing.T) {
 }
 
 func TestServerCloseInterruptsHandshake(t *testing.T) {
-	handler, _, _ := connPublisher()
 	addr, srv := startServer(t, sshfront.Config{
-		Users:            []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler:          handler,
 		HandshakeTimeout: time.Minute,
 	})
 	raw, err := net.Dial("tcp", addr)
@@ -539,10 +479,7 @@ func TestServerCloseInterruptsHandshake(t *testing.T) {
 }
 
 func TestHandshakeTimeout(t *testing.T) {
-	handler, _, _ := connPublisher()
 	addr, _ := startServer(t, sshfront.Config{
-		Users:            []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler:          handler,
 		HandshakeTimeout: 200 * time.Millisecond,
 	})
 	raw, err := net.Dial("tcp", addr)
@@ -557,46 +494,6 @@ func TestHandshakeTimeout(t *testing.T) {
 	if _, err := io.ReadAll(raw); err != nil {
 		t.Fatalf("server did not close an idle handshake: %v", err)
 	}
-}
-
-func startServer(t *testing.T, cfg sshfront.Config) (string, *sshfront.Server) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	srv := serve(t, ln, cfg)
-	return ln.Addr().String(), srv
-}
-
-func startServerOn(t *testing.T, ln net.Listener, cfg sshfront.Config) string {
-	t.Helper()
-	serve(t, ln, cfg)
-	return ln.Addr().String()
-}
-
-func serve(t *testing.T, ln net.Listener, cfg sshfront.Config) *sshfront.Server {
-	t.Helper()
-	cfg.HostKeys = hostKeys
-	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.DiscardHandler)
-	}
-	srv, err := sshfront.New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
-	t.Cleanup(func() {
-		if err := srv.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
-		if err := <-served; !errors.Is(err, sshfront.ErrServerClosed) {
-			t.Errorf("Serve returned %v, want ErrServerClosed", err)
-		}
-	})
-	return srv
 }
 
 type flakyListener struct {
@@ -668,93 +565,4 @@ func sftpExitStatus(t *testing.T, client *ssh.Client) int {
 	}
 	t.Fatal("channel closed without an exit status")
 	return 0
-}
-
-func dial(addr, user string, auth ssh.AuthMethod) (*ssh.Client, error) {
-	return ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{auth},
-		HostKeyCallback: trustHostKeys,
-		Timeout:         waitTimeout,
-	})
-}
-
-func mustDial(t *testing.T, addr, user string, auth ssh.AuthMethod) *ssh.Client {
-	t.Helper()
-	client, err := dial(addr, user, auth)
-	if err != nil {
-		t.Fatalf("login as %s: %v", user, err)
-	}
-	t.Cleanup(func() { client.Close() })
-	return client
-}
-
-func trustHostKeys(_ string, _ net.Addr, key ssh.PublicKey) error {
-	for _, hostKey := range hostKeys {
-		if bytes.Equal(hostKey.PublicKey().Marshal(), key.Marshal()) {
-			return nil
-		}
-	}
-	return errors.New("unknown host key")
-}
-
-func newClientKey(t *testing.T) ssh.Signer {
-	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate client key: %v", err)
-	}
-	signer, err := ssh.NewSignerFromKey(key)
-	if err != nil {
-		t.Fatalf("client signer: %v", err)
-	}
-	return signer
-}
-
-// connPublisher returns a handler that publishes each connection it serves
-// and holds the channel open until the connection ends, plus channels that
-// receive the connections and signal each handler's return.
-func connPublisher() (sshfront.Handler, <-chan *sshfront.Conn, <-chan struct{}) {
-	conns := make(chan *sshfront.Conn, 16)
-	returned := make(chan struct{}, 16)
-	handler := func(ctx context.Context, conn *sshfront.Conn, _ io.ReadWriteCloser) error {
-		conns <- conn
-		<-ctx.Done()
-		returned <- struct{}{}
-		return nil
-	}
-	return handler, conns, returned
-}
-
-func inMemorySFTP(_ context.Context, _ *sshfront.Conn, channel io.ReadWriteCloser) error {
-	err := sftp.NewRequestServer(channel, sftp.InMemHandler()).Serve()
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	return err
-}
-
-func openSFTP(t *testing.T, client *ssh.Client, conns <-chan *sshfront.Conn) *sshfront.Conn {
-	t.Helper()
-	session, err := client.NewSession()
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	t.Cleanup(func() { session.Close() })
-	if err := session.RequestSubsystem("sftp"); err != nil {
-		t.Fatalf("RequestSubsystem(sftp): %v", err)
-	}
-	return receive(t, conns)
-}
-
-func receive[T any](t *testing.T, ch <-chan T) T {
-	t.Helper()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting")
-		var zero T
-		return zero
-	}
 }

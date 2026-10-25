@@ -5,7 +5,9 @@
 // Requests behave as they do in OpenSSH's sftp-server: a standard rename
 // refuses an existing target while posix-rename replaces it, appends ignore
 // the client's offset, and errors map to the same statuses and messages.
-// Links are unsupported, and ownership cannot be changed.
+// Links are unsupported, and ownership cannot be changed. A request on an
+// open handle other than a READ or WRITE acts on the path the handle was
+// opened at, so it does not follow a file renamed while the handle is open.
 //
 // The files stay within the backend's Limits. A request that would take them
 // past one is refused with SSH_FX_FAILURE, as OpenSSH's sftp-server refuses
@@ -73,15 +75,15 @@ func New(root *os.Root, opts Options) (*Embedded, error) {
 	return &Embedded{root: root, usage: u}, nil
 }
 
-// Serve serves one SFTP session on rwc until the client ends it or rwc is
-// closed, resolving relative paths against home. It returns nil when the
-// session ends normally.
+// Serve serves one SFTP session on rw until the client ends it or rw fails,
+// resolving relative paths against home. It returns nil when the session
+// ends normally.
 //
 // Requests are processed one at a time, in the order they arrive, as in
 // OpenSSH's sftp-server. pkg/sftp alone would run reads and writes on several
 // workers, so appends could land out of order and a write could race a later
 // request on the same file.
-func (e *Embedded) Serve(rwc io.ReadWriteCloser, home string) error {
+func (e *Embedded) Serve(rw io.ReadWriter, home string) error {
 	h := &handler{root: e.root, holds: &e.holds, usage: e.usage}
 	conn, serverEnd := net.Pipe()
 	srv := sftp.NewRequestServer(serverEnd,
@@ -94,7 +96,7 @@ func (e *Embedded) Serve(rwc io.ReadWriteCloser, home string) error {
 		serverEnd.Close()
 	}()
 
-	err := relayInOrder(rwc, conn, h)
+	err := relayInOrder(rw, conn, h)
 	conn.Close()
 	if serveErr := <-served; errors.Is(err, errServerEnded) {
 		err = serveErr
@@ -114,19 +116,22 @@ func isEndOfStream(err error) bool {
 // finish with it, returning any error the session ended with.
 func (e *Embedded) Open(home string) io.ReadWriteCloser {
 	client, server := net.Pipe()
-	s := &session{Conn: client, done: make(chan error, 1)}
+	done := make(chan error, 1)
 	go func() {
-		s.done <- e.Serve(server, home)
+		done <- e.Serve(server, home)
 		server.Close()
 	}()
-	return s
+	return &session{Conn: client, close: sync.OnceValue(func() error {
+		client.Close()
+		return <-done
+	})}
 }
 
 // MkdirAll creates the directory at the clean virtual path dir, along with
 // any missing parents, unless that would take the files past a limit.
 func (e *Embedded) MkdirAll(dir string) error {
 	var parent string
-	for _, segment := range strings.Split(strings.TrimPrefix(dir, "/"), "/") {
+	for segment := range strings.SplitSeq(strings.TrimPrefix(dir, "/"), "/") {
 		parent = path.Join("/", parent, segment)
 		if err := e.mkdir(parent); err != nil {
 			return fmt.Errorf("backend: %w", err)
@@ -148,8 +153,9 @@ func (e *Embedded) mkdir(dir string) error {
 
 // Hold opens the file at the virtual path name for reading, outside any
 // session, and holds back every change to it from every session until the
-// returned file is closed. Changes already under way finish first; reads
-// are never held back.
+// returned file is closed: changes at name, and writes through handles
+// opened at name. Changes already under way finish first; reads are never
+// held back.
 func (e *Embedded) Hold(name string) (*Held, error) {
 	release := e.holds.hold(name)
 	f, err := e.root.Open(rootName(name))
@@ -157,21 +163,20 @@ func (e *Embedded) Hold(name string) (*Held, error) {
 		release()
 		return nil, fmt.Errorf("backend: hold: %w", err)
 	}
-	return &Held{File: f, release: release}, nil
+	return &Held{File: f, release: sync.OnceFunc(release)}, nil
 }
 
 // Held is a file that no session can change until it is closed.
 type Held struct {
 	*os.File
 	release func()
-	once    sync.Once
 }
 
 // Close closes the file and lets changes to it go ahead. Closing it again
 // does nothing more.
 func (h *Held) Close() error {
 	err := h.File.Close()
-	h.once.Do(h.release)
+	h.release()
 	return err
 }
 
@@ -181,16 +186,7 @@ func StoredName(name string) string { return rootName(name) }
 
 type session struct {
 	net.Conn
-	done chan error
-
-	closeOnce sync.Once
-	err       error
+	close func() error
 }
 
-func (s *session) Close() error {
-	s.closeOnce.Do(func() {
-		s.Conn.Close()
-		s.err = <-s.done
-	})
-	return s.err
-}
+func (s *session) Close() error { return s.close() }

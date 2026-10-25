@@ -11,14 +11,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-var (
-	outage = sftpproxy.ListenerDown{Duration: 5 * time.Second, CloseExisting: true}
-	// drawnOutage is an outage whose rule draws its duration from
-	// someSeconds, as the configuration writes one.
-	drawnOutage = sftpproxy.ListenerDown{CloseExisting: true}
-	someSeconds = &faults.Range[time.Duration]{Min: time.Second, Max: time.Minute}
-)
-
 func TestAListenerDownAtAMomentOfTheRunIsTimedOnceForTheRun(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()

@@ -36,7 +36,7 @@ func TestTimersFireAtTheirMoment(t *testing.T) {
 					p, _ := startProxyOnFake(t, sftpproxy.Options{
 						Timers:     []sftpproxy.Timer{{At: start.Add(2 * time.Second), Action: tt.action}},
 						ReplyOrder: order,
-						Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+						Logger:     logs.logger(),
 					})
 					p.client.assertClosed(t)
 					if got := time.Since(start); got != tt.ended {
@@ -48,9 +48,7 @@ func TestTimersFireAtTheirMoment(t *testing.T) {
 					if got := p.conn.events(); !slices.Equal(got, tt.events) {
 						t.Errorf("connection events = %v, want %v", got, tt.events)
 					}
-					if !strings.Contains(logs.String(), tt.log) {
-						t.Errorf("logs lack %s:\n%s", tt.log, logs.String())
-					}
+					logs.assertLogged(t, tt.log)
 				})
 			})
 		}
@@ -123,12 +121,7 @@ func TestADeclinedMomentChangesNothing(t *testing.T) {
 		}
 		timed := sftpproxy.Timed{After: time.Second, Action: sftpproxy.Drop{}, Reserve: reserve}
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults: func(r sftpproxy.Request) sftpproxy.Action {
-				if _, ok := r.Packet.(*sftpwire.Open); ok {
-					return timed
-				}
-				return nil
-			},
+			Faults: on[*sftpwire.Open](timed),
 			Timers: []sftpproxy.Timer{{At: start.Add(2 * time.Second), Action: sftpproxy.Drop{}, Reserve: reserve}},
 		})
 		openForUpload(t, p, fb, "h")
@@ -154,10 +147,10 @@ func TestTimedFaultsCountFromTheHandlesOpen(t *testing.T) {
 				var logs syncBuffer
 				var snaps snapshots
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
-					Faults:     onOpen("/f", sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{Reset: true}}),
+					Faults:     on[*sftpwire.Open](sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{Reset: true}}),
 					ReplyOrder: order,
 					Snapshot:   snaps.take,
-					Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger:     logs.logger(),
 				})
 				start := time.Now()
 				p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate})
@@ -178,9 +171,7 @@ func TestTimedFaultsCountFromTheHandlesOpen(t *testing.T) {
 					t.Errorf("connection events = %v, want [reset]", got)
 				}
 				assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "fault"))
-				if want := `level=INFO msg="injected fault" path=/f fault=close_connection when=timer mode=rst`; !strings.Contains(logs.String(), want) {
-					t.Errorf("logs lack %s:\n%s", want, logs.String())
-				}
+				logs.assertLogged(t, `level=INFO msg="injected fault" path=/f fault=close_connection when=timer mode=rst`)
 			})
 		})
 	}
@@ -191,9 +182,9 @@ func TestClosingTheHandleStopsItsTimedFault(t *testing.T) {
 		var logs syncBuffer
 		var snaps snapshots
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults:   onOpen("/f", sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{}}),
+			Faults:   on[*sftpwire.Open](sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{}}),
 			Snapshot: snaps.take,
-			Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+			Logger:   logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
 		time.Sleep(time.Second)
@@ -213,35 +204,6 @@ func TestClosingTheHandleStopsItsTimedFault(t *testing.T) {
 			t.Errorf("snapshots %v and logs\n%s\nwant neither for a moment that never came", got, logs.String())
 		}
 	})
-}
-
-func TestEndSessionClosesTheSessionAfterEarlierReplies(t *testing.T) {
-	for _, when := range []sftpproxy.When{sftpproxy.Before, sftpproxy.After} {
-		t.Run(when.String(), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: onPath("/a", sftpproxy.EndSession{When: when})})
-				p.client.sendTogether(t,
-					&sftpwire.Stat{Path: "/first"},
-					&sftpwire.Rename{OldPath: "/a", NewPath: "/b"},
-					&sftpwire.Stat{Path: "/last"},
-				)
-				first := fb.next(t)
-				if when == sftpproxy.After {
-					fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
-				}
-				fb.assertNoRequest(t)
-				fb.reply(t, first.id, &sftpwire.AttrsReply{})
-				p.client.assertReplies(t, 1)
-				p.client.assertClosed(t)
-				if err := p.result.wait(t); err != nil {
-					t.Errorf("Serve = %v, want nil", err)
-				}
-				if got := p.conn.events(); len(got) != 0 {
-					t.Errorf("connection events = %v, want the connection left alone", got)
-				}
-			})
-		})
-	}
 }
 
 func TestMoreTimersArriveDuringTheSession(t *testing.T) {
@@ -297,52 +259,66 @@ func TestUnusableTimersEndTheSession(t *testing.T) {
 		{"a listener down without the listener", sftpproxy.ListenerDown{Duration: time.Second}, true, "a ListenerDown fault needs Options.Listener"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				_, backend := startFakeBackend(t, openSSHVersion, "/")
-				clientEnd, proxyEnd := net.Pipe()
-				t.Cleanup(func() { clientEnd.Close() })
-				opts := sftpproxy.Options{
-					Timers: []sftpproxy.Timer{{At: time.Now().Add(time.Hour), Action: tt.action}},
-					Logger: slog.New(slog.DiscardHandler),
-				}
-				if tt.conn {
-					opts.Conn = &fakeConn{stream: proxyEnd}
-				}
-				result := serveInBackground(t.Context(), proxyEnd, backend, opts)
-				newRawClient(clientEnd).init(t, 3)
-				if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
-					t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
-				}
+		for _, later := range []bool{false, true} {
+			name := tt.name
+			if later {
+				name += " delivered later"
+			}
+			t.Run(name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					_, backend := startFakeBackend(t, openSSHVersion, "/")
+					clientEnd, proxyEnd := net.Pipe()
+					t.Cleanup(func() { clientEnd.Close() })
+					timer := sftpproxy.Timer{At: time.Now().Add(time.Hour), Action: tt.action}
+					more := make(chan sftpproxy.Timer, 1)
+					opts := sftpproxy.Options{Logger: slog.New(slog.DiscardHandler)}
+					if later {
+						opts.MoreTimers = more
+					} else {
+						opts.Timers = []sftpproxy.Timer{timer}
+					}
+					if tt.conn {
+						opts.Conn = &fakeConn{stream: proxyEnd}
+					}
+					result := serveInBackground(t.Context(), proxyEnd, backend, opts)
+					newRawClient(clientEnd).init(t, 3)
+					if later {
+						more <- timer
+					}
+					if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
+						t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
+					}
+				})
 			})
-		})
-		t.Run(tt.name+" delivered later", func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				_, backend := startFakeBackend(t, openSSHVersion, "/")
-				clientEnd, proxyEnd := net.Pipe()
-				t.Cleanup(func() { clientEnd.Close() })
-				more := make(chan sftpproxy.Timer, 1)
-				opts := sftpproxy.Options{MoreTimers: more, Logger: slog.New(slog.DiscardHandler)}
-				if tt.conn {
-					opts.Conn = &fakeConn{stream: proxyEnd}
-				}
-				result := serveInBackground(t.Context(), proxyEnd, backend, opts)
-				newRawClient(clientEnd).init(t, 3)
-				more <- sftpproxy.Timer{At: time.Now().Add(time.Hour), Action: tt.action}
-				if err := result.wait(t); err == nil || !strings.Contains(err.Error(), tt.err) {
-					t.Errorf("Serve = %v, want an error containing %q", err, tt.err)
-				}
-			})
-		})
+		}
 	}
 }
 
-// onOpen returns faults that apply action to each OPEN of path.
-func onOpen(path string, action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
-		if _, ok := r.Packet.(*sftpwire.Open); ok && r.Path == path {
-			return action
+// TestASessionRefusedForATimerTakesNoOthers checks that a session refused
+// for one of its timers never takes another's action, even one whose moment
+// has already passed.
+func TestASessionRefusedForATimerTakesNoOthers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, backend := startFakeBackend(t, openSSHVersion, "/")
+		clientEnd, proxyEnd := net.Pipe()
+		t.Cleanup(func() { clientEnd.Close() })
+		conn := &fakeConn{stream: proxyEnd}
+		result := serveInBackground(t.Context(), proxyEnd, backend, sftpproxy.Options{
+			Timers: []sftpproxy.Timer{
+				{At: time.Now(), Action: sftpproxy.ListenerDown{Duration: time.Second}},
+				{At: time.Now().Add(time.Hour), Action: sftpproxy.Fail{}},
+			},
+			Conn:     conn,
+			Listener: conn,
+			Logger:   slog.New(slog.DiscardHandler),
+		})
+		newRawClient(clientEnd).init(t, 3)
+		if err := result.wait(t); err == nil {
+			t.Error("Serve = nil, want the second timer refused")
 		}
-		return nil
-	}
+		synctest.Wait()
+		if events := conn.events(); len(events) != 0 {
+			t.Errorf("connection events %q, want none", events)
+		}
+	})
 }

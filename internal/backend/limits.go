@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -99,9 +98,8 @@ func (e entry) minus(o entry) entry { return entry{e.bytes - o.bytes, e.files - 
 
 // change takes the lock, so that nothing else changes the tree until the
 // returned function is called, and counts what the caller changes at the
-// virtual paths names in the meantime. Empty names are ignored.
+// virtual paths names in the meantime.
 func (u *usage) change(names ...string) (done func()) {
-	names = slices.DeleteFunc(names, func(name string) bool { return name == "" })
 	u.mu.Lock()
 	before := u.measure(names)
 	return func() {
@@ -168,13 +166,18 @@ func writeEnd(off int64, n int) int64 {
 }
 
 // openHandle counts a new file handle as open, or returns the limit it would
-// exceed.
+// exceed. The count never passes the limit, even for a moment, so a refused
+// open cannot make another one fail while a handle is free.
 func (u *usage) openHandle() *limitError {
-	if u.open.Add(1) > u.limits.MaxOpenFiles {
-		u.open.Add(-1)
-		return &limitError{"max_open_files", u.limits.MaxOpenFiles}
+	for {
+		n := u.open.Load()
+		if n >= u.limits.MaxOpenFiles {
+			return &limitError{"max_open_files", u.limits.MaxOpenFiles}
+		}
+		if u.open.CompareAndSwap(n, n+1) {
+			return nil
+		}
 	}
-	return nil
 }
 
 func (u *usage) closeHandle() { u.open.Add(-1) }

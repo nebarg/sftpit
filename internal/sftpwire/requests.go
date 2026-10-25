@@ -11,7 +11,8 @@ type Init struct {
 	Extensions []Extension
 }
 
-// Extension is a name and version pair advertised in Init or Version.
+// Extension is an extension's name and data, as advertised in Init or
+// Version. OpenSSH's extensions carry their version in Data.
 type Extension struct {
 	Name string
 	Data string
@@ -248,7 +249,8 @@ func (p *StatVFS) appendBody(b []byte) []byte {
 // DecodeRequest decodes a client request read by ReadPacket and returns its
 // request ID. A version 3 request or extended request that sftpit does not
 // implement returns an *UnsupportedError carrying the ID. Any other error
-// means the packet is malformed or is not a request.
+// means the packet is malformed or is not a request. Write.Data shares b's
+// memory.
 func DecodeRequest(b []byte) (uint32, Packet, error) {
 	d := decoder{b: b}
 	t := PacketType(d.uint8())

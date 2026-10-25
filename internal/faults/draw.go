@@ -60,7 +60,8 @@ type Key struct {
 	Ordinal uint64
 }
 
-// LogValue logs k as a group of its fields.
+var _ slog.LogValuer = Key{}
+
 func (k Key) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("rule", k.Rule),

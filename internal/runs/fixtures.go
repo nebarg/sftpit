@@ -3,7 +3,6 @@ package runs
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,9 +22,9 @@ const (
 	seedManifest = "fixtures/seed.json"
 )
 
-// Seed is a snapshot of a seed directory that each run of a workspace
-// starts from.
-type Seed struct {
+// seedSnapshot is a snapshot of a seed directory that each run of a
+// workspace starts from.
+type seedSnapshot struct {
 	dir      string
 	manifest manifest
 }
@@ -48,15 +47,15 @@ type seedEntry struct {
 	SHA256  string `json:"sha256,omitempty"`
 }
 
-// SnapshotSeed replaces the workspace's seed snapshot with a copy of the
+// snapshotSeed replaces the workspace's seed snapshot with a copy of the
 // directories and regular files under the host directory src, with their
 // permission bits and modification times, and a manifest of what it holds,
 // with each file's size and SHA-256. Runs restore their files from the
 // snapshot, so later changes to src reach none of them. An entry that is
 // neither a directory nor a regular file is an error wrapping
 // backend.ErrUnsupportedFile. An empty src removes the snapshot and returns
-// a nil Seed.
-func (w *Workspace) SnapshotSeed(src string) (*Seed, error) {
+// nil.
+func (w *Workspace) snapshotSeed(src string) (*seedSnapshot, error) {
 	if err := removeAll(w.root, seedDir); err != nil {
 		return nil, fmt.Errorf("runs: remove the seed snapshot: %w", err)
 	}
@@ -83,19 +82,15 @@ func (w *Workspace) SnapshotSeed(src string) (*Seed, error) {
 	}
 
 	m := manifest{Source: src, Entries: entries}
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err == nil {
-		err = w.root.WriteFile(seedManifest, append(b, '\n'), 0o600)
-	}
-	if err != nil {
+	if err := writeJSON(w.root, seedManifest, m); err != nil {
 		return nil, fmt.Errorf("runs: record the seed snapshot: %w", err)
 	}
-	return &Seed{dir: filepath.Join(w.dir, filepath.FromSlash(seedDir)), manifest: m}, nil
+	return &seedSnapshot{dir: filepath.Join(w.dir, filepath.FromSlash(seedDir)), manifest: m}, nil
 }
 
-// Restore copies the snapshot into embedded, once it has checked that the
+// restore copies the snapshot into embedded, once it has checked that the
 // snapshot still holds what its manifest records.
-func (s *Seed) Restore(embedded *backend.Embedded) error {
+func (s *seedSnapshot) restore(embedded *backend.Embedded) error {
 	if err := s.check(); err != nil {
 		return err
 	}
@@ -108,7 +103,7 @@ func (s *Seed) Restore(embedded *backend.Embedded) error {
 // check reports a difference between the snapshot and its manifest: an
 // entry gone or added if there is one, since that changes its directory
 // too, or else the first entry that has changed.
-func (s *Seed) check() error {
+func (s *seedSnapshot) check() error {
 	root, err := os.OpenRoot(s.dir)
 	if err != nil {
 		return fmt.Errorf("runs: check the seed snapshot: %w", err)

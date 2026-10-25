@@ -10,15 +10,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
-	"github.com/nebarg/sftpit/internal/sftpwire"
 )
-
-var denyStats = faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}
 
 func TestRulesChangeDuringARun(t *testing.T) {
 	m, addr := startManager(t, Options{})
@@ -81,7 +79,7 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logs := make(messages, 64)
-			held := faults.Rule{ID: "held", Match: faults.Match{Operations: []faults.Operation{faults.Connect}}, Action: tt.action}
+			held := connectRule(tt.action)
 			m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"held": {Rules: []faults.Rule{held}}}, Scenario: "held", Logger: slog.New(logs)})
 			raw, err := net.Dial("tcp", addr)
 			if err != nil {
@@ -110,42 +108,51 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 }
 
 func TestALiveRuleTakesTheServerDownAtItsMoment(t *testing.T) {
-	m, _ := startManager(t, Options{})
-	run := m.Status().Run.ID
-	// A moment that a change removes before it comes never comes.
-	if _, err := m.ChangeRules(run, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
-	}
-	if _, err := m.ChangeRules(run, 2, nil, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
-	}
-	time.Sleep(600 * time.Millisecond)
-	if s := m.Status(); s.State != StateUp {
-		t.Errorf("the status is %+v, want the server up once the outage's rule is removed", s)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{})
+		run := m.Status().Run.ID
+		// A moment that a change removes before it comes never comes.
+		if _, err := m.ChangeRules(run, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
+			t.Fatalf("ChangeRules: %v", err)
+		}
+		if _, err := m.ChangeRules(run, 2, nil, nil); err != nil {
+			t.Fatalf("ChangeRules: %v", err)
+		}
+		time.Sleep(time.Hour)
+		if s := m.Status(); s.State != StateUp {
+			t.Errorf("the status is %+v, want the server up once the outage's rule is removed", s)
+		}
 
-	changed := time.Now()
-	if _, err := m.ChangeRules(run, 3, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
-	}
-	awaitState(t, m, StateDown)
-	if took := time.Since(changed); took < 250*time.Millisecond {
-		t.Errorf("the server went down %v after the change, want 300ms", took)
-	}
+		if _, err := m.ChangeRules(run, 3, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
+			t.Fatalf("ChangeRules: %v", err)
+		}
+		time.Sleep(300*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		if s := m.Status(); s.State != StateUp {
+			t.Errorf("just before 300ms after the change, the status is %+v, want up", s)
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if s := m.Status(); s.State != StateDown {
+			t.Errorf("300ms after the change, the status is %+v, want down", s)
+		}
+	})
 }
 
 func TestResetStopsTheTimersOfLiveRules(t *testing.T) {
-	m, _ := startManager(t, Options{})
-	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
-	}
-	if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	time.Sleep(600 * time.Millisecond)
-	if s := m.Status(); s.State != StateUp {
-		t.Errorf("the status is %+v, want the next run, which has no faults, up", s)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{})
+		if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
+			t.Fatalf("ChangeRules: %v", err)
+		}
+		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		time.Sleep(time.Hour)
+		if s := m.Status(); s.State != StateUp {
+			t.Errorf("the status is %+v, want the next run, which has no faults, up", s)
+		}
+	})
 }
 
 func TestALiveRuleIsNotTimedForSessionsThatHaveEnded(t *testing.T) {

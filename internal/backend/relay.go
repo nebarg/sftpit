@@ -92,12 +92,35 @@ func (g *guard) serve(request []byte, forward func([]byte) ([]byte, error)) ([]b
 		g.handler.perm = requestedPerm(p.Attrs, 0o666)
 	case *sftpwire.Mkdir:
 		g.handler.perm = requestedPerm(p.Attrs, 0o777)
+	case *sftpwire.FSetStat:
+		if kind, open := g.handles[p.Handle]; open && !kind.writable && p.Attrs.Flags&sftpwire.AttrSize != 0 {
+			return g.setStatReadOnly(id, p, forward)
+		}
 	}
 	reply, err := forward(request)
 	if err == nil {
 		g.observe(p, reply)
 	}
 	return reply, err
+}
+
+// setStatReadOnly serves p, an FSETSTAT that sets the size through a handle
+// open only for reading. pkg/sftp would truncate the file by its path,
+// whatever the handle allows. OpenSSH's ftruncate on the handle's descriptor
+// fails with EINVAL instead, which it answers with SSH_FX_BAD_MESSAGE unless
+// setting another attribute fails after it, and it still sets the others.
+func (g *guard) setStatReadOnly(id uint32, p *sftpwire.FSetStat, forward func([]byte) ([]byte, error)) ([]byte, error) {
+	p.Attrs.Flags &^= sftpwire.AttrSize
+	reply, err := forward(sftpwire.AppendPacket(nil, id, p)[4:])
+	if err != nil {
+		return nil, err
+	}
+	if _, r, err := sftpwire.DecodeReply(reply); err == nil {
+		if st, ok := r.(*sftpwire.StatusReply); ok && st.Code == sftpwire.StatusOK {
+			return statusPacket(id, sftpwire.StatusBadMessage), nil
+		}
+	}
+	return reply, nil
 }
 
 // requestedPerm returns the permissions attrs ask for a new file or
@@ -163,20 +186,22 @@ func (k handleKind) refusal(p sftpwire.Packet) sftpwire.StatusCode {
 // the one a CLOSE closes, as both servers do whether or not the close
 // succeeds.
 func (g *guard) observe(p sftpwire.Packet, reply []byte) {
-	if c, ok := p.(*sftpwire.Close); ok {
-		delete(g.handles, c.Handle)
-		return
-	}
-	_, r, err := sftpwire.DecodeReply(reply)
-	h, ok := r.(*sftpwire.HandleReply)
-	if err != nil || !ok {
-		return
-	}
+	var kind handleKind
 	switch p := p.(type) {
+	case *sftpwire.Close:
+		delete(g.handles, p.Handle)
+		return
 	case *sftpwire.Open:
-		g.handles[h.Handle] = handleKind{readable: p.Flags&sftpwire.OpenRead != 0, writable: p.Flags&sftpwire.OpenWrite != 0}
+		kind = handleKind{readable: p.Flags&sftpwire.OpenRead != 0, writable: p.Flags&sftpwire.OpenWrite != 0}
 	case *sftpwire.OpenDir:
-		g.handles[h.Handle] = handleKind{dir: true}
+		kind = handleKind{dir: true}
+	default:
+		return
+	}
+	if _, r, err := sftpwire.DecodeReply(reply); err == nil {
+		if h, ok := r.(*sftpwire.HandleReply); ok {
+			g.handles[h.Handle] = kind
+		}
 	}
 }
 

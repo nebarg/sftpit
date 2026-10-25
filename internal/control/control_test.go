@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/nebarg/sftpit/internal/control"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 )
 
 const host = "127.0.0.1:8122"
 
 func TestHealthReadinessAndStatus(t *testing.T) {
-	m, api := start(t, runs.Options{Scenario: "chaos", Seed: seedOf(18446744073709551615)})
+	m, api := start(t, runs.Options{Scenario: "chaos", Seed: new(faults.Seed(18446744073709551615))})
 
 	if code, body := call(t, api, "GET", "/api/v1/health", ""); code != http.StatusOK || body["status"] != "ok" {
 		t.Errorf("health = %d %v", code, body)
@@ -45,7 +46,7 @@ func TestHealthReadinessAndStatus(t *testing.T) {
 }
 
 func TestResetStartsTheNextRun(t *testing.T) {
-	m, api := start(t, runs.Options{Scenario: "chaos", Seed: seedOf(7)})
+	m, api := start(t, runs.Options{Scenario: "chaos", Seed: new(faults.Seed(7))})
 	tests := []struct {
 		body string
 		want map[string]any

@@ -49,7 +49,7 @@ func TestOpenSSHClientTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SplitHostPort: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout*2)
+	ctx, cancel := context.WithTimeout(t.Context(), waitTimeout*2)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, sftpPath,
 		"-b", batch,

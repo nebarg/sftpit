@@ -73,7 +73,7 @@ func TestConnectionEventsDrawTheirDecisions(t *testing.T) {
 	rule := faults.Rule{
 		ID:          "slow-login",
 		Match:       faults.Match{Operations: ops(faults.Authenticate)},
-		Probability: probability(0.5),
+		Probability: new(0.5),
 		Duration:    &faults.Range[time.Duration]{Min: time.Second, Max: 10 * time.Second},
 		Action:      sftpproxy.Delay{When: sftpproxy.Before},
 	}

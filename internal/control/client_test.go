@@ -9,16 +9,17 @@ import (
 	"testing"
 
 	"github.com/nebarg/sftpit/internal/control"
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 )
 
 func TestClientResets(t *testing.T) {
-	m, api := start(t, runs.Options{Scenario: "chaos", Seed: seedOf(7)})
+	m, api := start(t, runs.Options{Scenario: "chaos", Seed: new(faults.Seed(7))})
 	srv := httptest.NewServer(api)
 	defer srv.Close()
 	c := &control.Client{Addr: srv.Listener.Addr().String()}
 
-	status, err := c.Reset(t.Context(), control.ResetRequest{Scenario: nameOf("own")})
+	status, err := c.Reset(t.Context(), control.ResetRequest{Scenario: new("own")})
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
@@ -35,7 +36,7 @@ func TestClientResets(t *testing.T) {
 		code int
 		want string
 	}{
-		{control.ResetRequest{Scenario: nameOf("flaky")}, http.StatusBadRequest, `unknown scenario "flaky"`},
+		{control.ResetRequest{Scenario: new("flaky")}, http.StatusBadRequest, `unknown scenario "flaky"`},
 		{control.ResetRequest{Run: "20260101-000000.000-0000"}, http.StatusConflict, "the current run is "},
 	}
 	for _, tt := range tests {

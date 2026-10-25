@@ -20,15 +20,15 @@ var betweenTransfers = ops(faults.OpenRead, faults.OpenWrite, faults.Close, faul
 
 func TestEachPresetCompilesToItsDocumentedRules(t *testing.T) {
 	delay := func(p float64) faults.Rule {
-		return faults.Rule{ID: "chaos-delay", Match: faults.Match{Operations: ops(faults.Any)}, Probability: probability(p), Duration: &faults.Range[time.Duration]{Min: 200 * time.Millisecond, Max: 2 * time.Second}, Action: sftpproxy.Delay{When: sftpproxy.Before}}
+		return faults.Rule{ID: "chaos-delay", Match: faults.Match{Operations: ops(faults.Any)}, Probability: new(p), Duration: &faults.Range[time.Duration]{Min: 200 * time.Millisecond, Max: 2 * time.Second}, Action: sftpproxy.Delay{When: sftpproxy.Before}}
 	}
 	fail := func(p float64) faults.Rule {
-		return faults.Rule{ID: "chaos-fail", Match: faults.Match{Operations: betweenTransfers}, Probability: probability(p), Action: failure}
+		return faults.Rule{ID: "chaos-fail", Match: faults.Match{Operations: betweenTransfers}, Probability: new(p), Action: failure}
 	}
 	drop := func(p float64) faults.Rule {
-		return faults.Rule{ID: "chaos-drop", Match: faults.Match{Operations: ops(faults.Read, faults.Write)}, Trigger: &faults.Trigger{Anchor: faults.Transfer, At: &faults.Range[time.Duration]{Max: time.Second}}, Probability: probability(p), Action: sftpproxy.Drop{}}
+		return faults.Rule{ID: "chaos-drop", Match: faults.Match{Operations: ops(faults.Read, faults.Write)}, Trigger: &faults.Trigger{Anchor: faults.Transfer, At: &faults.Range[time.Duration]{Max: time.Second}}, Probability: new(p), Action: sftpproxy.Drop{}}
 	}
-	freeze := faults.Rule{ID: "chaos-freeze", Match: faults.Match{Operations: betweenTransfers}, Probability: probability(0.005), Action: sftpproxy.Freeze{When: sftpproxy.Before, Limit: 15 * time.Second}}
+	freeze := faults.Rule{ID: "chaos-freeze", Match: faults.Match{Operations: betweenTransfers}, Probability: new(0.005), Action: sftpproxy.Freeze{When: sftpproxy.Before, Limit: 15 * time.Second}}
 	tests := []struct {
 		preset faults.Preset
 		want   []faults.Rule
@@ -51,8 +51,8 @@ func TestChaosAddsItsExtrasOverItsScope(t *testing.T) {
 		return m
 	}
 	extras := []faults.Rule{
-		{ID: "chaos-corrupt-download", Match: in(faults.Match{Operations: ops(faults.Read)}), Probability: probability(0.03), Action: sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 64}},
-		{ID: "chaos-wrong-size", Match: in(faults.Match{Operations: ops(faults.Stat, faults.LStat, faults.FStat, faults.List)}), Probability: probability(0.03), Action: sftpproxy.WrongSize{Delta: -1024}},
+		{ID: "chaos-corrupt-download", Match: in(faults.Match{Operations: ops(faults.Read)}), Probability: new(0.03), Action: sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 64}},
+		{ID: "chaos-wrong-size", Match: in(faults.Match{Operations: ops(faults.Stat, faults.LStat, faults.FStat, faults.List)}), Probability: new(0.03), Action: sftpproxy.WrongSize{Delta: -1024}},
 	}
 	// The extras come in the same order however they are listed, so that
 	// listing them in another order changes no rule.

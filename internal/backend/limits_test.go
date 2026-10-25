@@ -20,9 +20,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-// tight are limits small enough for a test to reach each one.
-var tight = backend.Limits{MaxFileBytes: 10, MaxTotalBytes: 25, MaxFiles: 4, MaxOpenFiles: 2}
-
 func TestLimitsRefuseRequestsThatWouldPassThem(t *testing.T) {
 	full := map[string]string{"a": "0123456789", "b": "0123456789", "c": ""}
 	tests := []struct {
@@ -33,48 +30,49 @@ func TestLimitsRefuseRequestsThatWouldPassThem(t *testing.T) {
 		request func(c *sftp.Client) error
 		path    string
 		limit   string
+		max     int64
 	}{
 		{
 			name:    "a write past max_file_bytes",
 			files:   map[string]string{"a": "01234567"},
 			request: func(c *sftp.Client) error { return writeAt(c, "/a", "89!", 8, 0) },
-			path:    "/a", limit: "max_file_bytes=10",
+			path:    "/a", limit: "max_file_bytes", max: 10,
 		},
 		{
 			name:    "a sparse write past max_file_bytes",
 			files:   map[string]string{"a": ""},
 			request: func(c *sftp.Client) error { return writeAt(c, "/a", "!", 10, 0) },
-			path:    "/a", limit: "max_file_bytes=10",
+			path:    "/a", limit: "max_file_bytes", max: 10,
 		},
 		{
 			name:    "an append past max_file_bytes",
 			files:   map[string]string{"a": "0123456789"},
 			request: func(c *sftp.Client) error { return writeAt(c, "/a", "!", 0, os.O_APPEND) },
-			path:    "/a", limit: "max_file_bytes=10",
+			path:    "/a", limit: "max_file_bytes", max: 10,
 		},
 		{
 			name:    "a truncate past max_file_bytes",
 			files:   map[string]string{"a": ""},
 			request: func(c *sftp.Client) error { return c.Truncate("/a", 11) },
-			path:    "/a", limit: "max_file_bytes=10",
+			path:    "/a", limit: "max_file_bytes", max: 10,
 		},
 		{
 			name:    "a write past max_total_bytes",
 			files:   full,
 			request: func(c *sftp.Client) error { return writeAt(c, "/c", "012345", 0, 0) },
-			path:    "/c", limit: "max_total_bytes=25",
+			path:    "/c", limit: "max_total_bytes", max: 25,
 		},
 		{
 			name:    "a truncate past max_total_bytes",
 			files:   full,
 			request: func(c *sftp.Client) error { return c.Truncate("/c", 6) },
-			path:    "/c", limit: "max_total_bytes=25",
+			path:    "/c", limit: "max_total_bytes", max: 25,
 		},
 		{
 			name:    "a write whose end overflows",
 			files:   map[string]string{"a": ""},
 			request: func(c *sftp.Client) error { return writeAt(c, "/a", "01", math.MaxInt64-1, 0) },
-			path:    "/a", limit: "max_file_bytes=10",
+			path:    "/a", limit: "max_file_bytes", max: 10,
 		},
 		{
 			name:  "a create past max_files",
@@ -83,7 +81,7 @@ func TestLimitsRefuseRequestsThatWouldPassThem(t *testing.T) {
 				_, err := c.Create("/d/new")
 				return err
 			},
-			path: "/d/new", limit: "max_files=4",
+			path: "/d/new", limit: "max_files", max: 4,
 		},
 		{
 			name:  "a read-only create past max_files",
@@ -92,13 +90,13 @@ func TestLimitsRefuseRequestsThatWouldPassThem(t *testing.T) {
 				_, err := c.OpenFile("/new", os.O_RDONLY|os.O_CREATE)
 				return err
 			},
-			path: "/new", limit: "max_files=4",
+			path: "/new", limit: "max_files", max: 4,
 		},
 		{
 			name:    "a mkdir past max_files",
 			files:   map[string]string{"a": "", "b": "", "c": "", "d/": ""},
 			request: func(c *sftp.Client) error { return c.Mkdir("/new") },
-			path:    "/new", limit: "max_files=4",
+			path:    "/new", limit: "max_files", max: 4,
 		},
 		{
 			name:  "an open past max_open_files",
@@ -112,7 +110,7 @@ func TestLimitsRefuseRequestsThatWouldPassThem(t *testing.T) {
 				_, err := c.OpenFile("/b", os.O_WRONLY)
 				return err
 			},
-			path: "/b", limit: "max_open_files=2",
+			path: "/b", limit: "max_open_files", max: 2,
 		},
 	}
 	for _, tt := range tests {
@@ -128,8 +126,7 @@ func TestLimitsRefuseRequestsThatWouldPassThem(t *testing.T) {
 			if after := readHostTree(t, dir); !maps.Equal(after, before) {
 				t.Errorf("files changed from %v to %v", before, after)
 			}
-			setting, max, _ := strings.Cut(tt.limit, "=")
-			want := fmt.Sprintf(`level=WARN msg="storage limit reached" path=%s limit=%s max=%s`, tt.path, setting, max)
+			want := fmt.Sprintf(`level=WARN msg="storage limit reached" path=%s limit=%s max=%d`, tt.path, tt.limit, tt.max)
 			if !strings.Contains(logs.String(), want) {
 				t.Errorf("log does not have %q:\n%s", want, logs.String())
 			}
@@ -346,33 +343,6 @@ func statVFS(c *sftp.Client, name string) (sftp.StatVFS, error) {
 	}
 	s.ID = 0
 	return *s, nil
-}
-
-// writeAt opens the file at name for writing, adding flag, writes s at off
-// and closes the file, returning the write's error.
-func writeAt(c *sftp.Client, name, s string, off int64, flag int) error {
-	f, err := c.OpenFile(name, os.O_WRONLY|flag)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteAt([]byte(s), off)
-	return err
-}
-
-// writeTree writes files under dir, where a name ending in a slash is a
-// directory.
-func writeTree(t *testing.T, dir string, files map[string]string) {
-	t.Helper()
-	for name, content := range files {
-		if strings.HasSuffix(name, "/") {
-			if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		writeHostFile(t, filepath.Join(dir, name), content)
-	}
 }
 
 // readHostTree reads everything under dir as writeTree would write it.

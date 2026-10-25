@@ -3,11 +3,7 @@ package sftpproxy_test
 import (
 	"crypto/sha256"
 	"errors"
-	"fmt"
-	"log/slog"
 	"slices"
-	"strings"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -15,10 +11,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
-
-// snapshotTime is how long each snapshot takes in these tests, as it might
-// for a large file.
-const snapshotTime = time.Second
 
 var failAtCutoff = sftpproxy.PartialUpload{Cutoff: cutoff, Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}}
 
@@ -32,7 +24,7 @@ func TestSnapshotAtCloseHoldsBackTheReplyAndTheFile(t *testing.T) {
 					Faults:     inSequence(failAtCutoff),
 					ReplyOrder: order,
 					Snapshot:   snaps.take,
-					Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger:     logs.logger(),
 				})
 				openForUpload(t, p, fb, "h")
 				cutWrite(t, p, fb, "h")
@@ -116,7 +108,7 @@ func TestSnapshotOnceWhenTheClientClosesTwice(t *testing.T) {
 					Faults:     on[*sftpwire.Write](sftpproxy.Delay{When: sftpproxy.Before, Duration: time.Second}),
 					ReplyOrder: order,
 					Snapshot:   snaps.take,
-					Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger:     logs.logger(),
 				})
 				openForUpload(t, p, fb, "h")
 				p.client.sendTogether(t, write("h", 0, 10), &sftpwire.Close{Handle: "h"}, &sftpwire.Close{Handle: "h"})
@@ -158,7 +150,7 @@ func TestSnapshotComesBeforeTheDrop(t *testing.T) {
 							eventsAtSnapshot = p.conn.events()
 							return snaps.take(path)
 						},
-						Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+						Logger: logs.logger(),
 					})
 					openForUpload(t, p, fb, "h")
 					p.client.send(t, 2, write("h", 50, 60))
@@ -210,7 +202,7 @@ func TestSnapshotWhenTheSessionEnds(t *testing.T) {
 						Faults:     inSequence(failAtCutoff),
 						ReplyOrder: order,
 						Snapshot:   snaps.take,
-						Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+						Logger:     logs.logger(),
 					})
 					openForUpload(t, p, fb, "h")
 					cutWrite(t, p, fb, "h")
@@ -299,7 +291,7 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 				opts := sftpproxy.Options{
 					Faults:   tt.faults,
 					Snapshot: snaps.take,
-					Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger:   logs.logger(),
 				}
 				if tt.noHook {
 					opts.Snapshot = nil
@@ -341,7 +333,7 @@ func TestSnapshotFailureIsLoggedAndTheCloseSucceeds(t *testing.T) {
 			Snapshot: func(string) (sftpproxy.Snapshot, error) {
 				return sftpproxy.Snapshot{}, errors.New("file vanished")
 			},
-			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			Logger: logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
 		cutWrite(t, p, fb, "h")
@@ -350,9 +342,7 @@ func TestSnapshotFailureIsLoggedAndTheCloseSucceeds(t *testing.T) {
 		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 		p.client.assertStatus(t, 1, sftpwire.StatusOK, "Success")
 		want := `level=ERROR msg="snapshot failed" path=/f closed_by=client err="file vanished"`
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("log does not contain %q:\n%s", want, logs.String())
-		}
+		logs.assertLogged(t, want)
 	})
 }
 
@@ -366,7 +356,7 @@ func TestSnapshotLogsWhereItsCopyIs(t *testing.T) {
 				snap.Copy = "snapshots/1/f"
 				return snap, nil
 			},
-			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			Logger: logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
 		cutWrite(t, p, fb, "h")
@@ -378,53 +368,9 @@ func TestSnapshotLogsWhereItsCopyIs(t *testing.T) {
 	})
 }
 
-// snapshots is a Snapshot hook that records the paths it is called with.
-// Each snapshot takes snapshotTime.
-type snapshots struct {
-	mu    sync.Mutex
-	paths []string
-}
-
-func (s *snapshots) take(path string) (sftpproxy.Snapshot, error) {
-	time.Sleep(snapshotTime)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.paths = append(s.paths, path)
-	return snapshotOf(path), nil
-}
-
-func (s *snapshots) taken() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return slices.Clone(s.paths)
-}
-
 // snapshotOf is the snapshot that snapshots gives the file at path.
 func snapshotOf(path string) sftpproxy.Snapshot {
 	return sftpproxy.Snapshot{Size: cutoff, SHA256: sha256.Sum256([]byte(path))}
-}
-
-// snapshotLog is the log line for snapshotOf(path), closed as closedBy says,
-// quoted as the log quotes it.
-func snapshotLog(path, closedBy string) string {
-	snap := snapshotOf(path)
-	return fmt.Sprintf("level=INFO msg=snapshot path=%s closed_by=%s size=%d sha256=%x", path, closedBy, snap.Size, snap.SHA256)
-}
-
-// assertSnapshotsLogged checks that logs has exactly the snapshot lines in
-// want.
-func assertSnapshotsLogged(t *testing.T, logs string, want ...string) {
-	t.Helper()
-	var got []string
-	for line := range strings.Lines(logs) {
-		if strings.Contains(line, "msg=snapshot") {
-			_, after, _ := strings.Cut(strings.TrimSpace(line), " ")
-			got = append(got, after)
-		}
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("snapshots logged:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
-	}
 }
 
 // cutWrite sends a write on handle that crosses the cutoff as request 2,
@@ -434,36 +380,6 @@ func cutWrite(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
 	p.client.send(t, 2, write(handle, 50, 60))
 	fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 	p.client.assertStatus(t, 2, sftpwire.StatusFailure, "Failure")
-}
-
-// answerAll answers every request the backend receives until the session
-// ends: an OPEN or OPENDIR with handle "h", a READDIR with EOF and anything
-// else with success.
-func (fb *fakeBackend) answerAll() {
-	for req := range fb.requests {
-		var reply sftpwire.Packet = status(sftpwire.StatusOK)
-		switch req.packet.(type) {
-		case *sftpwire.Open, *sftpwire.OpenDir:
-			reply = &sftpwire.HandleReply{Handle: "h"}
-		case *sftpwire.ReadDir:
-			reply = status(sftpwire.StatusEOF)
-		case *sftpwire.Stat, *sftpwire.LStat, *sftpwire.FStat:
-			reply = &sftpwire.AttrsReply{Attrs: sftpwire.Attrs{Flags: sftpwire.AttrSize, Size: 10}}
-		}
-		if _, err := fb.conn.Write(sftpwire.AppendPacket(nil, req.id, reply)); err != nil {
-			return
-		}
-	}
-}
-
-// on returns faults that apply action to every request of type P.
-func on[P sftpwire.Packet](action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
-		if _, ok := r.Packet.(P); ok {
-			return action
-		}
-		return nil
-	}
 }
 
 func closed() chan struct{} {

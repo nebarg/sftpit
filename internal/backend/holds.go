@@ -21,11 +21,10 @@ type pathLock struct {
 
 // change waits until no snapshot holds any of the virtual paths names, and
 // then keeps snapshots of them waiting until the returned function is
-// called. Empty names are ignored.
+// called.
 func (h *holds) change(names ...string) (done func()) {
 	// Locks taken in one order cannot deadlock against each other.
 	names = slices.Compact(slices.Sorted(slices.Values(names)))
-	names = slices.DeleteFunc(names, func(name string) bool { return name == "" })
 	locks := make([]*pathLock, len(names))
 	for i, name := range names {
 		locks[i] = h.use(name)

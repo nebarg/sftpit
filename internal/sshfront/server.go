@@ -21,13 +21,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// ErrServerClosed is returned by Serve after Close has been called.
+// ErrServerClosed is returned by Serve and Pause after Close has been called.
 var ErrServerClosed = errors.New("sshfront: server closed")
 
 const (
 	defaultHandshakeTimeout = 2 * time.Minute
-	minAcceptRetryDelay     = 5 * time.Millisecond
-	maxAcceptRetryDelay     = time.Second
+	minRetryDelay           = 5 * time.Millisecond
+	maxRetryDelay           = time.Second
 )
 
 var (
@@ -59,9 +59,11 @@ type User struct {
 type Handler func(ctx context.Context, conn *Conn, channel io.ReadWriteCloser) error
 
 // Hooks are called at points of each connection's handshake, which waits for
-// them to return. A hook may close, reset or freeze the connection, which
-// ends the handshake. Its ctx is done once the connection is closed or the
-// handshake timeout passes, which bounds the whole handshake, the hooks
+// them to return. A hook may close or reset the connection, which ends the
+// handshake. A hook that freezes the connection must close it before
+// returning, since a frozen connection waits until it is closed, whatever
+// the handshake timeout. Its ctx is done once the connection is closed or
+// the handshake timeout passes, which bounds the whole handshake, the hooks
 // included. Either hook may be nil.
 type Hooks struct {
 	// Connect is called as a connection is accepted, before the SSH
@@ -243,14 +245,12 @@ func (s *Server) accept(ln net.Listener) error {
 			if errors.Is(err, net.ErrClosed) {
 				return fmt.Errorf("sshfront: accept: %w", err)
 			}
-			retryDelay = min(max(2*retryDelay, minAcceptRetryDelay), maxAcceptRetryDelay)
+			retryDelay = nextRetryDelay(retryDelay)
 			s.logger.Warn("accept failed; retrying", "err", err, "delay", retryDelay)
-			select {
-			case <-time.After(retryDelay):
-				continue
-			case <-s.done:
+			if !s.sleep(retryDelay) {
 				return ErrServerClosed
 			}
+			continue
 		}
 		retryDelay = 0
 
@@ -289,13 +289,26 @@ func (s *Server) listenAgain(addr net.Addr) (net.Listener, error) {
 			s.logger.Info("listening again after an outage", "addr", ln.Addr())
 			return ln, nil
 		}
-		retryDelay = min(max(2*retryDelay, minAcceptRetryDelay), maxAcceptRetryDelay)
+		retryDelay = nextRetryDelay(retryDelay)
 		s.logger.Warn("listening again after an outage failed; retrying", "addr", addr, "err", err, "delay", retryDelay)
-		select {
-		case <-time.After(retryDelay):
-		case <-s.done:
+		if !s.sleep(retryDelay) {
 			return nil, ErrServerClosed
 		}
+	}
+}
+
+// nextRetryDelay doubles d, keeping it from minRetryDelay to maxRetryDelay.
+func nextRetryDelay(d time.Duration) time.Duration {
+	return min(max(2*d, minRetryDelay), maxRetryDelay)
+}
+
+// sleep waits for d to pass and reports whether it did before Close.
+func (s *Server) sleep(d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-s.done:
+		return false
 	}
 }
 
@@ -366,6 +379,7 @@ func (s *Server) Outage() (until time.Time, down bool) {
 // listens again. Pause closes every connection, as Conn.Close does, and
 // waits until each has ended, its handlers included, or until ctx is done,
 // whose error it then returns. Admission stays closed however Pause returns.
+// Pause fails with ErrServerClosed once Close has been called.
 func (s *Server) Pause(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
@@ -555,7 +569,7 @@ func (s *Server) handshake(conn *Conn) (<-chan ssh.NewChannel, <-chan *ssh.Reque
 		s.logger.Info("ssh handshake failed", "conn", conn.id, "remote", g.RemoteAddr(), "err", err)
 		return nil, nil, false
 	}
-	if err := g.SetDeadline(time.Time{}); err != nil {
+	if err := g.endHandshake(); err != nil {
 		s.logger.Warn("clearing handshake deadline failed", "conn", conn.id, "remote", g.RemoteAddr(), "err", err)
 		return nil, nil, false
 	}

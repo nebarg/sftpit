@@ -115,7 +115,8 @@ func (p *ExtendedReply) appendBody(b []byte) []byte {
 }
 
 // DecodeReply decodes a server reply read by ReadPacket and returns the ID
-// of the request it answers.
+// of the request it answers. DataReply.Data and ExtendedReply.Data share b's
+// memory.
 func DecodeReply(b []byte) (uint32, Packet, error) {
 	d := decoder{b: b}
 	t := PacketType(d.uint8())

@@ -113,9 +113,9 @@ func (r *request) mayWait() bool {
 	}
 	switch a := r.action.(type) {
 	case Delay:
-		return a.When == Before
+		return a.When != After
 	case Stall:
-		return a.When == Before
+		return a.When != After
 	}
 	return false
 }

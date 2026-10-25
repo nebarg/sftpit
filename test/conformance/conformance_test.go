@@ -199,6 +199,10 @@ var scripts = map[string][]step{
 			{"fsetstat the size", fsetstat("open for fsetstat", size(2))},
 			{"close after fsetstat", closeHandle("open for fsetstat")},
 			{"stat after fsetstat", req(&sftpwire.Stat{Path: "a.txt"})},
+			{"open for reading to fsetstat", open("a.txt", rd)},
+			{"fsetstat the size through a handle open for reading", fsetstat("open for reading to fsetstat", size(1))},
+			{"close after the read-only fsetstat", closeHandle("open for reading to fsetstat")},
+			{"stat after the read-only fsetstat", req(&sftpwire.Stat{Path: "a.txt"})},
 		},
 	),
 	"directories": concat(

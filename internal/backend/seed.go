@@ -114,7 +114,7 @@ func (e *Embedded) copyMetadata(srcRoot *os.Root, name string) error {
 		return err
 	}
 	dst := rootName(seedPath(name))
-	if err := e.root.Chmod(dst, permissions(uint32(info.Mode().Perm()))); err != nil {
+	if err := e.root.Chmod(dst, info.Mode().Perm()); err != nil {
 		return err
 	}
 	return e.root.Chtimes(dst, info.ModTime(), info.ModTime())

@@ -5,9 +5,10 @@
 // each open handle refers to, so every request can be attributed to a file.
 // It can inject a fault into any request it forwards: delay, stall or fail
 // the request, or drop or freeze the connection or end the session, before
-// or after the backend acts, or at a moment whatever the client is doing. It can also cut off an upload at a byte offset, corrupt what a
-// download reads, misreport sizes, and snapshot the file that a faulted
-// handle leaves behind before anything else can change it.
+// or after the backend acts, or at a moment whatever the client is doing. It
+// can also cut off an upload at a byte offset, corrupt what a download
+// reads, misreport sizes, and snapshot the file that a faulted handle leaves
+// behind before anything else can change it.
 package sftpproxy
 
 import (
@@ -103,9 +104,9 @@ type Options struct {
 	//
 	// The session calls Snapshot with the handle's path once nothing more
 	// can be written through the handle: when the backend has answered the
-	// handle's CLOSE, before the client gets that reply; when a Drop or
-	// Freeze ends the session, before the connection is closed or frozen;
-	// or else once the session has closed the backend stream. No later
+	// handle's CLOSE, before the client gets that reply; when a fault ends
+	// the session, before it acts on the connection or the session; or else
+	// once the session has closed the backend stream. No later
 	// request on the file reaches the backend until it returns. It is
 	// called once per faulted handle. A nil Snapshot records nothing.
 	Snapshot func(path string) (Snapshot, error)
@@ -177,11 +178,16 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		s.stop(err)
 		return s.result()
 	}
+	// Every timer is checked before any is armed, so that a session refused
+	// for one never takes another's action.
 	for _, t := range opts.Timers {
-		if err := s.arm(t); err != nil {
+		if err := s.checkMoment(t.Action); err != nil {
 			s.stop(err)
 			return s.result()
 		}
+	}
+	for _, t := range opts.Timers {
+		s.arm(t)
 	}
 	if opts.MoreTimers != nil {
 		s.wg.Go(func() { s.armEach(opts.MoreTimers) })
@@ -224,6 +230,9 @@ type session struct {
 	fired bool
 	// unanswered counts the requests the backend has yet to answer.
 	unanswered int
+	// drained is closed once the backend has answered every request it was
+	// sent, after forwarding has stopped.
+	drained chan struct{}
 	// completion is used only in completion order.
 	completion completionState
 
@@ -235,9 +244,6 @@ type session struct {
 	// moments carries a fault for a moment, once the backend has answered
 	// every request it was sent, to the goroutine writing replies.
 	moments chan *request
-	// drained is closed once the backend has answered every request it was
-	// sent, after forwarding has stopped.
-	drained chan struct{}
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -277,10 +283,10 @@ func (s *session) start() error {
 
 	b, err := sftpwire.ReadPacket(s.clientIn, maxPacketLength)
 	if err != nil {
-		return err
+		return fmt.Errorf("sftpproxy: read client INIT: %w", err)
 	}
 	if _, err := sftpwire.DecodeInit(b); err != nil {
-		return err
+		return fmt.Errorf("sftpproxy: client INIT: %w", err)
 	}
 	s.version = sftpwire.AppendVersion(nil, sftpwire.Version{Version: 3, Extensions: exts})
 	if _, err := s.client.Write(s.version); err != nil {
@@ -301,7 +307,7 @@ func (s *session) initBackend() ([]sftpwire.Extension, error) {
 	}
 	v, err := sftpwire.DecodeVersion(b)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sftpproxy: backend VERSION: %w", err)
 	}
 	if v.Version != 3 {
 		return nil, fmt.Errorf("sftpproxy: backend speaks SFTP version %d, want 3", v.Version)
@@ -328,7 +334,7 @@ func (s *session) backendDirectory() (string, error) {
 	}
 	replyID, reply, err := sftpwire.DecodeReply(b)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("sftpproxy: backend REALPATH reply: %w", err)
 	}
 	if name, ok := reply.(*sftpwire.NameReply); ok && replyID == id && len(name.Entries) == 1 {
 		if dir := name.Entries[0].Filename; path.IsAbs(dir) {
@@ -362,7 +368,7 @@ func (s *session) relayRequests() error {
 				// The drop closed the connection under the read.
 				break
 			}
-			return err
+			return fmt.Errorf("sftpproxy: read client request: %w", err)
 		}
 		if err := s.handleRequest(b); err != nil {
 			return err
@@ -382,7 +388,7 @@ func (s *session) handleRequest(b []byte) error {
 	}
 	if sftpwire.PacketType(b[0]) == sftpwire.TypeInit {
 		if _, err := sftpwire.DecodeInit(b); err != nil {
-			return err
+			return fmt.Errorf("sftpproxy: client INIT: %w", err)
 		}
 		return s.replyNow(s.version)
 	}
@@ -393,7 +399,7 @@ func (s *session) handleRequest(b []byte) error {
 		return s.replyNow(sftpwire.AppendPacket(nil, unsupported.ID, status(sftpwire.StatusOpUnsupported)))
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("sftpproxy: client request: %w", err)
 	}
 
 	req, rejection := s.tracker.describe(clientID, p)
@@ -452,14 +458,8 @@ func (s *session) decide(req *request) error {
 // checkFault reports an action that the session cannot apply to p.
 func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 	switch a := a.(type) {
-	case Drop, Freeze:
-		if s.conn == nil {
-			return fmt.Errorf("sftpproxy: a %T fault needs Options.Conn", a)
-		}
-	case ListenerDown:
-		if s.listener == nil {
-			return errors.New("sftpproxy: a ListenerDown fault needs Options.Listener")
-		}
+	case Drop, Freeze, ListenerDown:
+		return s.checkTarget(a)
 	case PartialUpload:
 		if _, ok := p.(*sftpwire.Open); !ok {
 			return fmt.Errorf("sftpproxy: a PartialUpload fault is for OPEN, not %v", operation(p))
@@ -497,8 +497,9 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 	return nil
 }
 
-// checkMoment reports an action that the session cannot take at a moment.
-func (s *session) checkMoment(a Action) error {
+// checkTarget reports an action that needs a connection or listener the
+// session was not given.
+func (s *session) checkTarget(a Action) error {
 	switch a.(type) {
 	case Drop, Freeze:
 		if s.conn == nil {
@@ -508,9 +509,6 @@ func (s *session) checkMoment(a Action) error {
 		if s.listener == nil {
 			return errors.New("sftpproxy: a ListenerDown fault needs Options.Listener")
 		}
-	case EndSession:
-	default:
-		return fmt.Errorf("sftpproxy: a fault at a moment must be a Drop, Freeze, EndSession or ListenerDown, not %T", a)
 	}
 	return nil
 }
@@ -523,32 +521,23 @@ func (s *session) process(req *request) error {
 	if s.isHalted() {
 		return nil
 	}
-	if req.action != nil && req.action.when() == Before {
+	if req.action != nil && req.action.when() != After {
 		s.logFault(req)
+		if endsSession(req.action) {
+			s.stopForwarding()
+			s.placeDrop(req)
+			return nil
+		}
 		switch a := req.action.(type) {
-		case Delay:
-			if err := s.hold(req, a.Duration, a.Release); err != nil {
-				return err
-			}
-		case Stall:
-			if err := s.hold(req, a.Limit, a.Release); err != nil {
+		case Delay, Stall:
+			if err := s.hold(req); err != nil {
 				return err
 			}
 		case Fail:
 			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
 			return nil
 		case ListenerDown:
-			if !a.CloseExisting {
-				s.listener.Down(a.Duration, false)
-				break
-			}
-			s.stopForwarding()
-			s.placeDrop(req)
-			return nil
-		case Drop, Freeze, EndSession:
-			s.stopForwarding()
-			s.placeDrop(req)
-			return nil
+			s.listener.Down(a.Duration, false)
 		}
 	}
 	if err := s.send(req); err != nil {
@@ -607,7 +596,7 @@ func (s *session) isHalted() bool {
 // replies ready by then; replies still held by a fault are lost with the
 // connection.
 func (s *session) placeDrop(req *request) {
-	if s.order == RequestOrder {
+	if s.order != CompletionOrder {
 		s.answer(req.reply, outcome{drop: req})
 		return
 	}
@@ -646,90 +635,23 @@ func (s *session) answered() {
 	}
 }
 
-// arm takes t's action at its moment, unless the session ends first.
-func (s *session) arm(t Timer) error {
-	if err := s.checkMoment(t.Action); err != nil {
-		return err
+// hold waits for req's Delay, Stall or Freeze: until its Duration or Limit
+// passes or its Release is closed, or for a Stall or Freeze, until
+// Options.Released releases it. It returns errStopped if the session ends
+// first. A Delay that lasts its Duration has run its course, so only a Stall
+// or Freeze reaching its limit is logged.
+func (s *session) hold(req *request) error {
+	var limit time.Duration
+	var release <-chan struct{}
+	var delay bool
+	switch a := req.action.(type) {
+	case Delay:
+		limit, release, delay = a.Duration, a.Release, true
+	case Stall:
+		limit, release = a.Limit, a.Release
+	case Freeze:
+		limit, release = a.Limit, a.Release
 	}
-	s.wg.Go(func() { s.at(time.Until(t.At), nil, &request{action: t.Action}, t.Reserve) })
-	return nil
-}
-
-// armEach arms each timer it receives from timers until the session ends or
-// timers is closed.
-func (s *session) armEach(timers <-chan Timer) {
-	for {
-		select {
-		case t, ok := <-timers:
-			if !ok {
-				return
-			}
-			if err := s.arm(t); err != nil {
-				s.stop(err)
-				return
-			}
-		case <-s.done:
-			return
-		}
-	}
-}
-
-// at takes m's action, a fault for a moment, once after passes, unless
-// closing is closed or the session ends first.
-func (s *session) at(after time.Duration, closing <-chan struct{}, m *request, reserve func() bool) {
-	timer := time.NewTimer(after)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		s.fire(m, reserve)
-	case <-closing:
-	case <-s.done:
-	}
-}
-
-// fire takes m's action, unless reserve declines it. A ListenerDown that
-// leaves connections open is taken at once, and the session carries on.
-// Otherwise nothing more reaches the backend, and once the backend has
-// answered every request it was sent, the session ends as the action says,
-// whatever replies are still to be written: a connection that fails at a
-// moment loses them.
-func (s *session) fire(m *request, reserve func() bool) {
-	if reserve != nil && !reserve() {
-		return
-	}
-	s.tracker.fault(m)
-	s.logFault(m)
-	if !endsSession(m.action) {
-		s.listener.Down(m.action.(ListenerDown).Duration, false)
-		return
-	}
-	s.mu.Lock()
-	s.halted, s.fired = true, true
-	drained := s.drained
-	if s.unanswered > 0 && drained == nil {
-		drained = make(chan struct{})
-		s.drained = drained
-	}
-	s.mu.Unlock()
-	if drained != nil {
-		select {
-		case <-drained:
-		case <-s.done:
-			return
-		}
-	}
-	select {
-	case s.moments <- m:
-	case <-s.done:
-	}
-}
-
-// hold waits until limit passes or release is closed, or for a Stall or
-// Freeze, until Options.Released releases it. It returns errStopped if the
-// session ends first. A Delay that lasts its Duration has run its course,
-// so only a Stall or Freeze reaching its limit is logged.
-func (s *session) hold(req *request, limit time.Duration, release <-chan struct{}) error {
-	_, delay := req.action.(Delay)
 	var released <-chan struct{}
 	if !delay && s.released != nil {
 		released = s.released()
@@ -766,7 +688,7 @@ func (s *session) enqueue(reply slot) error {
 // replyNow answers a request with a reply the proxy already has.
 func (s *session) replyNow(packet []byte) error {
 	reply := make(slot, 1)
-	if s.order == RequestOrder {
+	if s.order != CompletionOrder {
 		if err := s.enqueue(reply); err != nil {
 			return err
 		}
@@ -828,22 +750,18 @@ func (s *session) deliver(req *request, packet []byte) {
 		return
 	}
 	s.logFault(req)
+	if endsSession(req.action) {
+		s.placeDrop(req)
+		return
+	}
 	switch a := req.action.(type) {
-	case Delay:
-		s.wg.Go(func() { s.holdReply(req, a.Duration, a.Release, packet) })
-	case Stall:
-		s.wg.Go(func() { s.holdReply(req, a.Limit, a.Release, packet) })
+	case Delay, Stall:
+		s.wg.Go(func() { s.holdReply(req, packet) })
 	case Fail:
 		s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
 	case ListenerDown:
-		if !a.CloseExisting {
-			s.listener.Down(a.Duration, false)
-			s.answer(req.reply, outcome{packet: packet})
-			return
-		}
-		s.placeDrop(req)
-	case Drop, Freeze, EndSession:
-		s.placeDrop(req)
+		s.listener.Down(a.Duration, false)
+		s.answer(req.reply, outcome{packet: packet})
 	}
 }
 
@@ -859,16 +777,8 @@ func endsSession(a Action) bool {
 	return false
 }
 
-// armTimed starts the clock of req's Timed on the handle id that req opened.
-// Closing the handle stops it.
-func (s *session) armTimed(req *request, id string) {
-	h, closing := s.tracker.watchClose(id)
-	m := &request{action: req.timed.Action, path: req.path, handle: h}
-	s.wg.Go(func() { s.at(req.timed.After, closing, m, req.timed.Reserve) })
-}
-
-func (s *session) holdReply(req *request, limit time.Duration, release <-chan struct{}, packet []byte) {
-	if s.hold(req, limit, release) == nil {
+func (s *session) holdReply(req *request, packet []byte) {
+	if s.hold(req) == nil {
 		s.answer(req.reply, outcome{packet: packet})
 	}
 }
@@ -907,26 +817,10 @@ func (s *session) writeReplies() error {
 	}
 }
 
-func (s *session) hasFired() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.fired
-}
-
-// awaitMoment ends the session at the fault for a moment that has fired,
-// once the backend has answered what it was sent.
-func (s *session) awaitMoment() error {
-	select {
-	case m := <-s.moments:
-		return s.drop(m)
-	case <-s.done:
-		return errStopped
-	}
-}
-
-// drop ends the session at req's Drop, Freeze or EndSession. A Drop or
-// Freeze acts on the connection, so the client sees it fail rather than the
-// session close in an orderly way. The backend has answered every request it
+// drop ends the session at req's Drop, Freeze, EndSession or ListenerDown
+// that closes every connection. All but an EndSession act on the
+// connection, so the client sees it fail rather than the session close in
+// an orderly way. The backend has answered every request it
 // was sent, so the files of the faulted handles still open are snapshotted
 // first: a client that reconnects to retry must not change them before then.
 func (s *session) drop(req *request) error {
@@ -945,7 +839,7 @@ func (s *session) drop(req *request) error {
 		}
 	case Freeze:
 		s.conn.Freeze()
-		if holdErr := s.hold(req, a.Limit, a.Release); holdErr != nil {
+		if holdErr := s.hold(req); holdErr != nil {
 			// Whatever ended the session decides its result. A frozen
 			// connection must still not outlive it.
 			s.conn.Close()

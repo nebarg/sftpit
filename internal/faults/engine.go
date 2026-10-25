@@ -47,7 +47,8 @@ type Engine struct {
 	timers []sftpproxy.Timer
 }
 
-// rule is a Rule with its counts.
+// rule is a Rule with its counts and the state its decisions draw on, which
+// the engine's mu guards; removed is only ever closed, once.
 type rule struct {
 	Rule
 	ops    []Operation
@@ -89,7 +90,7 @@ type rule struct {
 }
 
 // connectionMoment is a connection's moment for a rule. Every session on the
-// connection shares it.
+// connection shares it. Its used and fired are guarded by the engine's mu.
 type connectionMoment struct {
 	at time.Time
 
@@ -109,10 +110,10 @@ type drawKey struct {
 }
 
 // Counts are what a rule has done in a run. A connection action at a moment
-// of the run or the connection counts sessions rather than requests: those
-// whose client it matched, those it was then timed for, and those it fired
-// in. A listener_down at a moment of the run is matched and selected once,
-// for the run.
+// of the run counts sessions rather than requests, and one at a moment of
+// the connection counts connections: those whose client it matched, those
+// it was then timed for, and those it fired in. A listener_down at a moment
+// of the run is matched and selected once, for the run.
 type Counts struct {
 	// Matched counts the requests the rule matched.
 	Matched uint64

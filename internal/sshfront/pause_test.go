@@ -20,7 +20,6 @@ func TestPauseEndsEveryConnectionAndAdmitsNoneUntilResume(t *testing.T) {
 	handler, conns, returned := connPublisher()
 	logs := make(messages, 64)
 	addr, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 		Logger:  slog.New(logs),
 	})
@@ -46,7 +45,6 @@ func TestPauseEndsAnOutage(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	logs := make(messages, 64)
 	addr, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 		Logger:  slog.New(logs),
 	})
@@ -74,7 +72,6 @@ func TestPauseStopsWaitingWhenItsContextIsDone(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
 	addr, srv := startServer(t, sshfront.Config{
-		Users: []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error {
 			started <- struct{}{}
 			<-release
@@ -108,8 +105,6 @@ func TestPauseStopsWaitingWhenItsContextIsDone(t *testing.T) {
 func TestPauseEndsAHandshakeHeldByAHook(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	addr, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: inMemorySFTP,
 		Hooks: sshfront.Hooks{Connect: func(ctx context.Context, _ *sshfront.Conn) {
 			entered <- struct{}{}
 			<-ctx.Done()
@@ -121,6 +116,12 @@ func TestPauseEndsAHandshakeHeldByAHook(t *testing.T) {
 	}
 	defer raw.Close()
 	receive(t, entered)
+	// The client closes its end on the server's FIN, as a real one does, so
+	// that Pause need not wait out the drain.
+	go func() {
+		io.Copy(io.Discard, raw)
+		raw.Close()
+	}()
 
 	paused := make(chan error, 1)
 	go func() { paused <- srv.Pause(t.Context()) }()
@@ -130,14 +131,7 @@ func TestPauseEndsAHandshakeHeldByAHook(t *testing.T) {
 }
 
 func TestPauseAfterClose(t *testing.T) {
-	srv, err := sshfront.New(sshfront.Config{
-		HostKeys: hostKeys,
-		Users:    []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler:  inMemorySFTP,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	srv := newServer(t, sshfront.Config{})
 	srv.Close()
 	if err := srv.Pause(t.Context()); !errors.Is(err, sshfront.ErrServerClosed) {
 		t.Errorf("Pause after Close = %v, want ErrServerClosed", err)

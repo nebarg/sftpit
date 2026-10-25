@@ -36,7 +36,7 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	}
 	opts.Server = sshfront.Config{HostKeys: []ssh.Signer{hostKey}, Users: []sshfront.User{{Name: "test", Password: "test", Home: "/"}}}
 	opts.Limits = backend.Limits{MaxFileBytes: 1 << 20, MaxTotalBytes: 1 << 20, MaxFiles: 100, MaxOpenFiles: 10}
-	opts.Scenarios = map[string]config.Scenario{"chaos": {}, "own": {Seed: seedOf(9)}}
+	opts.Scenarios = map[string]config.Scenario{"chaos": {}, "own": {Seed: new(faults.Seed(9))}}
 	opts.Logger = slog.New(slog.DiscardHandler)
 	m, err := runs.Start(w, opts)
 	if err != nil {
@@ -45,7 +45,3 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	t.Cleanup(func() { m.Close() })
 	return m, control.Handler(m)
 }
-
-func seedOf(n faults.Seed) *faults.Seed { return &n }
-
-func nameOf(name string) *string { return &name }

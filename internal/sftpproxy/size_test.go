@@ -2,7 +2,6 @@ package sftpproxy_test
 
 import (
 	"fmt"
-	"log/slog"
 	"math"
 	"slices"
 	"strings"
@@ -43,7 +42,7 @@ func TestWrongSizeMisreportsStatReplies(t *testing.T) {
 							}
 							return nil
 						},
-						Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+						Logger: logs.logger(),
 					})
 					openForDownload(t, p, fb, "h")
 
@@ -56,9 +55,7 @@ func TestWrongSizeMisreportsStatReplies(t *testing.T) {
 						t.Errorf("reply = %d %#v, want 2 with attributes %+v", id, reply, want)
 					}
 					wantLog := fmt.Sprintf(`level=INFO msg="injected fault" request=%v path=/f fault=wrong_size actual=%d reported=%d`, request.Type(), tt.actual, tt.reported)
-					if got := strings.Count(logs.String(), "injected fault"); got != 1 || !strings.Contains(logs.String(), wantLog) {
-						t.Errorf("log has %d faults, want only %q:\n%s", got, wantLog, logs.String())
-					}
+					logs.assertOnlyFault(t, wantLog)
 				})
 			})
 		}
@@ -70,7 +67,7 @@ func TestWrongSizeLeavesRepliesWithoutASize(t *testing.T) {
 		var logs syncBuffer
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
 			Faults: on[*sftpwire.Stat](sftpproxy.WrongSize{Size: 5}),
-			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			Logger: logs.logger(),
 		})
 		replies := []sftpwire.Packet{
 			&sftpwire.AttrsReply{Attrs: sftpwire.Attrs{Flags: sftpwire.AttrPermissions, Permissions: 0o100644}},

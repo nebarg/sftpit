@@ -7,11 +7,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-var allExtensions = []sftpwire.Extension{
-	{Name: sftpwire.ExtPosixRename, Data: "1"},
-	{Name: sftpwire.ExtStatVFS, Data: "2"},
-}
-
 func TestResolve(t *testing.T) {
 	tr := newTracker("/home/partner-b", nil)
 
@@ -42,7 +37,7 @@ func TestResolve(t *testing.T) {
 }
 
 func TestDescribeResolvesPathsInPlace(t *testing.T) {
-	tr := newTracker("/home/p", allExtensions)
+	tr := newTracker("/home/p", supportedExtensions)
 
 	tests := []struct {
 		packet     sftpwire.Packet
@@ -88,11 +83,11 @@ func TestDescribeAnswersWithoutForwarding(t *testing.T) {
 		packet sftpwire.Packet
 		want   sftpwire.StatusCode
 	}{
-		{name: "empty stat path", exts: allExtensions, packet: &sftpwire.Stat{}, want: sftpwire.StatusNoSuchFile},
-		{name: "empty open path", exts: allExtensions, packet: &sftpwire.Open{Flags: sftpwire.OpenRead}, want: sftpwire.StatusNoSuchFile},
-		{name: "empty rename source", exts: allExtensions, packet: &sftpwire.Rename{NewPath: "/b"}, want: sftpwire.StatusNoSuchFile},
-		{name: "empty rename target", exts: allExtensions, packet: &sftpwire.Rename{OldPath: "/a"}, want: sftpwire.StatusNoSuchFile},
-		{name: "empty posix-rename target", exts: allExtensions, packet: &sftpwire.PosixRename{OldPath: "/a"}, want: sftpwire.StatusNoSuchFile},
+		{name: "empty stat path", exts: supportedExtensions, packet: &sftpwire.Stat{}, want: sftpwire.StatusNoSuchFile},
+		{name: "empty open path", exts: supportedExtensions, packet: &sftpwire.Open{Flags: sftpwire.OpenRead}, want: sftpwire.StatusNoSuchFile},
+		{name: "empty rename source", exts: supportedExtensions, packet: &sftpwire.Rename{NewPath: "/b"}, want: sftpwire.StatusNoSuchFile},
+		{name: "empty rename target", exts: supportedExtensions, packet: &sftpwire.Rename{OldPath: "/a"}, want: sftpwire.StatusNoSuchFile},
+		{name: "empty posix-rename target", exts: supportedExtensions, packet: &sftpwire.PosixRename{OldPath: "/a"}, want: sftpwire.StatusNoSuchFile},
 		{name: "posix-rename not offered", packet: &sftpwire.PosixRename{OldPath: "/a", NewPath: "/b"}, want: sftpwire.StatusOpUnsupported},
 		{name: "statvfs not offered", packet: &sftpwire.StatVFS{Path: "/"}, want: sftpwire.StatusOpUnsupported},
 	}
@@ -169,7 +164,7 @@ func TestCompleteRejectsReplyThatDoesNotFit(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tr := newTracker("/", allExtensions)
+			tr := newTracker("/", supportedExtensions)
 			req := forward(t, tr, 1, tt.request)
 			_, err := tr.complete(req.proxyID, tt.reply)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -194,11 +189,25 @@ func TestCompleteAcceptsFittingReplies(t *testing.T) {
 		{request: &sftpwire.Rename{OldPath: "/a", NewPath: "/b"}, reply: &sftpwire.StatusReply{}},
 	}
 	for _, tt := range tests {
-		tr := newTracker("/", allExtensions)
+		tr := newTracker("/", supportedExtensions)
 		req := forward(t, tr, 1, tt.request)
 		if _, err := tr.complete(req.proxyID, tt.reply); err != nil {
 			t.Errorf("complete(%T after %T): %v", tt.reply, tt.request, err)
 		}
+	}
+}
+
+// TestWatchCloseIgnoresAHandleAlreadyClosed checks the handle of a CLOSE
+// that a client sends before it has seen the reply that opened the handle.
+func TestWatchCloseIgnoresAHandleAlreadyClosed(t *testing.T) {
+	tr := newTracker("/", nil)
+	open := forward(t, tr, 1, &sftpwire.Open{Path: "/a"})
+	if _, err := tr.complete(open.proxyID, &sftpwire.HandleReply{Handle: "h"}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	forward(t, tr, 2, &sftpwire.Close{Handle: "h"})
+	if h, closing := tr.watchClose("h"); h != nil || closing != nil {
+		t.Errorf("watchClose of a closed handle = %v, %v; want nil, nil", h, closing)
 	}
 }
 

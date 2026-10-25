@@ -55,13 +55,13 @@ func inject(ctx context.Context, logger *slog.Logger, rules *faults.Engine, conn
 			logger.Info("fault released", attrs...)
 		}
 	case sftpproxy.Drop:
+		mode, drop := "fin", conn.Close
 		if a.Reset {
-			logger.Info("injected fault", append(attrs, "fault", "close_connection", "mode", "rst")...)
-			err = conn.Reset()
-		} else {
-			logger.Info("injected fault", append(attrs, "fault", "close_connection", "mode", "fin")...)
-			err = conn.Close()
+			mode, drop = "rst", conn.Reset
 		}
+		attrs = append(attrs, "fault", "close_connection", "mode", mode)
+		logger.Info("injected fault", attrs...)
+		err = drop()
 	case sftpproxy.Freeze:
 		attrs = append(attrs, "fault", "freeze_connection", "limit", a.Limit)
 		logger.Info("injected fault", attrs...)

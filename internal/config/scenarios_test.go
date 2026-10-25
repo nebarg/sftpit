@@ -173,27 +173,27 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 		{
 			ID:          "slow-stat",
 			Match:       faults.Match{Operations: []faults.Operation{faults.Stat}},
-			Probability: probability(0.05),
+			Probability: new(0.05),
 			Duration:    &faults.Range[time.Duration]{Min: 200 * time.Millisecond, Max: 3 * time.Second},
 			Action:      sftpproxy.Delay{When: sftpproxy.Before},
 		},
 		{
 			ID:          "flaky-upload",
 			Match:       faults.Match{Operations: []faults.Operation{faults.Write}, Path: faults.Location{Kind: faults.Under, Pattern: "/in"}},
-			Probability: probability(0.25),
+			Probability: new(0.25),
 			Cutoff:      &faults.Range[uint64]{Min: 65536, Max: 1048576},
 			Action:      sftpproxy.PartialUpload{Result: sftpproxy.Drop{Reset: true}},
 		},
 		{
 			ID:          "failed-opens",
 			Match:       faults.Match{Operations: []faults.Operation{faults.OpenRead, faults.OpenWrite}},
-			Probability: probability(1),
+			Probability: new(1.0),
 			Action:      sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusFailure},
 		},
 		{
 			ID:          "never",
 			Match:       faults.Match{Operations: []faults.Operation{faults.Remove}},
-			Probability: probability(0),
+			Probability: new(0.0),
 			Action:      sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure},
 		},
 		{
@@ -214,8 +214,6 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 		t.Errorf("Seed = %v, want the scenario's 481516", cfg.Seed)
 	}
 }
-
-func probability(p float64) *float64 { return &p }
 
 func TestLoadPinsTheSeedOfTheSelectedScenario(t *testing.T) {
 	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1

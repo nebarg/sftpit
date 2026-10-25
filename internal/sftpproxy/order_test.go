@@ -214,11 +214,18 @@ func TestCompletionOrderBoundsRequestsInFlight(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const limit = 256
 		p, fb := startProxyOnFake(t, sftpproxy.Options{ReplyOrder: sftpproxy.CompletionOrder})
-		requests := make([]sftpwire.Packet, limit+1)
-		for i := range requests {
-			requests[i] = &sftpwire.Stat{Path: "/a"}
+		var batch []byte
+		for i := range limit + 1 {
+			batch = sftpwire.AppendPacket(batch, uint32(i+1), &sftpwire.Stat{Path: "/a"})
 		}
-		go p.client.sendTogether(t, requests...)
+		// The write has its own goroutine because the proxy stops reading
+		// once the fake backend's queue is full, and it reports with Errorf,
+		// since only the test's goroutine may call Fatal.
+		go func() {
+			if _, err := p.client.conn.Write(batch); err != nil {
+				t.Errorf("client write: %v", err)
+			}
+		}()
 
 		var received []backendRequest
 		collect := func() {

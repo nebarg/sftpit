@@ -37,6 +37,20 @@ func FuzzDecodeReply(f *testing.F) {
 	})
 }
 
+func FuzzDecodeInit(f *testing.F) {
+	f.Add(sftpwire.AppendInit(nil, sftpwire.Init{
+		Version:    3,
+		Extensions: []sftpwire.Extension{{Name: sftpwire.ExtPosixRename, Data: "1"}},
+	})[4:])
+	f.Fuzz(func(t *testing.T, b []byte) {
+		p, err := sftpwire.DecodeInit(b)
+		if err != nil {
+			return
+		}
+		assertPrefix(t, sftpwire.AppendInit(nil, p)[4:], b)
+	})
+}
+
 func FuzzDecodeVersion(f *testing.F) {
 	f.Add(sftpwire.AppendVersion(nil, sftpwire.Version{
 		Version:    3,

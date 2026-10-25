@@ -14,61 +14,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-const testSeed = faults.Seed(481516)
-
-var (
-	failure = sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusFailure}
-	denied  = sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}
-	cutOff  = sftpproxy.PartialUpload{Cutoff: 1 << 20, Result: failure}
-)
-
-func openFor(path string, flags uint32) sftpproxy.Request {
-	return sftpproxy.Request{Packet: &sftpwire.Open{Path: path, Flags: flags}, Path: path}
-}
-
-func on(p sftpwire.Packet, path string) sftpproxy.Request {
-	return sftpproxy.Request{Packet: p, Path: path}
-}
-
-func newEngine(t *testing.T, rules ...faults.Rule) *faults.Engine {
-	t.Helper()
-	e, err := faults.New(rules, nil, testSeed, slog.New(slog.DiscardHandler))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return e
-}
-
-// session returns the faults of a session of user, logged in with key, or
-// with a password if key is "".
-func session(e *faults.Engine, user, key string) func(sftpproxy.Request) sftpproxy.Action {
-	return e.Session(faults.Client{User: user, KeyFingerprint: key}).Decide
-}
-
-// unreleased returns a without the release that the engine gives a delay,
-// stall or freeze, which ends it once its rule is removed, so that it can be
-// compared with the rule's own action.
-func unreleased(a sftpproxy.Action) sftpproxy.Action {
-	switch a := a.(type) {
-	case sftpproxy.Delay:
-		a.Release = nil
-		return a
-	case sftpproxy.Stall:
-		a.Release = nil
-		return a
-	case sftpproxy.Freeze:
-		a.Release = nil
-		return a
-	}
-	return a
-}
-
-func failOn(id string, m faults.Match) faults.Rule {
-	return faults.Rule{ID: id, Match: m, Action: failure}
-}
-
-func ops(o ...faults.Operation) []faults.Operation { return o }
-
 func TestRequestsAreNamedByOperation(t *testing.T) {
 	tests := []struct {
 		request sftpproxy.Request
@@ -173,7 +118,6 @@ func TestCredentialsNarrowAMatch(t *testing.T) {
 }
 
 func TestTheFirstRuleToSelectARequestWins(t *testing.T) {
-	stat := faults.Match{Operations: ops(faults.Stat)}
 	e := newEngine(t,
 		faults.Rule{ID: "late", Priority: 20, Match: stat, Action: denied},
 		faults.Rule{ID: "first", Priority: 10, Match: stat, Action: failure},
@@ -242,8 +186,26 @@ func TestAttemptsCountOpensSeparately(t *testing.T) {
 	}
 }
 
+// TestAttemptsSelectUploadsByTheirOpen checks that a transfer rule that
+// matches writes, with an attempt, chooses its fault at the open it counts,
+// so that a retry of the upload goes through.
+func TestAttemptsSelectUploadsByTheirOpen(t *testing.T) {
+	const write = sftpwire.OpenWrite | sftpwire.OpenCreate
+	first := &faults.Attempt{PerUser: true, PerPath: true, Numbers: []uint64{1}}
+	e := newEngine(t, faults.Rule{ID: "cut", Match: faults.Match{Operations: ops(faults.Write), Attempt: first}, Action: cutOff})
+	decide := session(e, "test", "")
+	for i, o := range []struct {
+		path string
+		cut  bool
+	}{{"/f", true}, {"/f", false}, {"/g", true}} {
+		got := decide(openFor(o.path, write))
+		if _, cut := got.(sftpproxy.PartialUpload); cut != o.cut {
+			t.Errorf("open %d, of %s, got %#v; want a cutoff: %v", i+1, o.path, got, o.cut)
+		}
+	}
+}
+
 func TestMaxTriggersLeavesLaterRequestsToOtherRules(t *testing.T) {
-	stat := faults.Match{Operations: ops(faults.Stat)}
 	e := newEngine(t,
 		faults.Rule{ID: "twice", Priority: 1, MaxTriggers: 2, Match: stat, Action: denied},
 		faults.Rule{ID: "then", Priority: 2, Match: stat, Action: failure},
@@ -342,13 +304,11 @@ func TestWrongSizesApplyToListingEntries(t *testing.T) {
 	}
 }
 
-func probability(p float64) *float64 { return &p }
-
 func TestARandomRuleDrawsFromTheKeyOfEachRequest(t *testing.T) {
 	const write = sftpwire.OpenWrite | sftpwire.OpenCreate
 	opens := faults.Match{Operations: ops(faults.OpenWrite)}
 	e := newEngine(t,
-		faults.Rule{ID: "random", Priority: 1, Match: opens, Probability: probability(0.5), Action: failure},
+		faults.Rule{ID: "random", Priority: 1, Match: opens, Probability: new(0.5), Action: failure},
 		faults.Rule{ID: "otherwise", Priority: 2, Match: opens, Action: denied},
 	)
 	// Each user's opens of each path count separately, so that no other
@@ -382,9 +342,8 @@ func TestARandomRuleDrawsFromTheKeyOfEachRequest(t *testing.T) {
 }
 
 func TestProbabilitiesOfNoneAndAll(t *testing.T) {
-	stat := faults.Match{Operations: ops(faults.Stat)}
 	for _, p := range []float64{0, 1} {
-		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Probability: probability(p), Action: failure})
+		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Probability: new(p), Action: failure})
 		for range 20 {
 			if got := session(e, "test", "")(on(&sftpwire.Stat{}, "/f")) != nil; got != (p == 1) {
 				t.Fatalf("with probability %v, a stat got the fault: %v", p, got)
@@ -471,7 +430,7 @@ func TestARangeOfOneValueDrawsIt(t *testing.T) {
 func TestProbabilityDecisionsAreLogged(t *testing.T) {
 	var logs bytes.Buffer
 	e, err := faults.New([]faults.Rule{
-		{ID: "random", Match: faults.Match{Operations: ops(faults.Remove)}, Probability: probability(0.25), Action: failure},
+		{ID: "random", Match: faults.Match{Operations: ops(faults.Remove)}, Probability: new(0.25), Action: failure},
 	}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	if err != nil {
 		t.Fatal(err)
@@ -516,9 +475,9 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"no attempt numbers", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.OpenRead), Attempt: &faults.Attempt{}})}, "attempt needs at least one number"},
 		{"occurrence 0", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Rename), Occurrence: []uint64{0}})}, "count from 1"},
 		{"a repeated occurrence", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Rename), Occurrence: []uint64{2, 2}})}, "occurrence 2 is listed twice"},
-		{"a negative probability", []faults.Rule{{ID: "r", Match: stat, Probability: probability(-0.1), Action: failure}}, "probability -0.1 is not from 0 to 1"},
-		{"a probability above 1", []faults.Rule{{ID: "r", Match: stat, Probability: probability(1.5), Action: failure}}, "probability 1.5 is not from 0 to 1"},
-		{"a probability that is not a number", []faults.Rule{{ID: "r", Match: stat, Probability: probability(math.NaN()), Action: failure}}, "probability NaN is not from 0 to 1"},
+		{"a negative probability", []faults.Rule{{ID: "r", Match: stat, Probability: new(-0.1), Action: failure}}, "probability -0.1 is not from 0 to 1"},
+		{"a probability above 1", []faults.Rule{{ID: "r", Match: stat, Probability: new(1.5), Action: failure}}, "probability 1.5 is not from 0 to 1"},
+		{"a probability that is not a number", []faults.Rule{{ID: "r", Match: stat, Probability: new(math.NaN()), Action: failure}}, "probability NaN is not from 0 to 1"},
 		{"a duration range off a delay", []faults.Rule{{ID: "r", Match: stat, Duration: &faults.Range[time.Duration]{Min: 1, Max: 2}, Action: failure}}, "a duration range needs a delay"},
 		{"a cutoff range off a partial upload", []faults.Rule{{ID: "r", Match: write, Cutoff: &faults.Range[uint64]{Min: 1, Max: 2}, Action: sftpproxy.Delay{}}}, "a cutoff range needs a partial upload"},
 		{"an empty duration range", []faults.Rule{{ID: "r", Match: stat, Duration: &faults.Range[time.Duration]{Min: 3 * time.Second, Max: 200 * time.Millisecond}, Action: sftpproxy.Delay{}}}, "the duration range's min 3s is above its max 200ms"},
@@ -535,7 +494,7 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"a transfer's moment off transfers", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Transfer, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a transfer anchor needs transfer operations, open_read, open_write, read and write, not stat"},
 		{"a run's moment for operations", []faults.Rule{{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a connection action at a moment of the run matches only the user and key"},
 		{"a connection's moment for a path", []faults.Rule{{ID: "r", Match: faults.Match{Path: faults.Location{Kind: faults.Exactly, Pattern: "/a"}}, Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Second)}, Action: sftpproxy.EndSession{}}}, "a connection action at a moment of the connection matches only the user and key"},
-		{"a connection's moment by chance", []faults.Rule{{ID: "r", Probability: probability(0.5), Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a connection action at a moment of the connection takes no probability"},
+		{"a connection's moment by chance", []faults.Rule{{ID: "r", Probability: new(0.5), Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Second)}, Action: sftpproxy.Drop{}}}, "a connection action at a moment of the connection takes no probability"},
 		{"no operation for a request", []faults.Rule{{ID: "r", Trigger: &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{Until: time.Second}}, Action: sftpproxy.Drop{}}}, "needs at least one operation"},
 	}
 	for _, tt := range tests {

@@ -3,11 +3,9 @@ package sftpproxy_test
 import (
 	"bytes"
 	"fmt"
-	"log/slog"
 	"math"
 	"math/rand/v2"
 	"slices"
-	"strings"
 	"testing"
 	"testing/synctest"
 
@@ -70,35 +68,39 @@ func TestCorruptDownloadServesOneFileHoweverItIsRead(t *testing.T) {
 
 	for _, order := range replyOrders {
 		for _, tt := range tests {
+			// In a bubble, the in-memory backend's simulated write delay
+			// passes at once.
 			t.Run(order.String()+"/"+tt.name, func(t *testing.T) {
-				p := startProxy(t, inMemoryBackend(t), sftpproxy.Options{
-					Faults: func(r sftpproxy.Request) sftpproxy.Action {
-						if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite == 0 {
-							return tt.corruption
-						}
-						return nil
-					},
-					ReplyOrder: order,
-				})
-				p.client.init(t, 3)
-				storeFile(t, p.client, "/f", file)
-				h := openFile(t, p.client, "/f", sftpwire.OpenRead)
+				synctest.Test(t, func(t *testing.T) {
+					p := startProxy(t, inMemoryBackend(t), sftpproxy.Options{
+						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+							if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite == 0 {
+								return tt.corruption
+							}
+							return nil
+						},
+						ReplyOrder: order,
+					})
+					p.client.init(t, 3)
+					storeFile(t, p.client, "/f", file)
+					h := openFile(t, p.client, "/f", sftpwire.OpenRead)
 
-				// The reads are pipelined in batches, so each batch is
-				// answered in whatever order the session delivers.
-				for batch := range slices.Chunk(reads, 32) {
-					var requests []sftpwire.Packet
-					for _, r := range batch {
-						requests = append(requests, &sftpwire.Read{Handle: h, Offset: r.offset, Length: r.length})
+					// The reads are pipelined in batches, so each batch is
+					// answered in whatever order the session delivers.
+					for batch := range slices.Chunk(reads, 32) {
+						var requests []sftpwire.Packet
+						for _, r := range batch {
+							requests = append(requests, &sftpwire.Read{Handle: h, Offset: r.offset, Length: r.length})
+						}
+						p.client.sendTogether(t, requests...)
+						for range batch {
+							id, reply := p.client.receiveReply(t)
+							assertServed(t, batch[id-1], reply, tt.served)
+						}
 					}
-					p.client.sendTogether(t, requests...)
-					for range batch {
-						id, reply := p.client.receiveReply(t)
-						assertServed(t, batch[id-1], reply, tt.served)
-					}
-				}
-				p.client.send(t, 1, &sftpwire.Close{Handle: h})
-				assertOK(t, p.client, 1)
+					p.client.send(t, 1, &sftpwire.Close{Handle: h})
+					assertOK(t, p.client, 1)
+				})
 			})
 		}
 	}
@@ -229,7 +231,7 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 							return nil
 						},
 						ReplyOrder: order,
-						Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+						Logger:     logs.logger(),
 					})
 					openForDownload(t, p, fb, "h")
 
@@ -243,10 +245,12 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 						}
 						var got []read
 						for _, req := range reqs {
-							if rd, ok := req.packet.(*sftpwire.Read); ok {
-								got = append(got, read{rd.Offset, rd.Length})
+							rd, ok := req.packet.(*sftpwire.Read)
+							if !ok {
+								t.Fatalf("backend received %#v, want a READ", req.packet)
 							}
-							fb.reply(t, req.id, &sftpwire.DataReply{Data: make([]byte, req.packet.(*sftpwire.Read).Length)})
+							got = append(got, read{rd.Offset, rd.Length})
+							fb.reply(t, req.id, &sftpwire.DataReply{Data: make([]byte, rd.Length)})
 						}
 						if !slices.Equal(got, r.forwarded) {
 							t.Errorf("the read of %d at %d reached the backend as %v, want %v", r.length, r.offset, got, r.forwarded)
@@ -265,9 +269,7 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 					if !slices.Equal(seen, unchanged) {
 						t.Errorf("Faults saw reads %v, want only those the corruption leaves alone, %v", seen, unchanged)
 					}
-					if got := strings.Count(logs.String(), "injected fault"); got != 1 || !strings.Contains(logs.String(), tt.log) {
-						t.Errorf("log has %d faults, want only %q:\n%s", got, tt.log, logs.String())
-					}
+					logs.assertOnlyFault(t, tt.log)
 				})
 			})
 		}
@@ -305,8 +307,8 @@ func TestCorruptDownloadIsReservedBeforeItsFirstChange(t *testing.T) {
 							continue
 						}
 						req := fb.next(t)
-						if got := req.packet.(*sftpwire.Read); got.Offset != r.offset || got.Length != r.length {
-							t.Fatalf("backend received %#v, want the read the declined corruption leaves alone", got)
+						if got, ok := req.packet.(*sftpwire.Read); !ok || got.Offset != r.offset || got.Length != r.length {
+							t.Fatalf("backend received %#v, want the read the declined corruption leaves alone", req.packet)
 						}
 						fb.reply(t, req.id, &sftpwire.DataReply{Data: data[r.offset : r.offset+uint64(r.length)]})
 						_, reply := p.client.receiveReply(t)
@@ -440,17 +442,6 @@ func TestSplitReadIsAnsweredBeforeALaterDrop(t *testing.T) {
 			})
 		})
 	}
-}
-
-func equalReplies(a, b sftpwire.Packet) bool {
-	return bytes.Equal(sftpwire.AppendPacket(nil, 0, a), sftpwire.AppendPacket(nil, 0, b))
-}
-
-func openForDownload(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
-	t.Helper()
-	p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenRead})
-	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: handle})
-	p.client.assertReplies(t, 1)
 }
 
 // openFile opens name with flags and returns its handle.

@@ -79,9 +79,8 @@ func TestRelativePathsUseBackendDirectory(t *testing.T) {
 }
 
 func TestRequestIDsAreRemapped(t *testing.T) {
-	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	client := startProxy(t, backend, sftpproxy.Options{}).client
-	client.init(t, 3)
+	p, fb := startProxyOnFake(t, sftpproxy.Options{})
+	client := p.client
 
 	clientIDs := []uint32{7, 7, 0, 0xffffffff}
 	for _, id := range clientIDs {
@@ -104,9 +103,8 @@ func TestRequestIDsAreRemapped(t *testing.T) {
 }
 
 func TestRepliesFollowRequestOrder(t *testing.T) {
-	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	client := startProxy(t, backend, sftpproxy.Options{}).client
-	client.init(t, 3)
+	p, fb := startProxyOnFake(t, sftpproxy.Options{})
+	client := p.client
 
 	client.send(t, 1, &sftpwire.Stat{Path: "/a"})
 	client.sendRaw(t, wire{}.byte(byte(sftpwire.TypeReadLink)).u32(2).str("/link"))
@@ -187,12 +185,7 @@ func TestRepeatedInitIsAnsweredAgain(t *testing.T) {
 	client := startProxy(t, backend, sftpproxy.Options{}).client
 	first := client.init(t, 3)
 
-	client.sendRaw(t, wire(sftpwire.AppendInit(nil, sftpwire.Init{Version: 3})[4:]))
-	again, err := sftpwire.DecodeVersion(client.receive(t))
-	if err != nil {
-		t.Fatalf("reply to a repeated INIT: %v", err)
-	}
-	if !reflect.DeepEqual(again, first) {
+	if again := client.init(t, 3); !reflect.DeepEqual(again, first) {
 		t.Errorf("repeated INIT answered with %#v, want %#v", again, first)
 	}
 }
@@ -240,37 +233,32 @@ func TestMalformedClientInputEndsSession(t *testing.T) {
 func TestBackendViolationsEndSession(t *testing.T) {
 	tests := []struct {
 		name    string
-		request sftpwire.Packet
 		reply   func(proxyID uint32) []byte
 		wantErr string
 	}{
 		{
-			name:    "reply to an unknown request",
-			request: &sftpwire.Stat{Path: "/a"},
+			name: "reply to an unknown request",
 			reply: func(proxyID uint32) []byte {
 				return sftpwire.AppendPacket(nil, proxyID+100, &sftpwire.AttrsReply{})
 			},
 			wantErr: "unknown request",
 		},
 		{
-			name:    "reply that does not fit",
-			request: &sftpwire.Stat{Path: "/a"},
+			name: "reply that does not fit",
 			reply: func(proxyID uint32) []byte {
 				return sftpwire.AppendPacket(nil, proxyID, &sftpwire.HandleReply{Handle: "h"})
 			},
 			wantErr: "answered SSH_FXP_STAT with SSH_FXP_HANDLE",
 		},
 		{
-			name:    "malformed reply",
-			request: &sftpwire.Stat{Path: "/a"},
+			name: "malformed reply",
 			reply: func(proxyID uint32) []byte {
 				return wire{}.byte(byte(sftpwire.TypeStatus)).u32(proxyID).u32(0).framed()
 			},
 			wantErr: "malformed",
 		},
 		{
-			name:    "request sent back as a reply",
-			request: &sftpwire.Stat{Path: "/a"},
+			name: "request sent back as a reply",
 			reply: func(proxyID uint32) []byte {
 				return sftpwire.AppendPacket(nil, proxyID, &sftpwire.Stat{Path: "/a"})
 			},
@@ -280,11 +268,9 @@ func TestBackendViolationsEndSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fb, backend := startFakeBackend(t, openSSHVersion, "/")
-			p := startProxy(t, backend, sftpproxy.Options{})
-			p.client.init(t, 3)
+			p, fb := startProxyOnFake(t, sftpproxy.Options{})
 
-			p.client.send(t, 1, tt.request)
+			p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
 			fb.write(t, tt.reply(fb.next(t).id))
 
 			p.client.assertClosed(t)
@@ -334,9 +320,7 @@ func TestBackendStartupFailuresEndSession(t *testing.T) {
 }
 
 func TestBackendCloseEndsSession(t *testing.T) {
-	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	p := startProxy(t, backend, sftpproxy.Options{})
-	p.client.init(t, 3)
+	p, fb := startProxyOnFake(t, sftpproxy.Options{})
 
 	fb.conn.Close()
 	p.client.assertClosed(t)
@@ -346,23 +330,19 @@ func TestBackendCloseEndsSession(t *testing.T) {
 }
 
 func TestClientCloseEndsSessionCleanly(t *testing.T) {
-	fb, backend := startFakeBackend(t, openSSHVersion, "/")
-	p := startProxy(t, backend, sftpproxy.Options{})
-	p.client.init(t, 3)
+	p, fb := startProxyOnFake(t, sftpproxy.Options{})
 
 	p.client.conn.Close()
 	if err := p.result.wait(t); err != nil {
 		t.Errorf("Serve after the client closed = %v, want nil", err)
 	}
-	if req, ok := receive(t, fb.requests); ok {
+	if req, ok := fb.receive(t); ok {
 		t.Errorf("backend received %#v, want its connection closed", req.packet)
 	}
 }
 
 func TestCancelEndsSession(t *testing.T) {
-	_, backend := startFakeBackend(t, openSSHVersion, "/")
-	p := startProxy(t, backend, sftpproxy.Options{})
-	p.client.init(t, 3)
+	p, _ := startProxyOnFake(t, sftpproxy.Options{})
 
 	p.cancel()
 	p.client.assertClosed(t)

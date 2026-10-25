@@ -3,9 +3,7 @@ package sftpproxy_test
 import (
 	"bytes"
 	"fmt"
-	"log/slog"
 	"slices"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -13,10 +11,6 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
-
-const cutoff = 100
-
-var replyOrders = []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder}
 
 func TestPartialUploadDecidesEachWriteByItsOffset(t *testing.T) {
 	// The writes arrive out of order, overlap and skip offsets, and the
@@ -54,7 +48,7 @@ func TestPartialUploadDecidesEachWriteByItsOffset(t *testing.T) {
 						return nil
 					},
 					ReplyOrder: order,
-					Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+					Logger:     logs.logger(),
 				})
 				openForUpload(t, p, fb, "h")
 
@@ -80,9 +74,7 @@ func TestPartialUploadDecidesEachWriteByItsOffset(t *testing.T) {
 					}
 				}
 				want := `level=INFO msg="injected fault" request=SSH_FXP_WRITE path=/f fault=fail when=before status=SSH_FX_FAILURE cutoff=100 offset=150`
-				if got := strings.Count(logs.String(), "injected fault"); got != 1 || !strings.Contains(logs.String(), want) {
-					t.Errorf("log has %d faults, want only %q:\n%s", got, want, logs.String())
-				}
+				logs.assertOnlyFault(t, want)
 			})
 		})
 	}
@@ -128,11 +120,11 @@ func TestPartialUploadIsReservedWhereItFirstCuts(t *testing.T) {
 						p.client.assertStatus(t, id, sftpwire.StatusFailure, "Failure")
 						continue
 					}
-					if got := fb.next(t); !equalReplies(got.packet, w) {
+					got := fb.next(t)
+					if !equalReplies(got.packet, w) {
 						t.Fatalf("backend received %#v, want the whole write, which the declined cutoff leaves alone", got.packet)
-					} else {
-						fb.reply(t, got.id, status(sftpwire.StatusOK))
 					}
+					fb.reply(t, got.id, status(sftpwire.StatusOK))
 					p.client.assertStatus(t, id, sftpwire.StatusOK, "Success")
 				}
 				if calls != 1 {
@@ -200,7 +192,14 @@ func TestPartialUploadDropsAtTheCutoff(t *testing.T) {
 						p.client.sendTogether(t, reach.writes...)
 
 						first, second := fb.next(t), fb.next(t)
-						stored := slices.Concat(first.packet.(*sftpwire.Write).Data, second.packet.(*sftpwire.Write).Data)
+						var stored []byte
+						for _, req := range []backendRequest{first, second} {
+							w, ok := req.packet.(*sftpwire.Write)
+							if !ok {
+								t.Fatalf("backend received %#v, want a WRITE", req.packet)
+							}
+							stored = append(stored, w.Data...)
+						}
 						if want := write("h", 0, cutoff).Data; !bytes.Equal(stored, want) {
 							t.Errorf("backend received %v, want %v", stored, want)
 						}
@@ -226,27 +225,4 @@ func TestPartialUploadDropsAtTheCutoff(t *testing.T) {
 			}
 		}
 	}
-}
-
-// openForUpload opens /f for writing as request 1, with the backend
-// answering handle.
-func openForUpload(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
-	t.Helper()
-	p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate | sftpwire.OpenTruncate})
-	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: handle})
-	p.client.assertReplies(t, 1)
-}
-
-// write returns a WRITE of length bytes at offset whose every byte is the
-// low byte of its own offset, so any part of it can be told apart.
-func write(handle string, offset uint64, length int) *sftpwire.Write {
-	data := make([]byte, length)
-	for i := range data {
-		data[i] = byte(offset + uint64(i))
-	}
-	return &sftpwire.Write{Handle: handle, Offset: offset, Data: data}
-}
-
-func status(code sftpwire.StatusCode) *sftpwire.StatusReply {
-	return &sftpwire.StatusReply{Code: code, Message: code.Message()}
 }

@@ -125,7 +125,9 @@ type Match struct {
 	KeyFingerprint string
 
 	// Operations are the kinds of request the rule matches, or the
-	// connection events Connect and Authenticate. At least one is required.
+	// connection events Connect and Authenticate. At least one is required,
+	// except by a connection action at a moment of the run or the
+	// connection, which fires whatever the client is doing and takes none.
 	Operations []Operation
 
 	// Path is where the request acts, which for a rename is its source.
@@ -145,6 +147,11 @@ type Match struct {
 // Operation is a kind of request.
 type Operation string
 
+// The operations, as a configuration names them. A request is the operation
+// of its packet: an OPEN with the write flag is OpenWrite and any other OPEN
+// is OpenRead, OPENDIR and READDIR are List, Rename includes
+// posix-rename@openssh.com, SetStat includes FSETSTAT, and StatVFS is
+// statvfs@openssh.com.
 const (
 	OpenRead  Operation = "open_read"
 	OpenWrite Operation = "open_write"

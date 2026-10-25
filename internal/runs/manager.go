@@ -72,14 +72,19 @@ type Options struct {
 // concurrent use.
 type Manager struct {
 	workspace *Workspace
-	seed      *Seed
+	fixtures  *seedSnapshot
 	opts      Options
 	logger    *slog.Logger
 	srv       *sshfront.Server
 
-	// resetting is held through each reset, and by Close.
+	// resetting serialises each reset, each change of the current run's
+	// rules, so that none arms timers on a run that a reset is ending, and
+	// Close. It guards activeRun.stops.
 	resetting sync.Mutex
 
+	// mu guards current, inReset and failed. current also changes only
+	// while resetting is held, so code holding resetting reads it without
+	// mu.
 	mu      sync.Mutex
 	current *activeRun
 	// inReset is set while a reset is under way, and failed once one has
@@ -103,7 +108,8 @@ type activeRun struct {
 	startChaos *faults.Chaos
 
 	// stops stop the timers armed for the run: those it started with, and
-	// those of each change of its rules.
+	// those of each change of its rules. They are guarded by the Manager's
+	// resetting.
 	stops []func()
 }
 
@@ -120,11 +126,11 @@ func (a *activeRun) stopTimers() {
 // the Manager to stop.
 func Start(w *Workspace, opts Options) (*Manager, error) {
 	logger := cmp.Or(opts.Logger, slog.Default())
-	seed, err := w.SnapshotSeed(opts.SeedDir)
+	fixtures, err := w.snapshotSeed(opts.SeedDir)
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{workspace: w, seed: seed, opts: opts, logger: logger}
+	m := &Manager{workspace: w, fixtures: fixtures, opts: opts, logger: logger}
 	cfg := opts.Server
 	cfg.Handler, cfg.Hooks = m.handle, m.hooks()
 	cfg.Logger = cmp.Or(cfg.Logger, logger)
@@ -378,7 +384,7 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
 		if seed != nil {
 			return choice{}, fmt.Errorf("runs: %w", ErrSeedWithoutScenario)
 		}
-		return choice{scenario: Scenario{Seed: faults.RandomSeed()}}, nil
+		return choice{scenario: withSeed(Scenario{}, nil)}, nil
 	}
 	s, ok := m.opts.Scenarios[name]
 	if !ok {
@@ -388,10 +394,7 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
 		}
 		return choice{}, fmt.Errorf("runs: %w %q; the configuration defines %s", ErrUnknownScenario, name, defined)
 	}
-	if seed = cmp.Or(seed, s.Seed); seed != nil {
-		return choice{scenario: Scenario{Name: name, Seed: *seed, Pinned: true}, rules: s.Rules, chaos: s.Chaos}, nil
-	}
-	return choice{scenario: Scenario{Name: name, Seed: faults.RandomSeed()}, rules: s.Rules, chaos: s.Chaos}, nil
+	return choice{scenario: withSeed(Scenario{Name: name}, cmp.Or(seed, s.Seed)), rules: s.Rules, chaos: s.Chaos}, nil
 }
 
 // inline chooses a run of the inline scenario s, whose random decisions
@@ -405,10 +408,18 @@ func inline(s InlineScenario, seed *faults.Seed) (choice, error) {
 			return choice{}, fmt.Errorf("runs: %w", err)
 		}
 	}
-	if seed != nil {
-		return choice{scenario: Scenario{Inline: true, Seed: *seed, Pinned: true}, rules: s.Rules, chaos: s.Chaos}, nil
+	return choice{scenario: withSeed(Scenario{Inline: true}, seed), rules: s.Rules, chaos: s.Chaos}, nil
+}
+
+// withSeed returns s with its random decisions pinned by seed if set, or
+// else with a fresh seed.
+func withSeed(s Scenario, seed *faults.Seed) Scenario {
+	if seed == nil {
+		s.Seed = faults.RandomSeed()
+	} else {
+		s.Seed, s.Pinned = *seed, true
 	}
-	return choice{scenario: Scenario{Inline: true, Seed: faults.RandomSeed()}, rules: s.Rules, chaos: s.Chaos}, nil
+	return s
 }
 
 // begin starts the chosen run in the workspace, with its files restored
@@ -432,8 +443,8 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if m.seed != nil {
-		if err := m.seed.Restore(embedded); err != nil {
+	if m.fixtures != nil {
+		if err := m.fixtures.restore(embedded); err != nil {
 			return nil, err
 		}
 	}
@@ -476,14 +487,10 @@ func (m *Manager) handle(ctx context.Context, conn *sshfront.Conn, channel io.Re
 func (m *Manager) hooks() sshfront.Hooks {
 	return sshfront.Hooks{
 		Connect: func(ctx context.Context, conn *sshfront.Conn) {
-			if connect := m.active().hooks.Connect; connect != nil {
-				connect(ctx, conn)
-			}
+			m.active().hooks.Connect(ctx, conn)
 		},
 		Authenticate: func(ctx context.Context, conn *sshfront.Conn) {
-			if authenticate := m.active().hooks.Authenticate; authenticate != nil {
-				authenticate(ctx, conn)
-			}
+			m.active().hooks.Authenticate(ctx, conn)
 		},
 	}
 }

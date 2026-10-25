@@ -3,9 +3,7 @@ package sftpproxy_test
 import (
 	"bytes"
 	"crypto/sha256"
-	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -27,7 +25,7 @@ func TestProxyIsTransparent(t *testing.T) {
 
 	direct := runWorkload(t, newSFTPClient(t, inMemoryBackend(t)), upload)
 
-	for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
+	for _, order := range replyOrders {
 		t.Run(order.String(), func(t *testing.T) {
 			p := startProxy(t, inMemoryBackend(t), sftpproxy.Options{ReplyOrder: order})
 			proxied := runWorkload(t, newSFTPClient(t, p.client.conn), upload)
@@ -119,23 +117,6 @@ func runWorkload(t *testing.T, c *sftp.Client, upload []byte) []string {
 	record("rmdir /in", c.RemoveDirectory("/in"))
 	list("/")
 	return transcript
-}
-
-// inMemoryBackend serves pkg/sftp's in-memory filesystem over a pipe and
-// returns the client's end.
-func inMemoryBackend(t *testing.T) net.Conn {
-	t.Helper()
-	clientEnd, serverEnd := net.Pipe()
-	srv := sftp.NewRequestServer(serverEnd, sftp.InMemHandler())
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve() }()
-	t.Cleanup(func() {
-		srv.Close()
-		if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
-			t.Errorf("backend Serve: %v", err)
-		}
-	})
-	return clientEnd
 }
 
 func newSFTPClient(t *testing.T, conn net.Conn) *sftp.Client {

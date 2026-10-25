@@ -382,7 +382,7 @@ func TestOpenSessionsAreTimedForRulesAddedLive(t *testing.T) {
 			want := []sftpproxy.Timer{{At: changed.Add(5 * time.Second), Action: sftpproxy.EndSession{}}, {At: moment, Action: sftpproxy.Drop{}}}
 			slices.SortFunc(want, func(a, b sftpproxy.Timer) int { return a.At.Compare(b.At) })
 			got := receive(sessions[conn])
-			if len(got) != 2 || got[0].At != want[0].At || got[1].At != want[1].At || got[0].Action != want[0].Action || got[1].Action != want[1].Action {
+			if len(got) != 2 || !got[0].At.Equal(want[0].At) || !got[1].At.Equal(want[1].At) || got[0].Action != want[0].Action || got[1].Action != want[1].Action {
 				t.Errorf("connection %d got timers %+v, want %+v, its moment drawn in the order the connections came", conn, got, want)
 			}
 		}

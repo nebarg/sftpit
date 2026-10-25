@@ -15,3 +15,10 @@ func ownerOf(info fs.FileInfo) (uid, gid uint32, ok bool) {
 	}
 	return st.Uid, st.Gid, true
 }
+
+// linked reports whether the file info describes is still in the tree,
+// rather than removed or replaced while a handle kept it open.
+func linked(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return !ok || st.Nlink > 0
+}

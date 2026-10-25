@@ -2,6 +2,7 @@ package sshfront_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -14,13 +15,10 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-const listeningAgain = "INFO listening again after an outage"
-
 func TestDownRefusesConnectionsUntilItEnds(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	logs := make(messages, 16)
 	addr, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 		Logger:  slog.New(logs),
 	})
@@ -44,40 +42,34 @@ func TestDownRefusesConnectionsUntilItEnds(t *testing.T) {
 
 func TestDownClosesExistingConnectionsIfAsked(t *testing.T) {
 	for _, closeExisting := range []bool{false, true} {
-		handler, conns, returned := connPublisher()
-		addr, srv := startServer(t, sshfront.Config{
-			Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-			Handler: handler,
-		})
-		client := mustDial(t, addr, "test", ssh.Password(testPassword))
-		openSFTP(t, client, conns)
+		t.Run(fmt.Sprintf("closeExisting=%v", closeExisting), func(t *testing.T) {
+			handler, conns, returned := connPublisher()
+			addr, srv := startServer(t, sshfront.Config{Handler: handler})
+			client := mustDial(t, addr, "test", ssh.Password(testPassword))
+			openSFTP(t, client, conns)
 
-		srv.Down(time.Minute, closeExisting)
-		ended := make(chan error, 1)
-		go func() { ended <- client.Wait() }()
-		select {
-		case <-ended:
-			if !closeExisting {
-				t.Error("without close_existing, the outage closed an existing connection")
+			srv.Down(time.Minute, closeExisting)
+			select {
+			case <-waitForClient(client):
+				if !closeExisting {
+					t.Error("without close_existing, the outage closed an existing connection")
+				}
+			case <-time.After(200 * time.Millisecond):
+				if closeExisting {
+					t.Error("with close_existing, an existing connection outlasted the outage's start")
+				}
 			}
-		case <-time.After(200 * time.Millisecond):
 			if closeExisting {
-				t.Error("with close_existing, an existing connection outlasted the outage's start")
+				receive(t, returned)
 			}
-		}
-		if closeExisting {
-			receive(t, returned)
-		}
+		})
 	}
 }
 
 func TestDownExtendsAnOutageThatWouldEndSooner(t *testing.T) {
-	handler, _, _ := connPublisher()
 	logs := make(messages, 16)
 	_, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: handler,
-		Logger:  slog.New(logs),
+		Logger: slog.New(logs),
 	})
 
 	start := time.Now()
@@ -91,11 +83,7 @@ func TestDownExtendsAnOutageThatWouldEndSooner(t *testing.T) {
 }
 
 func TestCloseEndsAnOutage(t *testing.T) {
-	handler, _, _ := connPublisher()
-	_, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: handler,
-	})
+	_, srv := startServer(t, sshfront.Config{})
 	srv.Down(time.Minute, false)
 
 	closed := make(chan error, 1)
@@ -109,7 +97,6 @@ func TestServeListensAgainOnceItCan(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	logs := make(messages, 64)
 	addr, srv := startServer(t, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
 		Handler: handler,
 		Logger:  slog.New(logs),
 	})
@@ -133,11 +120,7 @@ func TestAConnectionAcceptedAsAnOutageBeginsIsClosed(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	held := &heldListener{Listener: ln, accepted: make(chan struct{}), release: make(chan struct{})}
-	handler, _, _ := connPublisher()
-	srv := serve(t, held, sshfront.Config{
-		Users:   []sshfront.User{{Name: "test", Password: testPassword}},
-		Handler: handler,
-	})
+	srv := serve(t, held, sshfront.Config{})
 	raw, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -152,30 +135,6 @@ func TestAConnectionAcceptedAsAnOutageBeginsIsClosed(t *testing.T) {
 	}
 	if got, err := io.ReadAll(raw); err != nil || len(got) > 0 {
 		t.Errorf("the server sent %q (%v), want the connection closed before its handshake", got, err)
-	}
-}
-
-// awaitLog waits until the server logs want, whatever it logs before.
-func awaitLog(t *testing.T, logs messages, want string) {
-	t.Helper()
-	for msg := receive(t, logs); msg != want; msg = receive(t, logs) {
-	}
-}
-
-// awaitServing waits until the server at addr sends its SSH version, which
-// it does once it accepts connections.
-func awaitServing(t *testing.T, addr string) {
-	t.Helper()
-	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer raw.Close()
-	if err := raw.SetDeadline(time.Now().Add(waitTimeout)); err != nil {
-		t.Fatalf("SetDeadline: %v", err)
-	}
-	if _, err := raw.Read(make([]byte, 64)); err != nil {
-		t.Fatalf("reading the server's version: %v", err)
 	}
 }
 
