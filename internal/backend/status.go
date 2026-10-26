@@ -3,7 +3,6 @@ package backend
 import (
 	"errors"
 	"io"
-	"io/fs"
 	"syscall"
 
 	"github.com/pkg/sftp"
@@ -57,14 +56,6 @@ func statusError(err error) error {
 		case syscall.ENOSYS:
 			return errOpUnsupported
 		}
-	}
-	// Windows reports most errors with its own error numbers, which match
-	// these instead.
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return errNoSuchFile
-	case errors.Is(err, fs.ErrPermission):
-		return errPermissionDenied
 	}
 	return errFailure
 }

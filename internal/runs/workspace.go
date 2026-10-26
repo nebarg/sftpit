@@ -14,6 +14,8 @@ import (
 	"slices"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/nebarg/sftpit/internal/faults"
 )
 
@@ -24,6 +26,11 @@ var (
 
 	// ErrInUse reports a workspace that another process has locked.
 	ErrInUse = errors.New("workspace in use by another sftpit process")
+
+	// ErrSeedOverlapsWorkspace reports a seed directory that holds the
+	// workspace or lies within its fixtures, so that snapshotting it would
+	// copy it into itself or delete it.
+	ErrSeedOverlapsWorkspace = errors.New("the seed directory overlaps the workspace, so it would be copied into itself or deleted")
 
 	// errLocked reports a lock that another process holds.
 	errLocked = errors.New("runs: file locked")
@@ -298,4 +305,14 @@ func makeRemovable(root *os.Root, name string) error {
 		}
 		return err
 	})
+}
+
+// lockFile takes an exclusive lock on f, which lasts until f is closed or
+// the process ends, or returns errLocked if another holds one.
+func lockFile(f *os.File) error {
+	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return errLocked
+	}
+	return err
 }

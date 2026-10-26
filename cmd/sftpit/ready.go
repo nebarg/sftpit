@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -36,7 +37,10 @@ func newReadyFile(sftpAddr, httpAddr, workspace string, hostKeys []ssh.Signer) r
 	return rf
 }
 
-// readReadyFile reads the ready file name.
+// readReadyFile reads the ready file name. It fails with a "not a ready
+// file" error for anything serve could not have written, such as JSON with
+// other fields, without one of serve's or with more after it, so that
+// prepareReadyFile never takes another file for one.
 func readReadyFile(name string) (readyFile, error) {
 	b, err := os.ReadFile(name)
 	if err != nil {
@@ -45,18 +49,39 @@ func readReadyFile(name string) (readyFile, error) {
 	var rf readyFile
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&rf); err != nil || rf.HTTPAddress == "" {
+	if dec.Decode(&rf) != nil || !errors.Is(dec.Decode(new(json.RawMessage)), io.EOF) || !rf.complete() {
 		return readyFile{}, fmt.Errorf("%s is not a ready file that sftpit serve wrote", name)
 	}
 	return rf, nil
+}
+
+// complete reports whether rf has every field that serve writes.
+func (rf readyFile) complete() bool {
+	return rf.SFTPAddress != "" && rf.HTTPAddress != "" && rf.Workspace != "" && len(rf.HostKeys) > 0
 }
 
 // prepareReadyFile checks that serve can write a ready file at name, and
 // removes one that an earlier serve left there, so that it cannot be taken
 // for this one's. It refuses to remove any other file.
 func prepareReadyFile(name string) error {
-	if info, err := os.Stat(filepath.Dir(name)); err != nil || !info.IsDir() {
+	dir := filepath.Dir(name)
+	switch info, err := os.Stat(dir); {
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("the directory of %s does not exist", name)
+	case err != nil:
+		return err
+	case !info.IsDir():
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	// The ready file is written as writeReadyFile writes it, through a
+	// temporary file in the same directory.
+	probe, err := os.CreateTemp(dir, ".sftpit-ready-*")
+	if err != nil {
+		return err
+	}
+	probe.Close()
+	if err := os.Remove(probe.Name()); err != nil {
+		return err
 	}
 	if _, err := os.Lstat(name); errors.Is(err, fs.ErrNotExist) {
 		return nil

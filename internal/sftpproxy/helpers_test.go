@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -598,4 +599,9 @@ func assertSnapshotsLogged(t *testing.T, logs string, want ...string) {
 	if !slices.Equal(got, want) {
 		t.Errorf("snapshots logged:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
+}
+
+// snapshotOf is the snapshot that snapshots gives the file at path.
+func snapshotOf(path string) sftpproxy.Snapshot {
+	return sftpproxy.Snapshot{Size: cutoff, SHA256: sha256.Sum256([]byte(path))}
 }

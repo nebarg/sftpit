@@ -11,7 +11,6 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -327,9 +326,6 @@ func TestExclusiveCreateRefusesAnExistingFile(t *testing.T) {
 }
 
 func TestSetstat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no Unix permission bits")
-	}
 	dir, e := newBackend(t)
 	c := newClient(t, e, "/")
 	host := filepath.Join(dir, "orders.csv")
@@ -355,8 +351,11 @@ func TestSetstat(t *testing.T) {
 	if err := c.Chtimes("/orders.csv", mtime, mtime); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
-	if info, err := os.Stat(host); err != nil || !info.ModTime().Equal(mtime) {
-		t.Errorf("mtime after Chtimes = %v, %v; want %v", info.ModTime(), err, mtime)
+	switch info, err := os.Stat(host); {
+	case err != nil:
+		t.Errorf("Stat after Chtimes: %v", err)
+	case !info.ModTime().Equal(mtime):
+		t.Errorf("mtime after Chtimes = %v, want %v", info.ModTime(), mtime)
 	}
 
 	// A client that copies every attribute back sets the owner it was

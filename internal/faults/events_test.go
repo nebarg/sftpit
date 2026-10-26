@@ -54,14 +54,14 @@ func TestConnectionEventsMatchTheirOwnRules(t *testing.T) {
 		"partner-login":  {Matched: 2, Selected: 1, Fired: 1},
 		"every-request":  {Matched: 1, Selected: 1, Fired: 1},
 	}
-	for id, counts := range e.Counts() {
+	for id, counts := range e.Rules().Counts {
 		if counts != want[id] {
 			t.Errorf("rule %s counts = %+v, want %+v", id, counts, want[id])
 		}
 	}
 	for _, line := range []string{
-		"rule fired\" rule=second-connect request=connect ordinal=2\n",
-		"rule fired\" rule=partner-login request=authenticate user=test ordinal=1\n",
+		"rule fired\" rule=second-connect operation=connect ordinal=2\n",
+		"rule fired\" rule=partner-login operation=authenticate user=test ordinal=1\n",
 	} {
 		if !strings.Contains(logs.String(), line) {
 			t.Errorf("logs lack %q:\n%s", line, logs.String())

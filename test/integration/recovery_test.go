@@ -1,11 +1,7 @@
 package integration
 
 import (
-	"bytes"
-	"errors"
-	"io/fs"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,17 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
-)
-
-// The paths publish.php uploads to and then publishes at.
-const (
-	temporaryPath = "/incoming/orders.csv.part"
-	publishedPath = "/incoming/orders.csv"
 )
 
 // TestLaravelUploadRecovery has a Laravel application publish orders.csv
@@ -34,6 +24,10 @@ const (
 // has succeeded. The other two have defects, which the stored files and the
 // requests must show.
 func TestLaravelUploadRecovery(t *testing.T) {
+	// Not parallel: a snapshot is not ordered against other sessions, so
+	// under the load of parallel tests publish.php's retry on a new
+	// connection can change the cut-off file before the first session,
+	// slowed down, snapshots it.
 	php := phpseclibOrSkip(t)
 
 	data := randomBytes(4<<20 + 321)
@@ -128,7 +122,7 @@ func TestLaravelUploadRecovery(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.uploader+"/"+tt.result, func(t *testing.T) {
 			result := cutOffWith[tt.result]
-			var logs snapshotLog
+			var logs capturedLog
 			var requests requestLog
 			var cutOff atomic.Bool
 			srv := startServer(t, proxied, sftpproxy.Options{
@@ -144,7 +138,7 @@ func TestLaravelUploadRecovery(t *testing.T) {
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-			outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, tt.uploader))
+			outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, tt.uploader))
 			srv.waitForSessions()
 
 			if !maps.Equal(outcomes, tt.outcomes) {
@@ -168,6 +162,10 @@ func TestLaravelUploadRecovery(t *testing.T) {
 // checks that the recovering uploader publishes the whole file and that the
 // rule took effect once.
 func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
+	// Not parallel: a snapshot is not ordered against other sessions, so
+	// under the load of parallel tests publish.php's retry on a new
+	// connection can change the cut-off file before the first session,
+	// slowed down, snapshots it.
 	php := phpseclibOrSkip(t)
 
 	dir := t.TempDir()
@@ -201,17 +199,13 @@ scenarios:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	var logs snapshotLog
-	rules, err := faults.New(cfg.Rules(), nil, 0, logs.logger())
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	var logs capturedLog
+	_, srv := startRuns(t, runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed, Logger: logs.logger()})
 	work := t.TempDir()
 	data := randomBytes(4<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": false, "upload 2": true, "move": true}; !maps.Equal(outcomes, want) {
@@ -220,10 +214,10 @@ scenarios:
 	assertHolds(t, srv, publishedPath, data)
 	assertHolds(t, srv, temporaryPath, nil)
 	logs.assertSnapshot(t, srv, temporaryPath, data[:uploadCutoff], phpseclibClosedBy...)
-	if got, want := rules.Counts()["first-upload-cutoff"], (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
+	if got, want := srv.counts(t, "first-upload-cutoff"), (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
 		t.Errorf("counts = %+v, want both opens matched and the first cut off", got)
 	}
-	if fired := `msg="rule fired" rule=first-upload-cutoff request=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1`; !strings.Contains(logs.text(), fired) {
+	if fired := `msg="rule fired" rule=first-upload-cutoff operation=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1`; !strings.Contains(logs.text(), fired) {
 		t.Errorf("logs lack %s:\n%s", fired, logs.text())
 	}
 }
@@ -258,24 +252,12 @@ func (l *requestLog) get() []string {
 	return slices.Clone(l.requests)
 }
 
-// assertHolds checks that the file at the virtual path name holds want, or
-// that there is no file there if want is nil.
-func assertHolds(t *testing.T, srv *server, name string, want []byte) {
-	t.Helper()
-	got, err := os.ReadFile(filepath.Join(srv.files, filepath.FromSlash(backend.StoredName(name))))
-	switch {
-	case want == nil && !errors.Is(err, fs.ErrNotExist):
-		t.Errorf("%s holds %d bytes (%v), want no file", name, len(got), err)
-	case want != nil && (err != nil || !bytes.Equal(got, want)):
-		t.Errorf("%s holds %d bytes with SHA-256 %s (%v), want %d with %s", name, len(got), digest(got), err, len(want), digest(want))
-	}
-}
-
 // TestLaravelUploadRecoveryFromAResetMidUpload resets the connection half a
 // second into the first upload, whatever phpseclib is sending then, and
 // checks that the recovering uploader publishes the whole file. Writes in the
 // first two seconds of the run wait, so that the upload is still under way.
 func TestLaravelUploadRecoveryFromAResetMidUpload(t *testing.T) {
+	t.Parallel()
 	php := phpseclibOrSkip(t)
 
 	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
@@ -303,17 +285,13 @@ scenarios:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	var logs snapshotLog
-	rules, err := faults.New(cfg.Rules(), nil, 0, logs.logger())
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	var logs capturedLog
+	_, srv := startRuns(t, runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed, Logger: logs.logger()})
 	work := t.TempDir()
 	data := randomBytes(4<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": false, "upload 2": true, "move": true}; !maps.Equal(outcomes, want) {
@@ -321,16 +299,17 @@ scenarios:
 	}
 	assertHolds(t, srv, publishedPath, data)
 	assertHolds(t, srv, temporaryPath, nil)
-	if got, want := rules.Counts()["reset-into-first-upload"], (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
+	if got, want := srv.counts(t, "reset-into-first-upload"), (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
 		t.Errorf("counts = %+v, want both opens matched and the first reset", got)
 	}
+	text := connID.ReplaceAllString(logs.text(), "conn=N ")
 	for _, want := range []string{
-		`msg="rule fired" rule=reset-into-first-upload request=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1 at=500ms`,
-		`msg="injected fault" path=` + temporaryPath + ` fault=close_connection when=timer mode=rst`,
-		`msg=snapshot path=` + temporaryPath + ` closed_by=fault`,
+		`msg="rule fired" rule=reset-into-first-upload operation=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1 at=500ms`,
+		`msg="injected fault" conn=N user=` + testUser + ` path=` + temporaryPath + ` fault=close_connection when=timer mode=rst`,
+		`msg=snapshot conn=N user=` + testUser + ` path=` + temporaryPath + ` closed_by=fault`,
 	} {
-		if !strings.Contains(logs.text(), want) {
-			t.Errorf("logs lack %s:\n%s", want, logs.text())
+		if !strings.Contains(text, want) {
+			t.Errorf("logs lack %s:\n%s", want, text)
 		}
 	}
 }
@@ -340,6 +319,7 @@ scenarios:
 // of it, and checks that Flysystem's own retries, four of them, reconnect
 // and publish the file.
 func TestLaravelReconnectsWhenItsFirstLoginsAreCutOff(t *testing.T) {
+	t.Parallel()
 	php := phpseclibOrSkip(t)
 
 	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
@@ -362,28 +342,24 @@ scenarios:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	var logs snapshotLog
-	rules, err := faults.New(cfg.Rules(), nil, 0, logs.logger())
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	var logs capturedLog
+	_, srv := startRuns(t, runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed, Logger: logs.logger()})
 	work := t.TempDir()
 	data := randomBytes(1<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": true, "move": true}; !maps.Equal(outcomes, want) {
 		t.Errorf("publish.php gave %v, want %v", outcomes, want)
 	}
 	assertHolds(t, srv, publishedPath, data)
-	if got, want := rules.Counts()["first-logins"], (faults.Counts{Matched: 5, Selected: 4, Fired: 4}); got != want {
+	if got, want := srv.counts(t, "first-logins"), (faults.Counts{Matched: 5, Selected: 4, Fired: 4}); got != want {
 		t.Errorf("counts = %+v, want five logins matched and the first four cut off", got)
 	}
 	for conn := range 4 {
-		want := `msg="injected fault" conn=` + strconv.Itoa(conn+1) + ` request=authenticate user=` + testUser + ` fault=close_connection mode=fin`
+		want := `msg="injected fault" conn=` + strconv.Itoa(conn+1) + ` operation=authenticate user=` + testUser + ` fault=close_connection mode=fin`
 		if !strings.Contains(logs.text(), want) {
 			t.Errorf("logs lack %s:\n%s", want, logs.text())
 		}

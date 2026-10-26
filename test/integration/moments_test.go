@@ -16,6 +16,7 @@ import (
 // of an upload, whatever the client is doing then, and checks what the
 // client reports and what the upload leaves behind.
 func TestOpenSSHMoments(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	// Each write waits, so that the upload lasts longer than the moment.
@@ -54,12 +55,8 @@ func TestOpenSSHMoments(t *testing.T) {
 	data := randomBytes(2 << 20)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{slow, tt.rule}, nil, 0, logs.logger())
-			if err != nil {
-				t.Fatalf("faults.New: %v", err)
-			}
-			srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+			var logs capturedLog
+			srv := startScenario(t, []faults.Rule{slow, tt.rule}, 0, logs.logger())
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
@@ -72,11 +69,11 @@ func TestOpenSSHMoments(t *testing.T) {
 			if !slices.ContainsFunc(tt.output, func(o string) bool { return strings.Contains(string(out), o) }) {
 				t.Errorf("sftp output contains none of %q:\n%s", tt.output, out)
 			}
-			stored, err := os.ReadFile(filepath.Join(srv.files, "orders.csv"))
+			stored, err := os.ReadFile(srv.path("/orders.csv"))
 			if err != nil || len(stored) == 0 || len(stored) >= len(data) || string(stored) != string(data[:len(stored)]) {
 				t.Errorf("the upload stored %d bytes (%v), want a start of its %d from before the moment", len(stored), err, len(data))
 			}
-			if got := rules.Counts()["moment"].Fired; got != 1 {
+			if got := srv.counts(t, "moment").Fired; got != 1 {
 				t.Errorf("the moment fired %d times, want once", got)
 			}
 			if !strings.Contains(logs.text(), `msg="rule fired" rule=moment`) || !strings.Contains(logs.text(), "closed_by=fault") {
@@ -89,16 +86,13 @@ func TestOpenSSHMoments(t *testing.T) {
 // TestEachOpenSSHConnectionHasItsOwnMoment closes each of two connections
 // from OpenSSH at a moment measured from when it logged in.
 func TestEachOpenSSHConnectionHasItsOwnMoment(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
-	rules, err := faults.New([]faults.Rule{
+	srv := startScenario(t, []faults.Rule{
 		{ID: "slow", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Delay{When: sftpproxy.Before, Duration: 20 * time.Millisecond}},
 		{ID: "moment", Trigger: &faults.Trigger{Anchor: faults.Connection, At: &faults.Range[time.Duration]{Min: 300 * time.Millisecond, Max: 300 * time.Millisecond}}, Action: sftpproxy.Drop{}},
-	}, nil, 0, nil)
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{})
+	}, 0, nil)
 	work := t.TempDir()
 	writeFile(t, filepath.Join(work, "orders.csv"), randomBytes(1<<20))
 	for i := range 2 {
@@ -108,7 +102,7 @@ func TestEachOpenSSHConnectionHasItsOwnMoment(t *testing.T) {
 		}
 	}
 	srv.waitForSessions()
-	if got := rules.Counts()["moment"]; got != (faults.Counts{Matched: 2, Selected: 2, Fired: 2}) {
+	if got := srv.counts(t, "moment"); got != (faults.Counts{Matched: 2, Selected: 2, Fired: 2}) {
 		t.Errorf("counts = %+v, want each connection's moment fired", got)
 	}
 }

@@ -29,6 +29,7 @@ const partialSize = 1000
 // reply that gives it, and checks what each client reports and that each
 // still downloads the whole file, which is unchanged on the server.
 func TestClientsReportTheWrongSize(t *testing.T) {
+	t.Parallel()
 	data := randomBytes(4<<20 + 321)
 	sizes := []struct {
 		name      string
@@ -44,7 +45,7 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 		t.Run("OpenSSH/"+tt.name, func(t *testing.T) {
 			sftpPath := openSSHOrSkip(t)
 			srv := startServer(t, proxied, sftpproxy.Options{Faults: misreportSizeOf("/orders.csv", tt.wrongSize)})
-			writeFile(t, filepath.Join(srv.files, "orders.csv"), data)
+			writeFile(t, srv.path("/orders.csv"), data)
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "partial.csv"), data[:partialSize])
 
@@ -74,16 +75,16 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 				wantPartial = data[:partialSize]
 			}
 			assertDownloaded(t, filepath.Join(work, "partial.csv"), wantPartial)
-			assertDownloaded(t, filepath.Join(srv.files, "orders.csv"), data)
+			assertHolds(t, srv, "/orders.csv", data)
 		})
 
 		t.Run("phpseclib/"+tt.name, func(t *testing.T) {
 			php := phpseclibOrSkip(t)
 			srv := startServer(t, proxied, sftpproxy.Options{Faults: misreportSizeOf("/orders.csv", tt.wrongSize)})
-			writeFile(t, filepath.Join(srv.files, "orders.csv"), data)
+			writeFile(t, srv.path("/orders.csv"), data)
 			work := t.TempDir()
 
-			results := results(t, runPhpseclib(t, php, srv, "sizes.php", work))
+			results := phpseclibResults(t, runPhpseclib(t, php, srv, "sizes.php", work))
 			for _, op := range []string{"stat", "lstat", "rawlist"} {
 				if got := results[op]; got != float64(tt.reported) {
 					t.Errorf("phpseclib %s gave size %v, want %d", op, got, tt.reported)
@@ -93,7 +94,7 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 				t.Errorf("phpseclib get = %v, want true", results["get"])
 			}
 			assertDownloaded(t, filepath.Join(work, "orders.csv"), data)
-			assertDownloaded(t, filepath.Join(srv.files, "orders.csv"), data)
+			assertHolds(t, srv, "/orders.csv", data)
 		})
 	}
 }

@@ -253,3 +253,38 @@ func (a PartialUpload) when() When   { return Before }
 func (a CorruptDownload) when() When { return Before }
 func (a Timed) when() When           { return Before }
 func (a WrongSize) when() When       { return Before }
+
+// FaultAttrs describes a for a log record: the fault's name, as a
+// configuration gives it, when it acts, unless when is "", and its settings.
+// It describes nothing else.
+func FaultAttrs(a Action, when string) []any {
+	var name string
+	var settings []any
+	switch a := a.(type) {
+	case Delay:
+		name, settings = "delay", []any{"duration", a.Duration}
+	case Stall:
+		name, settings = "stall", []any{"limit", a.Limit}
+	case Fail:
+		name, settings = "fail", []any{"status", a.Status}
+	case Drop:
+		mode := "fin"
+		if a.Reset {
+			mode = "rst"
+		}
+		name, settings = "close_connection", []any{"mode", mode}
+	case Freeze:
+		name, settings = "freeze_connection", []any{"limit", a.Limit}
+	case EndSession:
+		name = "close_subsystem"
+	case ListenerDown:
+		name, settings = "listener_down", []any{"duration", a.Duration, "close_existing", a.CloseExisting}
+	default:
+		return nil
+	}
+	attrs := []any{"fault", name}
+	if when != "" {
+		attrs = append(attrs, "when", when)
+	}
+	return append(attrs, settings...)
+}

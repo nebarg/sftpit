@@ -53,6 +53,10 @@ type Options struct {
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
 
+	// ReplyOrder is the order in which each session's replies reach its
+	// client.
+	ReplyOrder sftpproxy.ReplyOrder
+
 	// Scenarios are the scenarios whose faults a run can inject, by name.
 	Scenarios map[string]config.Scenario
 
@@ -79,8 +83,10 @@ type Manager struct {
 
 	// resetting serialises each reset, each change of the current run's
 	// rules, so that none arms timers on a run that a reset is ending, and
-	// Close. It guards activeRun.stops.
+	// Close. It guards activeRun.stops, and closed, which Close sets so that
+	// nothing starts or changes a run after it.
 	resetting sync.Mutex
+	closed    bool
 
 	// mu guards current, inReset and failed. current also changes only
 	// while resetting is held, so code holding resetting reads it without
@@ -154,9 +160,11 @@ func (m *Manager) Server() *sshfront.Server { return m.srv }
 // Close stops the server, as sshfront.Server.Close does, and ends the
 // current run.
 func (m *Manager) Close() error {
+	// Closing the server first ends a reset that waits for sessions.
 	err := m.srv.Close()
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	m.closed = true
 	m.current.stopTimers()
 	if closeErr := m.current.root.Close(); closeErr != nil {
 		err = errors.Join(err, fmt.Errorf("runs: close the run's files: %w", closeErr))
@@ -197,18 +205,26 @@ type InlineScenario struct {
 // finished, so that no client of the run can still change its files, or
 // until ctx is done. The next run's files are restored from the seed
 // snapshot, its counters start from zero and its timers count from its
-// start. If anything fails once admission is closed, admission stays closed
-// and Status reports the run unavailable until a reset succeeds.
-func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
+// start, so an outage at its start begins before it admits a client. Reset
+// returns the status of the run it started, as Status gives it, before
+// another reset can start. If anything fails once admission is closed,
+// admission stays closed and Status reports the run unavailable until a
+// reset succeeds. A reset that begins after Close has been called, or that
+// is still waiting for sessions when it is called, fails with an error
+// wrapping sshfront.ErrServerClosed.
+func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	if m.closed {
+		return Status{}, fmt.Errorf("runs: reset: %w", sshfront.ErrServerClosed)
+	}
 	current := m.active()
 	if req.Run != "" && req.Run != current.run.ID {
-		return nil, staleRun(current, req.Run)
+		return Status{}, staleRun(current, req.Run)
 	}
 	chosen, err := m.next(current, req)
 	if err != nil {
-		return nil, err
+		return Status{}, err
 	}
 
 	m.mu.Lock()
@@ -224,17 +240,22 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (*Run, error) {
 	}
 	m.mu.Unlock()
 	if err != nil {
-		m.logger.Error("reset failed; admission stays closed until a reset succeeds", "run", current.run.ID, "err", err)
-		return nil, err
+		// A server closed under the reset is shutting down, not failing.
+		if !errors.Is(err, sshfront.ErrServerClosed) {
+			m.logger.Error("reset failed; admission stays closed until a reset succeeds", "run", current.run.ID, "err", err)
+		}
+		return Status{}, err
 	}
 
 	if err := current.root.Close(); err != nil {
 		m.logger.Warn("closing the files of the previous run failed", "run", current.run.ID, "err", err)
 	}
-	m.srv.Resume()
+	// An outage at the start of the run begins before any client is
+	// admitted.
 	next.stops = append(next.stops, ArmTimers(next.rules, m.srv, m.logger))
+	m.srv.Resume()
 	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(chosen.scenario)...)...)
-	return next.run, nil
+	return m.Status(), nil
 }
 
 // Rules returns the rules of run, which must be the current run, or else
@@ -250,12 +271,17 @@ func (m *Manager) Rules(run string) (faults.RuleSet, error) {
 // ChangeRules replaces the rules of run, which must be the current run, with
 // rules, and its chaos with chaos, as faults.Engine.Replace does if revision
 // is still the current revision, and returns the new rules. It fails with
-// ErrStaleRun for another run, and with faults.ErrStaleRevision for another
-// revision. The run takes the listener down at the moments of the rules
-// that start afresh, as it does at those of the rules it started with.
+// ErrStaleRun for another run, with faults.ErrStaleRevision for another
+// revision, and once Close has returned, with an error wrapping
+// sshfront.ErrServerClosed. The run takes the listener down at the moments
+// of the rules that start afresh, as it does at those of the rules it
+// started with.
 func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	if m.closed {
+		return faults.RuleSet{}, fmt.Errorf("runs: change rules: %w", sshfront.ErrServerClosed)
+	}
 	current := m.active()
 	if run != current.run.ID {
 		return faults.RuleSet{}, staleRun(current, run)
@@ -464,7 +490,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		run:        run,
 		root:       root,
 		rules:      rules,
-		handler:    Handler(run, embedded, rules, sftpproxy.Options{Logger: m.logger}),
+		handler:    Handler(run, embedded, rules, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger}),
 		hooks:      Hooks(rules, m.logger),
 		startRules: chosen.rules,
 		startChaos: chosen.chaos,

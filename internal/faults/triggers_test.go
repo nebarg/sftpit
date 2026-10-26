@@ -43,7 +43,7 @@ func TestAWindowLimitsARuleToASpan(t *testing.T) {
 				t.Errorf("at %v of the run, the connection's window applied: %v", time.Since(start), got)
 			}
 		}
-		if got := e.Counts()["bad"]; got != (faults.Counts{Matched: 2, Selected: 2, Fired: 2}) {
+		if got := e.Rules().Counts["bad"]; got != (faults.Counts{Matched: 2, Selected: 2, Fired: 2}) {
 			t.Errorf("counts = %+v, want only the stats in the window matched", got)
 		}
 	})
@@ -108,7 +108,7 @@ func TestAMissedMomentIsUsedUp(t *testing.T) {
 		if got := decide(on(&sftpwire.Stat{}, "/f")); got != nil {
 			t.Errorf("the second stat got %#v, want both moments used up", got)
 		}
-		if got := e.Counts()["r"]; got != (faults.Counts{Matched: 1}) {
+		if got := e.Rules().Counts["r"]; got != (faults.Counts{Matched: 1}) {
 			t.Errorf("the missed rule's counts = %+v, want it to match only the stat it missed", got)
 		}
 	})
@@ -170,7 +170,7 @@ func TestConnectionActionsAreTimedForEachSession(t *testing.T) {
 		if !timers[0][0].Reserve() || shared[0].Reserve() {
 			t.Error("a connection's moment fired in none or both of its sessions")
 		}
-		counts := e.Counts()
+		counts := e.Rules().Counts
 		if want := (faults.Counts{Matched: 2, Selected: 2, Fired: 1}); counts["per-connection"] != want {
 			t.Errorf("per-connection counts = %+v, want %+v", counts["per-connection"], want)
 		}
@@ -236,13 +236,13 @@ func TestTransfersAreTimedFromTheirOpen(t *testing.T) {
 	if want := faults.Between(testSeed.Draw(key), cutoffs.Min, cutoffs.Max); !ok || a.After != want || a.Action != (sftpproxy.Drop{Reset: true}) || a.Reserve == nil {
 		t.Fatalf("the upload's open got %#v, want a reset after %v", a, want)
 	}
-	if got := e.Counts()["reset-into-upload"]; got != (faults.Counts{Matched: 1, Selected: 1}) {
+	if got := e.Rules().Counts["reset-into-upload"]; got != (faults.Counts{Matched: 1, Selected: 1}) {
 		t.Errorf("counts before the moment = %+v", got)
 	}
 	if !a.Reserve() {
 		t.Error("the moment was refused")
 	}
-	if got := e.Counts()["reset-into-upload"]; got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
+	if got := e.Rules().Counts["reset-into-upload"]; got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
 		t.Errorf("counts = %+v, want the moment fired", got)
 	}
 }

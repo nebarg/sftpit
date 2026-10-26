@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/nebarg/sftpit/internal/control"
+	"github.com/nebarg/sftpit/internal/faults"
 )
 
 const resetUsage = `Usage: sftpit reset --ready-file FILE [flags]
@@ -38,7 +39,7 @@ func resetCommand(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return nil
 	})
 	flags.Func("seed", "", func(s string) error {
-		seed, err := parseSeed(s)
+		seed, err := faults.ParseSeed(s)
 		if err != nil {
 			return err
 		}
@@ -70,8 +71,7 @@ func resetCommand(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	status, err := (&control.Client{Addr: rf.HTTPAddress}).Reset(ctx, req)
 	if err != nil {
 		fmt.Fprintf(stderr, "sftpit reset: %v\n", err)
-		var refused *control.Error
-		if errors.As(err, &refused) && refused.StatusCode == http.StatusBadRequest {
+		if refused, ok := errors.AsType[*control.Error](err); ok && refused.StatusCode == http.StatusBadRequest {
 			return exitUsage
 		}
 		return exitFailure

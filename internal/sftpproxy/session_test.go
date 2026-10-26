@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
@@ -278,6 +279,26 @@ func TestBackendViolationsEndSession(t *testing.T) {
 				t.Errorf("Serve error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// closeFails is a backend connection whose Close reports why the backend
+// ended, as backend.Embedded's does.
+type closeFails struct{ net.Conn }
+
+func (c closeFails) Close() error {
+	c.Conn.Close()
+	return errors.New("request server failed")
+}
+
+func TestServeReportsWhyTheBackendEnded(t *testing.T) {
+	fb, backend := startFakeBackend(t, openSSHVersion, "/")
+	p := startProxy(t, closeFails{backend}, sftpproxy.Options{})
+	p.client.init(t, 3)
+	fb.conn.Close()
+	p.client.assertClosed(t)
+	if err := p.result.wait(t); err == nil || !strings.Contains(err.Error(), "request server failed") {
+		t.Errorf("Serve = %v, want the backend's own error", err)
 	}
 }
 

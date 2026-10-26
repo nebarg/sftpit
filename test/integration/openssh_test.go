@@ -2,15 +2,10 @@ package integration
 
 import (
 	"bytes"
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
@@ -53,6 +48,7 @@ ls -1 in
 `
 
 func TestOpenSSHTransparency(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	upload := randomBytes(4<<20 + 321)
@@ -100,20 +96,6 @@ func TestOpenSSHTransparency(t *testing.T) {
 	}
 }
 
-// openSSHOrSkip returns the path of OpenSSH's sftp client, or skips the test
-// if it cannot run.
-func openSSHOrSkip(t testing.TB) string {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("runs the OpenSSH sftp client")
-	}
-	sftpPath, err := exec.LookPath("sftp")
-	if err != nil {
-		t.Skip("OpenSSH sftp client not installed")
-	}
-	return sftpPath
-}
-
 func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line {
 	t.Helper()
 	out, err := openSSH(t, sftpPath, srv, work, openSSHBatch)
@@ -121,41 +103,4 @@ func runOpenSSH(t *testing.T, sftpPath string, srv *server, work string) []line 
 		t.Fatalf("sftp failed: %v\n%s", err, out)
 	}
 	return splitLines(out)
-}
-
-// openSSH runs batch with the OpenSSH sftp client in work, adding options to
-// its command line, and returns everything it printed.
-func openSSH(t testing.TB, sftpPath string, srv *server, work, batch string, options ...string) ([]byte, error) {
-	t.Helper()
-	dir := t.TempDir()
-	keyFile := writeClientKey(t, dir)
-	var known []string
-	for _, key := range hostKeys {
-		known = append(known, knownhosts.Line([]string{srv.addr}, key.PublicKey()))
-	}
-	knownHosts := filepath.Join(dir, "known_hosts")
-	writeFile(t, knownHosts, []byte(strings.Join(known, "\n")+"\n"))
-	batchFile := filepath.Join(dir, "batch")
-	writeFile(t, batchFile, []byte(batch))
-
-	ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
-	defer cancel()
-	args := []string{
-		"-b", batchFile,
-		"-P", srv.port,
-		"-F", os.DevNull,
-		"-i", keyFile,
-		"-o", "IdentitiesOnly=yes",
-		"-o", "IdentityAgent=none",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile=" + knownHosts,
-		"-o", "GlobalKnownHostsFile=" + os.DevNull,
-	}
-	for _, o := range options {
-		args = append(args, "-o", o)
-	}
-	cmd := exec.CommandContext(ctx, sftpPath, append(args, testUser+"@127.0.0.1")...)
-	cmd.Dir = work
-	return cmd.CombinedOutput()
 }

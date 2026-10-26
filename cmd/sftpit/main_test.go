@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
 )
@@ -26,6 +25,12 @@ func TestRun(t *testing.T) {
 			args:       []string{"version"},
 			wantCode:   exitOK,
 			wantStdout: "sftpit ",
+		},
+		{
+			name:       "unknown command with flags",
+			args:       []string{"server", "--config", "x.yaml"},
+			wantCode:   exitUsage,
+			wantStderr: `unknown command "server"`,
 		},
 		{
 			name:       "help",
@@ -57,7 +62,7 @@ func TestRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 
-			code := run(context.Background(), tt.args, &stdout, &stderr)
+			code := run(commandContext(t), tt.args, &stdout, &stderr)
 
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d", code, tt.wantCode)

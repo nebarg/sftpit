@@ -1,7 +1,6 @@
 package sftpproxy_test
 
 import (
-	"crypto/sha256"
 	"errors"
 	"slices"
 	"testing"
@@ -366,11 +365,6 @@ func TestSnapshotLogsWhereItsCopyIs(t *testing.T) {
 		p.client.assertStatus(t, 1, sftpwire.StatusOK, "Success")
 		assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "client")+" copy=snapshots/1/f")
 	})
-}
-
-// snapshotOf is the snapshot that snapshots gives the file at path.
-func snapshotOf(path string) sftpproxy.Snapshot {
-	return sftpproxy.Snapshot{Size: cutoff, SHA256: sha256.Sum256([]byte(path))}
 }
 
 // cutWrite sends a write on handle that crosses the cutoff as request 2,

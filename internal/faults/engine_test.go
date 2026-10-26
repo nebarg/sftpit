@@ -126,7 +126,7 @@ func TestTheFirstRuleToSelectARequestWins(t *testing.T) {
 	if got := session(e, "test", "")(on(&sftpwire.Stat{}, "/f")); got != failure {
 		t.Errorf("got %#v, want the lowest priority's fault, declared first among ties", got)
 	}
-	counts := e.Counts()
+	counts := e.Rules().Counts
 	for id, want := range map[string]faults.Counts{
 		"first": {Matched: 1, Selected: 1, Fired: 1},
 		"tied":  {Matched: 1},
@@ -216,7 +216,7 @@ func TestMaxTriggersLeavesLaterRequestsToOtherRules(t *testing.T) {
 			t.Errorf("stat %d got %#v, want %#v", i+1, got, want)
 		}
 	}
-	if got := e.Counts()["twice"]; got != (faults.Counts{Matched: 3, Selected: 2, Fired: 2}) {
+	if got := e.Rules().Counts["twice"]; got != (faults.Counts{Matched: 3, Selected: 2, Fired: 2}) {
 		t.Errorf("counts = %+v", got)
 	}
 }
@@ -247,7 +247,7 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 		}
 		reserves = append(reserves, a.Reserve)
 	}
-	if got := e.Counts()["cut"]; got != (faults.Counts{Matched: 2, Selected: 2}) {
+	if got := e.Rules().Counts["cut"]; got != (faults.Counts{Matched: 2, Selected: 2}) {
 		t.Errorf("counts before either cutoff = %+v, want both selected and none fired", got)
 	}
 	if !reserves[1]() {
@@ -256,12 +256,12 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 	if reserves[0]() {
 		t.Error("a second transfer took effect beyond max_triggers")
 	}
-	if got := e.Counts()["cut"]; got != (faults.Counts{Matched: 2, Selected: 2, Fired: 1}) {
+	if got := e.Rules().Counts["cut"]; got != (faults.Counts{Matched: 2, Selected: 2, Fired: 1}) {
 		t.Errorf("counts = %+v, want one fired", got)
 	}
 	for _, want := range []string{
-		`level=INFO msg="rule fired" rule=cut request=open_write path=/in/a.csv user=test ordinal=2`,
-		`level=INFO msg="rule suppressed" rule=cut request=open_write path=/in/a.csv user=test ordinal=1 reason=max_triggers`,
+		`level=INFO msg="rule fired" rule=cut operation=open_write path=/in/a.csv user=test ordinal=2`,
+		`level=INFO msg="rule suppressed" rule=cut operation=open_write path=/in/a.csv user=test ordinal=1 reason=max_triggers`,
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("logs lack %s:\n%s", want, logs.String())
@@ -332,7 +332,7 @@ func TestARandomRuleDrawsFromTheKeyOfEachRequest(t *testing.T) {
 	if fired == 0 || missed == 0 {
 		t.Fatalf("the rule fired %d times and missed %d; the test needs both", fired, missed)
 	}
-	counts := e.Counts()
+	counts := e.Rules().Counts
 	if want := (faults.Counts{Matched: 40, Selected: uint64(fired), Fired: uint64(fired)}); counts["random"] != want {
 		t.Errorf("counts = %+v, want %+v", counts["random"], want)
 	}
@@ -389,8 +389,8 @@ func TestRangesDrawAValueForEachDecision(t *testing.T) {
 	}
 	for _, line := range []string{
 		fmt.Sprintf(`level=DEBUG msg=decision key.rule=cut key.activation=0 key.choice=cutoff key.user=test key.path=/in/a.csv key.operation=open_write key.ordinal=1 draw=%d min=65536 max=1048576 value=%d`, testSeed.Draw(key), want),
-		fmt.Sprintf(`level=INFO msg="rule fired" rule=cut request=open_write path=/in/a.csv user=test ordinal=1 cutoff=%d`, want),
-		`level=INFO msg="rule fired" rule=slow request=stat path=/f user=test ordinal=20 duration=`,
+		fmt.Sprintf(`level=INFO msg="rule fired" rule=cut operation=open_write path=/in/a.csv user=test ordinal=1 cutoff=%d`, want),
+		`level=INFO msg="rule fired" rule=slow operation=stat path=/f user=test ordinal=20 duration=`,
 	} {
 		if !strings.Contains(logs.String(), line) {
 			t.Errorf("logs lack %s:\n%s", line, logs.String())

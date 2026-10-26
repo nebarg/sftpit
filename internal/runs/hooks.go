@@ -40,38 +40,34 @@ func Hooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
 }
 
 func inject(ctx context.Context, logger *slog.Logger, rules *faults.Engine, conn *sshfront.Conn, event faults.Operation, action sftpproxy.Action) {
-	attrs := []any{"conn", conn.ID(), "request", event}
+	attrs := []any{"conn", conn.ID(), "operation", event}
 	if conn.User() != "" {
 		attrs = append(attrs, "user", conn.User())
 	}
+	if action == nil {
+		return
+	}
+	attrs = append(attrs, sftpproxy.FaultAttrs(action, "")...)
+	logger.Info("injected fault", attrs...)
 	var err error
 	switch a := action.(type) {
-	case nil:
-		return
 	case sftpproxy.Delay:
-		attrs = append(attrs, "fault", "delay", "duration", a.Duration)
-		logger.Info("injected fault", attrs...)
 		if wait(ctx, a.Duration, a.Release, nil) {
 			logger.Info("fault released", attrs...)
 		}
 	case sftpproxy.Drop:
-		mode, drop := "fin", conn.Close
 		if a.Reset {
-			mode, drop = "rst", conn.Reset
+			err = conn.Reset()
+		} else {
+			err = conn.Close()
 		}
-		attrs = append(attrs, "fault", "close_connection", "mode", mode)
-		logger.Info("injected fault", attrs...)
-		err = drop()
 	case sftpproxy.Freeze:
-		attrs = append(attrs, "fault", "freeze_connection", "limit", a.Limit)
-		logger.Info("injected fault", attrs...)
 		conn.Freeze()
 		if wait(ctx, a.Limit, a.Release, rules.Released()) {
 			logger.Info("fault released", attrs...)
 		}
 		err = conn.Close()
 	case sftpproxy.ListenerDown:
-		logger.Info("injected fault", append(attrs, "fault", "listener_down", "duration", a.Duration, "close_existing", a.CloseExisting)...)
 		conn.Server().Down(a.Duration, a.CloseExisting)
 	}
 	// A connection that is already closed, by the server shutting down for
@@ -111,7 +107,7 @@ func armTimers(timers []sftpproxy.Timer, srv *sshfront.Server, logger *slog.Logg
 			if stopped || (t.Reserve != nil && !t.Reserve()) {
 				return
 			}
-			logger.Info("injected fault", "fault", "listener_down", "when", "timer", "duration", down.Duration, "close_existing", down.CloseExisting)
+			logger.Info("injected fault", sftpproxy.FaultAttrs(down, "timer")...)
 			srv.Down(down.Duration, down.CloseExisting)
 		}
 		if wait := time.Until(t.At); wait > 0 {

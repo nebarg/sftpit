@@ -14,7 +14,7 @@ import (
 func TestLoadReadsListenerDown(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+`  outages:
+	cfg, err := loadScenarios(t, dir, `  outages:
     faults:
       - id: at-first-login
         max_triggers: 1
@@ -26,8 +26,7 @@ func TestLoadReadsListenerDown(t *testing.T) {
       - id: after-publishing
         match: {operation: rename}
         action: {type: listener_down, when: after, duration: 2s, close_existing: false}
-`, 0o600)
-	cfg, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+`, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -69,8 +68,7 @@ func TestLoadRejectsInvalidListenerDown(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+"  s:\n    faults:\n      - id: r\n        "+tt.rule+"\n", 0o600)
-			_, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+			_, err := loadScenarios(t, dir, oneRule(tt.rule), "")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

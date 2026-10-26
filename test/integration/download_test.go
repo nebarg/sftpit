@@ -20,6 +20,7 @@ const corruptAt = 1<<20 + 1000
 // the client reports success and stores exactly the corrupted file, and that
 // the file on the server is unchanged.
 func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
+	t.Parallel()
 	data := randomBytes(4<<20 + 321)
 	flipped := slices.Clone(data)
 	for i := range 64 {
@@ -44,7 +45,7 @@ func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
 	}
 	clients := []struct {
 		name     string
-		transfer func(t *testing.T, srv *server, work string, upload bool)
+		transfer func(t testing.TB, srv *server, work string, upload bool)
 	}{
 		{name: "OpenSSH", transfer: transferWithOpenSSH},
 		{name: "phpseclib", transfer: transferWithPhpseclib},
@@ -63,7 +64,7 @@ func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
 						},
 						ReplyOrder: order,
 					})
-					writeFile(t, filepath.Join(srv.files, "orders.csv"), data)
+					writeFile(t, srv.path("/orders.csv"), data)
 					work := t.TempDir()
 
 					c.transfer(t, srv, work, false)
@@ -71,10 +72,7 @@ func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
 					if err != nil || !bytes.Equal(got, tt.want) {
 						t.Errorf("downloaded %d bytes (%v), want the %d bytes of the corrupted file", len(got), err, len(tt.want))
 					}
-					stored, err := os.ReadFile(filepath.Join(srv.files, "orders.csv"))
-					if err != nil || !bytes.Equal(stored, data) {
-						t.Errorf("the server's file has %d bytes (%v), want it unchanged", len(stored), err)
-					}
+					assertHolds(t, srv, "/orders.csv", data)
 				})
 			}
 		}

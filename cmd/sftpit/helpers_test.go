@@ -36,13 +36,21 @@ var (
 	runLine       = regexp.MustCompile(`run: (\S+)`)
 )
 
-// startServe runs serve with args, after a flag for a free port for the
-// control API, which args can override.
+// commandContext returns a context for a command that is meant to return on
+// its own, which ends it if a regression keeps it running.
+func commandContext(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(t.Context(), startTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// startServe runs serve with args, after flags for free ports for SFTP and
+// the control API, which args can override.
 func startServe(t *testing.T, args ...string) *running {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	s := &running{stdout: &syncBuffer{}, stderr: &syncBuffer{}, cancel: cancel, code: make(chan int, 1)}
-	args = append([]string{"serve", "--http-listen", "127.0.0.1:0"}, args...)
+	args = append([]string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0"}, args...)
 	go func() { s.code <- run(ctx, args, s.stdout, s.stderr) }()
 	t.Cleanup(func() { s.stop(t) })
 
@@ -50,6 +58,8 @@ func startServe(t *testing.T, args ...string) *running {
 	for !strings.Contains(s.stdout.String(), "Press Ctrl+C to stop.") {
 		select {
 		case code := <-s.code:
+			// stop, in the cleanup, needs the code too.
+			s.code <- code
 			t.Fatalf("serve exited with %d before starting\nstderr:\n%s", code, s.stderr.String())
 		case <-time.After(10 * time.Millisecond):
 		}
@@ -127,6 +137,12 @@ func writeTestFile(t *testing.T, name, content string) {
 	if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// goneReadyFile returns a ready file that a serve listening at httpAddr
+// could have written before it stopped.
+func goneReadyFile(httpAddr string) string {
+	return `{"sftp_address": "127.0.0.1:1", "http_address": "` + httpAddr + `", "workspace": "/gone", "host_keys": [{"type": "ssh-ed25519", "fingerprint": "SHA256:x"}]}`
 }
 
 type syncBuffer struct {

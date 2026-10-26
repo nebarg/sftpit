@@ -23,6 +23,7 @@ ls -1 in
 // TestOpenSSHRenameFaults injects each response fault into OpenSSH's rename
 // and checks what the client reports and which name the file ends up under.
 func TestOpenSSHRenameFaults(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	const (
@@ -94,6 +95,7 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 // rename, as Flysystem's move() makes it, and checks what phpseclib reports
 // and which name the file ends up under.
 func TestPhpseclibRenameFaults(t *testing.T) {
+	t.Parallel()
 	php := phpseclibOrSkip(t)
 
 	const (
@@ -137,10 +139,10 @@ func TestPhpseclibRenameFaults(t *testing.T) {
 			start := time.Now()
 			transcript := runPhpseclib(t, php, srv, "rename.php", work)
 			elapsed := time.Since(start)
-			if results(t, transcript)["put"] != true {
+			if phpseclibResults(t, transcript)["put"] != true {
 				t.Fatalf("phpseclib put failed: %v", transcript)
 			}
-			if got := failures(t, transcript)["rename"]; got != tt.report {
+			if got := phpseclibFailures(t, transcript)["rename"]; got != tt.report {
 				t.Errorf("rename error = %q, want %q", got, tt.report)
 			}
 			switch a := tt.action.(type) {

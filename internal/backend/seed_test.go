@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +50,7 @@ func TestSeedCopiesFilesAndDirectories(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if runtime.GOOS != "windows" && info.Mode() != mode {
+		if info.Mode() != mode {
 			t.Errorf("%s: mode %v, want %v", name, info.Mode(), mode)
 		}
 		if !info.ModTime().Equal(stamp) {

@@ -20,8 +20,8 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// namePattern constrains scenario names and rule IDs, which name files and
-// appear in logs and URLs.
+// namePattern constrains scenario names and rule IDs, which appear in logs
+// and in the control API's replies.
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 type scenarioConfig struct {
@@ -269,6 +269,9 @@ func parseRules(prefix string, rcs []ruleConfig, users []sshfront.User) ([]fault
 	var rules []faults.Rule
 	for i, rc := range rcs {
 		field := fmt.Sprintf("%sfaults[%d]", prefix, i)
+		if rc.ID == "" {
+			return nil, fmt.Errorf("%s: id is required", field)
+		}
 		if !namePattern.MatchString(rc.ID) {
 			return nil, fmt.Errorf("%s: id %q must hold only lowercase letters, digits and -, starting with a letter or digit", field, rc.ID)
 		}
@@ -302,6 +305,9 @@ func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 		if r.Trigger, err = rc.Trigger.trigger(); err != nil {
 			return r, fmt.Errorf("trigger: %w", err)
 		}
+	}
+	if err := rc.Action.checkType(); err != nil {
+		return r, fmt.Errorf("action: %w", err)
 	}
 	var noWhen string
 	switch {
@@ -548,13 +554,23 @@ var actionFields = map[string][]string{
 	"wrong_size":        {"size", "size_delta"},
 }
 
-// apply sets the action of r, and the ranges it draws values from. If noWhen
-// is set, the action takes no when, for the reason it gives.
-func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
-	allowed, ok := actionFields[ac.Type]
-	if !ok {
-		return fmt.Errorf("type %q is not one of %s", ac.Type, strings.Join(slices.Sorted(maps.Keys(actionFields)), ", "))
+// checkType reports a missing or unknown action type.
+func (ac actionConfig) checkType() error {
+	types := strings.Join(slices.Sorted(maps.Keys(actionFields)), ", ")
+	switch _, ok := actionFields[ac.Type]; {
+	case ac.Type == "":
+		return fmt.Errorf("type is required: one of %s", types)
+	case !ok:
+		return fmt.Errorf("type %q is not one of %s", ac.Type, types)
 	}
+	return nil
+}
+
+// apply sets the action of r, and the ranges it draws values from. If noWhen
+// is set, the action takes no when, for the reason it gives. checkType has
+// accepted ac's type.
+func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
+	allowed := actionFields[ac.Type]
 	for _, f := range ac.set() {
 		if !slices.Contains(allowed, f) {
 			return fmt.Errorf("%s does not apply to a %s", f, ac.Type)
@@ -721,13 +737,23 @@ func (ac actionConfig) closeConnection(noWhen string) (sftpproxy.Action, error) 
 	if err != nil {
 		return nil, err
 	}
+	d, err := ac.drop()
+	if err != nil {
+		return nil, err
+	}
+	d.When = when
+	return d, nil
+}
+
+// drop returns the Drop that ac's mode chooses, fin unless set.
+func (ac actionConfig) drop() (sftpproxy.Drop, error) {
 	switch ac.Mode {
 	case "", "fin":
-		return sftpproxy.Drop{When: when}, nil
+		return sftpproxy.Drop{}, nil
 	case "rst":
-		return sftpproxy.Drop{When: when, Reset: true}, nil
+		return sftpproxy.Drop{Reset: true}, nil
 	}
-	return nil, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
+	return sftpproxy.Drop{}, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
 }
 
 func (ac actionConfig) freezeConnection(noWhen string) (sftpproxy.Action, error) {
@@ -782,13 +808,11 @@ func (ac actionConfig) uploadResult() (sftpproxy.Action, error) {
 		if ac.MaxFreeze != "" {
 			return nil, errors.New("max_freeze applies only to result freeze_connection")
 		}
-		switch ac.Mode {
-		case "", "fin":
-			return sftpproxy.Drop{}, nil
-		case "rst":
-			return sftpproxy.Drop{Reset: true}, nil
+		d, err := ac.drop()
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
+		return d, nil
 	case "freeze_connection":
 		if ac.Mode != "" {
 			return nil, errors.New("mode applies only to result close_connection")

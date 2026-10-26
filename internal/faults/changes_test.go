@@ -216,7 +216,7 @@ func TestAChangeTimesTheRunsOutagesFromIt(t *testing.T) {
 		if !timers[0].At.Equal(changed.Add(draw("at"))) || down.Duration != draw("duration") || !down.CloseExisting {
 			t.Errorf("timer = %+v, want the outage %v after the change, for %v, drawn afresh", timers[0], draw("at"), draw("duration"))
 		}
-		if got := e.Counts()["outage"]; got != (faults.Counts{Matched: 1, Selected: 1}) {
+		if got := e.Rules().Counts["outage"]; got != (faults.Counts{Matched: 1, Selected: 1}) {
 			t.Errorf("counts = %+v, want the outage selected once since the change", got)
 		}
 		if !timers[0].Reserve() {
@@ -396,7 +396,7 @@ func TestOpenSessionsAreTimedForRulesAddedLive(t *testing.T) {
 		if got := late.Timers(); len(got) != 2 {
 			t.Errorf("a session after the change got timers %+v, want both rules'", got)
 		}
-		counts := e.Counts()
+		counts := e.Rules().Counts
 		if want := (faults.Counts{Matched: 9, Selected: 9}); counts["soon"] != want {
 			t.Errorf("soon counts = %+v, want %+v: every session that had not ended, and the late one", counts["soon"], want)
 		}

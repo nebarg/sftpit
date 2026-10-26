@@ -254,10 +254,13 @@ type session struct {
 // which unblocks every goroutine reading or writing them.
 func (s *session) stop(err error) {
 	s.stopOnce.Do(func() {
-		s.err = err
 		close(s.done)
 		s.client.Close()
-		s.backend.Close()
+		// The backend's own error says why a backend that failed ended.
+		if closeErr := s.backend.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("sftpproxy: backend: %w", closeErr))
+		}
+		s.err = err
 	})
 }
 
@@ -865,10 +868,10 @@ func (s *session) logFault(req *request) {
 // a path only if it is a transfer's.
 func (s *session) faultAttrs(req *request) []any {
 	var attrs []any
-	var when any = "timer"
+	when := "timer"
 	if req.packet != nil {
 		attrs = append(attrs, "request", operation(req.packet))
-		when = req.action.when()
+		when = req.action.when().String()
 	}
 	if req.packet != nil || req.path != "" {
 		attrs = append(attrs, "path", req.path)
@@ -876,26 +879,7 @@ func (s *session) faultAttrs(req *request) []any {
 	if req.target != "" {
 		attrs = append(attrs, "target", req.target)
 	}
-	switch a := req.action.(type) {
-	case Delay:
-		attrs = append(attrs, "fault", "delay", "when", when, "duration", a.Duration)
-	case Stall:
-		attrs = append(attrs, "fault", "stall", "when", when, "limit", a.Limit)
-	case Fail:
-		attrs = append(attrs, "fault", "fail", "when", when, "status", a.Status)
-	case Drop:
-		mode := "fin"
-		if a.Reset {
-			mode = "rst"
-		}
-		attrs = append(attrs, "fault", "close_connection", "when", when, "mode", mode)
-	case Freeze:
-		attrs = append(attrs, "fault", "freeze_connection", "when", when, "limit", a.Limit)
-	case EndSession:
-		attrs = append(attrs, "fault", "close_subsystem", "when", when)
-	case ListenerDown:
-		attrs = append(attrs, "fault", "listener_down", "when", when, "duration", a.Duration, "close_existing", a.CloseExisting)
-	}
+	attrs = append(attrs, FaultAttrs(req.action, when)...)
 	if req.cut {
 		attrs = append(attrs, "cutoff", req.upload.Cutoff, "offset", req.packet.(*sftpwire.Write).Offset)
 	}

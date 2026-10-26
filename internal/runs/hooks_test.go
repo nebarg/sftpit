@@ -58,8 +58,7 @@ func TestShutdownDuringAFreezeIsNoFailure(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer raw.Close()
-	for receive(t, logs) != "injected fault" {
-	}
+	awaitLog(t, logs, "injected fault")
 
 	closed := make(chan error, 1)
 	go func() { closed <- m.Close() }()
@@ -97,9 +96,9 @@ func TestArmTimersStartsNoOutageOnceStopped(t *testing.T) {
 		stop := ArmTimers(rules, srv, logger)
 		time.Sleep(time.Until(rules.Timers()[0].At))
 		stop()
-		fired := rules.Counts()["outage"].Fired
+		fired := rules.Rules().Counts["outage"].Fired
 		time.Sleep(time.Millisecond)
-		if rules.Counts()["outage"].Fired != fired {
+		if rules.Rules().Counts["outage"].Fired != fired {
 			t.Fatalf("attempt %d: the outage fired after stop returned", attempt)
 		}
 	}

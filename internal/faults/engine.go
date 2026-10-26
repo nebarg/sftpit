@@ -370,11 +370,6 @@ func Check(rules []Rule) error {
 	return nil
 }
 
-// Counts returns what each current rule has done so far, by rule ID.
-func (e *Engine) Counts() map[string]Counts {
-	return e.Rules().Counts
-}
-
 // fires reports whether r fires for the request of the decision k, which it
 // selects: always, unless r has a Probability.
 func (e *Engine) fires(r *rule, k Key) bool {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -19,9 +18,9 @@ func TestServeWritesAReadyFileWhileItRuns(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ready.json")
 	// An earlier serve's ready file is replaced.
-	writeTestFile(t, path, `{"sftp_address": "127.0.0.1:1", "http_address": "127.0.0.1:2", "workspace": "/gone", "host_keys": []}`)
+	writeTestFile(t, path, goneReadyFile("127.0.0.1:2"))
 
-	s := startServe(t, "--sftp-listen", "127.0.0.1:0", "--ready-file", path)
+	s := startServe(t, "--ready-file", path)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the ready file: %v", err)
@@ -52,8 +51,11 @@ func TestServeWritesAReadyFileWhileItRuns(t *testing.T) {
 	if len(listed) != 2 || !slices.Equal(listed, banner) {
 		t.Errorf("the ready file lists the host keys %q, want those in the banner, %q", listed, banner)
 	}
-	if info, err := os.Stat(path); runtime.GOOS != "windows" && (err != nil || info.Mode().Perm() != 0o644) {
-		t.Errorf("the ready file has mode %v (%v), want 0644", info.Mode().Perm(), err)
+	switch info, err := os.Stat(path); {
+	case err != nil:
+		t.Errorf("the ready file: %v", err)
+	case info.Mode().Perm() != 0o644:
+		t.Errorf("the ready file has mode %v, want 0644", info.Mode().Perm())
 	}
 	if got := listNames(t, dir); !slices.Equal(got, []string{"ready.json"}) {
 		t.Errorf("the ready file's directory holds %v, want only the ready file", got)
@@ -67,6 +69,19 @@ func TestServeWritesAReadyFileWhileItRuns(t *testing.T) {
 	}
 }
 
+// TestServeStopsCleanlyIfTheReadyFileHasGone checks a harness that removes
+// the ready file, or its directory, before it stops serve.
+func TestServeStopsCleanlyIfTheReadyFileHasGone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready.json")
+	s := startServe(t, "--ready-file", path)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if code := s.stop(t); code != exitOK || strings.Contains(s.stderr.String(), "ready file") {
+		t.Errorf("serve stopped with %d, stderr:\n%s\nwant a clean stop", code, s.stderr.String())
+	}
+}
+
 func TestServeRemovesAStaleReadyFileEvenIfItCannotStart(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -74,10 +89,10 @@ func TestServeRemovesAStaleReadyFileEvenIfItCannotStart(t *testing.T) {
 	}
 	defer ln.Close()
 	path := filepath.Join(t.TempDir(), "ready.json")
-	writeTestFile(t, path, `{"sftp_address": "127.0.0.1:1", "http_address": "127.0.0.1:2", "workspace": "/gone", "host_keys": []}`)
+	writeTestFile(t, path, goneReadyFile("127.0.0.1:2"))
 
 	var stdout, stderr syncBuffer
-	if code := run(context.Background(), []string{"serve", "--sftp-listen", ln.Addr().String(), "--http-listen", "127.0.0.1:0", "--ready-file", path}, &stdout, &stderr); code != exitFailure {
+	if code := run(commandContext(t), []string{"serve", "--sftp-listen", ln.Addr().String(), "--http-listen", "127.0.0.1:0", "--ready-file", path}, &stdout, &stderr); code != exitFailure {
 		t.Fatalf("serve on an occupied port exited with %d, want %d\n%s", code, exitFailure, stderr.String())
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
@@ -91,17 +106,27 @@ func TestServeRefusesAReadyFileItCannotWrite(t *testing.T) {
 		"sftpit.yaml":  "schema_version: 1\n",
 		"empty.json":   "{}",
 		"another.json": `{"http_address": "127.0.0.1:8122", "name": "app"}`,
+		"partial.json": `{"http_address": "127.0.0.1:8122"}`,
+		"notes.json":   goneReadyFile("127.0.0.1:8122") + "\nnotes\n",
 	}
 	for name, content := range others {
 		writeTestFile(t, filepath.Join(dir, name), content)
 	}
+	readOnly := filepath.Join(dir, "read-only")
+	if err := os.Mkdir(readOnly, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(readOnly, 0o700) })
 	tests := []struct {
 		name, path, want string
 	}{
 		{"a missing directory", filepath.Join(dir, "missing", "ready.json"), "does not exist"},
+		{"a directory it cannot write", filepath.Join(readOnly, "ready.json"), "permission denied"},
 		{"another file", filepath.Join(dir, "sftpit.yaml"), "already exists and is not a ready file, so sftpit will not replace it"},
 		{"an empty JSON object", filepath.Join(dir, "empty.json"), "already exists and is not a ready file"},
 		{"another JSON file", filepath.Join(dir, "another.json"), "already exists and is not a ready file"},
+		{"part of a ready file", filepath.Join(dir, "partial.json"), "already exists and is not a ready file"},
+		{"a ready file with more after it", filepath.Join(dir, "notes.json"), "already exists and is not a ready file"},
 		{"a directory", dir, "already exists and is not a ready file"},
 	}
 	for _, tt := range tests {

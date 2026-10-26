@@ -21,6 +21,7 @@ import (
 // and checks that a pinned seed fails the same attempts on every run, also
 // when uploads of other files, which the same rule decides, come in between.
 func TestSeededFailuresRepeat(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	const files = 12
@@ -49,7 +50,7 @@ func TestSeededFailuresRepeat(t *testing.T) {
 		rules, err := faults.New([]faults.Rule{{
 			ID:          "random-failures",
 			Match:       faults.Match{Operations: []faults.Operation{faults.OpenWrite}},
-			Probability: &half,
+			Probability: new(0.5),
 			Action:      sftpproxy.Fail{Status: sftpwire.StatusFailure},
 		}}, nil, 481516, slog.New(slog.DiscardHandler))
 		if err != nil {
@@ -65,21 +66,18 @@ func TestSeededFailuresRepeat(t *testing.T) {
 			t.Fatalf("%s: sftp failed: %v\n%s", r.name, err, out)
 		}
 		decided := failures.under("/in/")
-		entries, err := os.ReadDir(filepath.Join(srv.files, "in"))
-		if err != nil {
-			t.Fatal(err)
-		}
 		stored := make(map[string]bool)
-		for _, e := range entries {
-			stored["/in/"+e.Name()] = e.Type().IsRegular()
+		for name := range decided {
+			info, err := os.Stat(srv.path(name))
+			stored[name] = err == nil && info.Mode().IsRegular()
 		}
 		for name, attempts := range decided {
 			if want := slices.Contains(attempts, false); stored[name] != want {
 				t.Errorf("%s: %s stored: %v, but its attempts failed: %v", r.name, name, stored[name], attempts)
 			}
 		}
-		if reported, fired := strings.Count(string(out), ": Failure"), failures.fired(); reported != fired || rules.Counts()["random-failures"].Fired != uint64(fired) {
-			t.Errorf("%s: sftp reported %d failures and the rule %d, want %d:\n%s", r.name, reported, rules.Counts()["random-failures"].Fired, fired, out)
+		if reported, fired := strings.Count(string(out), ": Failure"), failures.fired(); reported != fired || rules.Rules().Counts["random-failures"].Fired != uint64(fired) {
+			t.Errorf("%s: sftp reported %d failures and the rule %d, want %d:\n%s", r.name, reported, rules.Rules().Counts["random-failures"].Fired, fired, out)
 		}
 
 		if first == nil {
@@ -100,6 +98,7 @@ func TestSeededFailuresRepeat(t *testing.T) {
 // at a random offset, and checks that a pinned seed leaves the same partial
 // files on every run, and another seed different ones.
 func TestSeededCutoffsRepeat(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	const files = 8
@@ -112,17 +111,13 @@ func TestSeededCutoffsRepeat(t *testing.T) {
 	cutoffs := faults.Range[uint64]{Min: 1000, Max: 100_000}
 	stored := func(seed faults.Seed) map[string]int {
 		t.Helper()
-		rules, err := faults.New([]faults.Rule{{
+		srv := startScenario(t, []faults.Rule{{
 			ID:          "random-cutoffs",
 			Match:       faults.Match{Operations: []faults.Operation{faults.Write}},
-			Probability: &half,
+			Probability: new(0.5),
 			Cutoff:      &cutoffs,
 			Action:      sftpproxy.PartialUpload{Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}},
-		}}, nil, seed, slog.New(slog.DiscardHandler))
-		if err != nil {
-			t.Fatalf("faults.New: %v", err)
-		}
-		srv := startServerWithRules(t, rules, sftpproxy.Options{})
+		}}, seed, nil)
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "orders.csv"), data)
 		if out, err := openSSH(t, sftpPath, srv, work, batch.String()); err != nil {
@@ -132,7 +127,7 @@ func TestSeededCutoffsRepeat(t *testing.T) {
 		var cut uint64
 		for i := range files {
 			name := fmt.Sprintf("/in/orders-%d.csv", i)
-			got, err := os.ReadFile(filepath.Join(srv.files, name))
+			got, err := os.ReadFile(srv.path(name))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -147,7 +142,7 @@ func TestSeededCutoffsRepeat(t *testing.T) {
 			}
 			sizes[name] = len(got)
 		}
-		if fired := rules.Counts()["random-cutoffs"].Fired; fired != cut {
+		if fired := srv.counts(t, "random-cutoffs").Fired; fired != cut {
 			t.Errorf("seed %d: the rule fired %d times, but %d uploads were cut off", seed, fired, cut)
 		}
 		return sizes
@@ -189,8 +184,6 @@ func assertSeedFailsSomeRetries(t *testing.T, decided map[string][]bool, files i
 			len(decided), recovered, lost, files, decided)
 	}
 }
-
-var half = 0.5
 
 // uploadOutcomes records, for each path, whether each upload attempt that
 // faults decides fails.

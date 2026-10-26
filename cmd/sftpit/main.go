@@ -56,50 +56,29 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return resetCommand(ctx, args[1:], stdout, stderr)
 	case "config":
 		return configCommand(args[1:], stdout, stderr)
-	}
-	if len(args) > 1 {
-		fmt.Fprintf(stderr, "sftpit %s: unexpected arguments %q\n", args[0], args[1:])
-		return exitUsage
-	}
-
-	switch args[0] {
-	case "version":
-		fmt.Fprintln(stdout, "sftpit", buildVersion())
+	case "version", "help", "-h", "--help":
+		if len(args) > 1 {
+			fmt.Fprintf(stderr, "sftpit %s: unexpected arguments %q\n", args[0], args[1:])
+			return exitUsage
+		}
+		if args[0] == "version" {
+			fmt.Fprintln(stdout, "sftpit", buildVersion())
+		} else {
+			fmt.Fprint(stdout, usage)
+		}
 		return exitOK
-	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
-		return exitOK
-	default:
-		fmt.Fprintf(stderr, "sftpit: unknown command %q\n\n%s", args[0], usage)
-		return exitUsage
 	}
+	fmt.Fprintf(stderr, "sftpit: unknown command %q\n\n%s", args[0], usage)
+	return exitUsage
 }
 
+// buildVersion returns the version go build records: a module version, a
+// pseudo-version with the revision, marked +dirty for uncommitted changes,
+// or (devel) for go run.
 func buildVersion() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "unknown"
 	}
-
-	var revision string
-	var modified bool
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.modified":
-			modified = setting.Value == "true"
-		}
-	}
-
-	if revision == "" {
-		return info.Main.Version
-	}
-	if len(revision) > 12 {
-		revision = revision[:12]
-	}
-	if modified {
-		revision += "-dirty"
-	}
-	return fmt.Sprintf("%s (%s)", info.Main.Version, revision)
+	return info.Main.Version
 }

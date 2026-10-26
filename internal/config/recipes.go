@@ -8,8 +8,8 @@ import (
 	"slices"
 )
 
-// scopeConfig holds the fields with which a recipe narrows the requests it
-// applies to. They mean what they mean in a match.
+// scopeConfig holds the fields with which a recipe or a chaos narrows the
+// requests it applies to. They mean what they mean in a match.
 type scopeConfig struct {
 	User           string `yaml:"user,omitempty" json:"user,omitempty"`
 	KeyFingerprint string `yaml:"key_fingerprint,omitempty" json:"key_fingerprint,omitempty"`

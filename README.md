@@ -47,6 +47,7 @@ server:
   sftp_listen: "127.0.0.1:2122"
   http_listen: "127.0.0.1:8122" # the control API
   host_key: "./hostkeys" # or "workspace" (the default) for the workspace's own keys
+  reply_order: "request" # or "completion"
 
 storage:
   data_dir: "./sandbox-data" # a workspace to keep; temporary by default
@@ -71,7 +72,9 @@ users:
 - With no `users`, the `test`/`test` login is used.
 - A `host_key` directory gets an Ed25519 and an RSA key the first time it is used. Commit them so a team shares one fingerprint.
 
-The storage limits keep a runaway client from filling the disk. A file counts at its logical size, so a sparse write or a truncate that extends a file counts in full, and only file handles count as open files. A request that would take the files past a limit changes nothing and fails with `SSH_FX_FAILURE`, as a write to a full disk fails on OpenSSH's server, and sftpit logs it as `storage limit reached`, naming the setting. The seed counts too, and sftpit refuses to start with one that does not fit. A limit can be raised but not turned off.
+`reply_order` sets the order in which replies reach a client. With `request`, the default, a session passes the client's requests to the server one at a time and answers them in order, as OpenSSH's `sftp-server` does, so a fault that holds a request before the server acts holds back every later one. With `completion`, it answers each request as soon as it is done, as a server that handles requests concurrently may: requests on the same file still reach the server in order, but a held request holds back only later requests on its own files.
+
+The storage limits keep a runaway client from filling the disk. A file counts at its logical size, so a sparse write or a truncate that extends a file counts in full, and only file handles count as open files. A request that would take the files past a limit changes nothing and fails with `SSH_FX_FAILURE`, as a write to a full disk fails on OpenSSH's server, and sftpit logs it as `storage limit reached`, naming the setting. The seed counts too, and sftpit refuses to start with one that does not fit. A limit can be set to any value of at least 1, but not turned off.
 
 Passwords never appear in the config file. `password_env` names an environment variable, which is read from the process environment first and then from the env files named by `env_file` and `--env-file`. A later file overrides an earlier one, and a missing env file is skipped.
 
@@ -81,7 +84,7 @@ sftpit never reads a `.env` it was not told about. It never copies env-file valu
 - `#` comments;
 - LF or CRLF line endings.
 
-Expansion such as `${OTHER}`, escapes and multi-line values are rejected for referenced variables. Keep env files out of version control.
+Expansion such as `${OTHER}`, escapes and unquoted spaces are rejected in the variables sftpit reads from a file. A multi-line value, or a line that is not `KEY=value`, is rejected anywhere in the file. Keep env files out of version control.
 
 To check a configuration without starting a server:
 
@@ -90,7 +93,7 @@ sftpit config validate --config ./sftpit.yaml
 sftpit config explain --config ./sftpit.yaml
 ```
 
-`validate` checks everything `serve` would, every scenario included, and exits with 2 at the first problem. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, each scenario's rules in the order they are tried, and the rules each [chaos preset](#chaos) compiles to, in a comment. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace, and both take `--env-file`.
+`validate` checks the file, the users and their keys, every secret and every scenario, and exits with 2 at the first problem. The seed directory's contents and whether they fit the limits, the data directory, the host keys and whether the listen addresses are free are checked when `serve` starts. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, each scenario's rules in the order they are tried, and the rules each [chaos preset](#chaos) compiles to, in a comment. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace, and both take `--env-file`.
 
 ## Faults
 
@@ -180,7 +183,7 @@ faults:
 
 `attempts` lists the opens a recipe selects, counted per user and path. `sftpit config explain` shows the long form of each recipe.
 
-A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault, and keeps the file that each faulted upload leaves behind, logging its size and SHA-256 when its handle closes.
+A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
 
 Rules can also fire at random, and draw a `duration` or a partial upload's `cutoff_offset` from a range:
 
@@ -327,7 +330,7 @@ An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, or
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
-**Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. A `POST` or `PUT` needs the `Sftpit-Control` header, with any value, which a page on another origin cannot send, and one that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`.
+**Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. Any request but a `GET`, `HEAD` or `OPTIONS` needs the `Sftpit-Control` header, with any non-empty value, which a page on another origin cannot send, and one that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`, except that a request that passes these checks gets a plain-text 404 for an unknown route, and a plain-text 405 for a method its route does not take.
 
 ### Changing the rules during a run
 
@@ -424,13 +427,13 @@ A standard rename fails when the target exists, while `posix-rename@openssh.com`
 
 ## Development
 
-Requires Go 1.26 or later.
+sftpit runs on Linux and macOS, and building it requires Go 1.26 or later.
 
 ```bash
 make check
 ```
 
-`make check` runs the gofmt check, a check that `go.mod` is tidy, `go vet`, staticcheck and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
+`make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, staticcheck with all its checks and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
 
 The integration tests in `test/integration` drive the OpenSSH `sftp` client, phpseclib, and a Laravel application that publishes through Laravel's filesystem against sftpit, and are skipped when a client is missing. The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there. The PHP clients need PHP 8.3 or later and Composer:
 

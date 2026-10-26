@@ -9,10 +9,7 @@ import (
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
-	"github.com/nebarg/sftpit/internal/sshfront"
 )
-
-var testUsers = []sshfront.User{{Name: "test", Password: "test", Home: "/"}}
 
 func TestParseRulesReadsTheLongFormAndRecipes(t *testing.T) {
 	got, err := ParseRules([]byte(`[
@@ -48,6 +45,7 @@ func TestParseRulesRejectsWhatLoadRejects(t *testing.T) {
 		{"an operation that is not a name", `[{"id": "r", "match": {"operation": 7}, ` + deny + `}]`, "faults[0]: expected a string or a list of strings"},
 		{"no operation", `[{"id": "r", "match": {"operation": null}, ` + deny + `}]`, "faults[0] (r): match: operation is required"},
 		{"a bad rule ID", `[{"id": "Bad", "match": {"operation": "stat"}, ` + deny + `}]`, `faults[0]: id "Bad" must hold only`},
+		{"no rule ID", `[{"match": {"operation": "stat"}, ` + deny + `}]`, "faults[0]: id is required"},
 		{"an unknown user", `[{"id": "r", "match": {"operation": "stat", "user": "nobody"}, ` + deny + `}]`, `faults[0] (r): match: user "nobody" is not a configured user`},
 		{"a bad recipe", `[{"id": "ok", "match": {"operation": "stat"}, ` + deny + `}, {"id": "r", "fail_upload": {"path": "/a"}}]`, "faults[1] (r): fail_upload: after_bytes is required"},
 		{"a repeated rule ID", `[{"id": "r", "match": {"operation": "stat"}, ` + deny + `}, {"id": "r", "match": {"operation": "stat"}, ` + deny + `}]`, `faults: rule ID "r" is used twice`},

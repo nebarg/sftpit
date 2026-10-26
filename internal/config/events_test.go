@@ -14,7 +14,7 @@ import (
 func TestLoadReadsRulesForConnectionEvents(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+`  logins:
+	cfg, err := loadScenarios(t, dir, `  logins:
     faults:
       - id: slow-connect
         match: {operation: connect}
@@ -27,8 +27,7 @@ func TestLoadReadsRulesForConnectionEvents(t *testing.T) {
         match: {operation: [connect, authenticate]}
         trigger: {window: {from: 10s, until: 15s}, anchor: run}
         action: {type: freeze_connection, max_freeze: 5s}
-`, 0o600)
-	cfg, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+`, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -67,6 +66,8 @@ func TestLoadRejectsInvalidRulesForConnectionEvents(t *testing.T) {
 		{"a failure", "match: {operation: authenticate}\n        action: {type: fail, status: permission_denied}", "action: connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not a fail"},
 		{"an end of session", "match: {operation: [connect]}\n        action: {type: close_subsystem}", "not a close_subsystem"},
 		{"a stall", "match: {operation: authenticate}\n        action: {type: stall, max_stall: 1s}", "not a stall"},
+		{"no action", "match: {operation: connect}", "action: type is required: one of close_connection, "},
+		{"an unknown action", "match: {operation: authenticate}\n        action: {type: explode}", `action: type "explode" is not one of close_connection, `},
 		{"file operations", "match: {operation: [authenticate, stat]}\n        action: {type: close_connection}", "connect and authenticate cannot share a rule with file operations"},
 		{"a path", "match: {operation: authenticate, path_prefix: /incoming}\n        action: {type: close_connection}", "connect and authenticate have no path"},
 		{"a user at connect", "match: {operation: connect, user: test}\n        action: {type: close_connection}", "connect comes before the client logs in, so it has no user or key"},
@@ -74,8 +75,7 @@ func TestLoadRejectsInvalidRulesForConnectionEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+"  s:\n    faults:\n      - id: r\n        "+tt.rule+"\n", 0o600)
-			_, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+			_, err := loadScenarios(t, dir, oneRule(tt.rule), "")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

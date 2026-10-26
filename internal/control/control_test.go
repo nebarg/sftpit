@@ -1,7 +1,6 @@
 package control_test
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,8 +13,6 @@ import (
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 )
-
-const host = "127.0.0.1:8122"
 
 func TestHealthReadinessAndStatus(t *testing.T) {
 	m, api := start(t, runs.Options{Scenario: "chaos", Seed: new(faults.Seed(18446744073709551615))})
@@ -104,6 +101,10 @@ func TestResetRefusesABadRequest(t *testing.T) {
 		{`{"faults": [], "chaos": {"preset": "light", "scope": {"user": "nobody"}}}`, http.StatusBadRequest, `chaos: scope: user "nobody" is not a configured user`},
 		{`{"faults": [{"id": "r"}], "chaos": {"preset": "light"}}`, http.StatusBadRequest, "faults[0] (r): match: operation is required"},
 		{`{} {}`, http.StatusBadRequest, "a single JSON object"},
+		{`{}}`, http.StatusBadRequest, "a single JSON object"},
+		{`{} ]`, http.StatusBadRequest, "a single JSON object"},
+		{`{"run": "` + strings.Repeat("x", 70<<10) + `"}`, http.StatusRequestEntityTooLarge, "request body too large"},
+		{`{}` + strings.Repeat(" ", 70<<10), http.StatusRequestEntityTooLarge, "request body too large"},
 		{`[]`, http.StatusBadRequest, "invalid request body"},
 	}
 	for _, tt := range tests {
@@ -209,30 +210,20 @@ func TestTheAPIRefusesRequestsFromElsewhere(t *testing.T) {
 	}
 }
 
-// call makes a request to api as the command line would, and returns the
-// status code and decoded body.
-func call(t *testing.T, api http.Handler, method, path, body string) (int, map[string]any) {
-	t.Helper()
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.Host = host
-	if method != "GET" {
-		req.Header.Set(control.RequestHeader, "1")
+func TestResetStartsAnInlineScenario(t *testing.T) {
+	m, api := start(t, runs.Options{Scenario: "chaos"})
+	code, body := call(t, api, "POST", "/api/v1/reset", `{"faults": [`+denyStats+`], "seed": "7"}`)
+	run, _ := body["run"].(map[string]any)
+	if want := map[string]any{"id": m.Status().Run.ID, "inline": true, "seed": "7", "seed_pinned": true, "revision": 1}; code != http.StatusOK || !equalJSON(run, want) {
+		t.Errorf("an inline reset = %d %v, want the run %v", code, body, want)
 	}
-	rec := httptest.NewRecorder()
-	api.ServeHTTP(rec, req)
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("%s %s has Content-Type %q", method, path, ct)
+	_, rules := call(t, api, "GET", "/api/v1/runs/"+m.Status().Run.ID+"/rules", "")
+	if faults, _ := rules["faults"].([]any); len(faults) != 1 || faults[0].(map[string]any)["id"] != "deny-stats" {
+		t.Errorf("the inline run's rules are %v, want deny-stats", rules)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
-		t.Fatalf("%s %s = %d %q: %v", method, path, rec.Code, rec.Body, err)
+	// A null faults is no inline scenario, so the reset repeats the run.
+	code, body = call(t, api, "POST", "/api/v1/reset", `{"faults": null}`)
+	if run, _ := body["run"].(map[string]any); code != http.StatusOK || run["inline"] != true || run["seed"] != "7" {
+		t.Errorf("a reset with null faults = %d %v, want the inline scenario repeated", code, body)
 	}
-	return rec.Code, decoded
-}
-
-// equalJSON reports whether two decoded JSON values are equal.
-func equalJSON(a, b any) bool {
-	x, errX := json.Marshal(a)
-	y, errY := json.Marshal(b)
-	return errX == nil && errY == nil && string(x) == string(y)
 }

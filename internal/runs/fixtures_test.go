@@ -269,3 +269,76 @@ func writeTestFile(t *testing.T, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestSnapshotSeedRefusesASeedThatOverlapsTheWorkspace checks seeds that
+// hold the workspace, which a snapshot would copy into itself, and seeds
+// within its fixtures, which replacing the snapshot would delete.
+func TestSnapshotSeedRefusesASeedThatOverlapsTheWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	w, err := OpenWorkspace(filepath.Join(parent, "workspace"))
+	if err != nil {
+		t.Fatalf("OpenWorkspace: %v", err)
+	}
+	t.Cleanup(func() { w.Close() })
+	seed := t.TempDir()
+	makeSeed(t, seed, map[string]string{"orders.csv": "id,total\n"})
+	s, err := w.snapshotSeed(seed)
+	if err != nil {
+		t.Fatalf("snapshotSeed: %v", err)
+	}
+
+	for _, src := range []string{parent, w.Dir(), filepath.Join(w.Dir(), "fixtures"), filepath.Join(w.Dir(), "fixtures", "seed")} {
+		if _, err := w.snapshotSeed(src); !errors.Is(err, ErrSeedOverlapsWorkspace) {
+			t.Errorf("snapshotSeed(%s) = %v, want ErrSeedOverlapsWorkspace", src, err)
+		}
+	}
+	if err := s.check(); err != nil {
+		t.Errorf("the refused seeds changed the snapshot: %v", err)
+	}
+}
+
+func TestWithinComparesDirectoriesRatherThanSpellings(t *testing.T) {
+	parent := t.TempDir()
+	seed := filepath.Join(parent, "seed")
+	inside := filepath.Join(seed, "ws")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(parent, "other"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(inside, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(parent)
+
+	type check struct {
+		name, dir string
+		want      bool
+	}
+	tests := []check{
+		{inside, seed, true},
+		{seed, seed, true},
+		{filepath.Join("seed", "ws"), seed, true},
+		{inside, "seed", true},
+		{link, seed, true},
+		{parent, seed, false},
+		{filepath.Join(parent, "other"), seed, false},
+		{"other", "seed", false},
+	}
+	// Only a case-insensitive volume, as macOS's is by default, has SEED.
+	if upper := filepath.Join(parent, "SEED"); fileExists(upper) {
+		tests = append(tests, check{inside, upper, true}, check{filepath.Join(upper, "ws"), seed, true})
+	}
+	for _, tt := range tests {
+		if got := within(tt.name, tt.dir); got != tt.want {
+			t.Errorf("within(%s, %s) = %v, want %v", tt.name, tt.dir, got, tt.want)
+		}
+	}
+}
+
+func fileExists(name string) bool {
+	_, err := os.Stat(name)
+	return err == nil
+}

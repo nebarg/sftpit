@@ -54,36 +54,26 @@ func sftpServer(t *testing.T) string {
 	return ""
 }
 
-// target is one of the servers being compared, serving the files in dir.
+// target is one of the servers being compared, serving the files in dir,
+// whose symlinks are resolved, as servers report paths in it.
 type target struct {
 	name string
 	dir  string
 	open func() io.ReadWriteCloser
 }
 
-// sftpitTarget serves from the embedded backend, through the proxy as
-// sftpit serve does when proxied is true.
-func sftpitTarget(t *testing.T, proxied bool) *target {
+// sftpitTarget serves from the embedded backend.
+func sftpitTarget(t *testing.T) *target {
 	t.Helper()
-	dir := t.TempDir()
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { root.Close() })
-	limits := backend.Limits{
-		MaxFileBytes:  config.DefaultMaxFileBytes,
-		MaxTotalBytes: config.DefaultMaxTotalBytes,
-		MaxFiles:      config.DefaultMaxFiles,
-		MaxOpenFiles:  config.DefaultMaxOpenFiles,
-	}
-	e, err := backend.New(root, backend.Options{Limits: limits})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !proxied {
-		return &target{name: "sftpit", dir: dir, open: func() io.ReadWriteCloser { return e.Open("/") }}
-	}
+	dir, e := newBackend(t)
+	return &target{name: "sftpit", dir: dir, open: func() io.ReadWriteCloser { return e.Open("/") }}
+}
+
+// proxiedTarget serves from the embedded backend through the proxy, as
+// sftpit serve does.
+func proxiedTarget(t *testing.T) *target {
+	t.Helper()
+	dir, e := newBackend(t)
 	return &target{name: "sftpit through the proxy", dir: dir, open: func() io.ReadWriteCloser {
 		client, proxy := net.Pipe()
 		c := &proxiedConn{Conn: client, served: make(chan error, 1)}
@@ -92,6 +82,33 @@ func sftpitTarget(t *testing.T, proxied bool) *target {
 		}()
 		return c
 	}}
+}
+
+// newBackend returns an embedded backend with sftpit serve's default limits,
+// and the new directory it serves.
+func newBackend(t *testing.T) (string, *backend.Embedded) {
+	t.Helper()
+	dir := realTempDir(t)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	e, err := backend.New(root, backend.Options{Limits: config.DefaultLimits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, e
+}
+
+// realTempDir returns a new temporary directory with its symlinks resolved.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // proxiedConn is a client's end of a session through the proxy. Closing it
@@ -110,7 +127,7 @@ func (c *proxiedConn) Close() error {
 // scripts use only paths relative to it.
 func openSSHTarget(t *testing.T, server string) *target {
 	t.Helper()
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	return &target{name: "OpenSSH", dir: dir, open: func() io.ReadWriteCloser {
 		cmd := exec.Command(server)
 		cmd.Dir = dir
@@ -251,14 +268,10 @@ func (s *session) describe(request, reply sftpwire.Packet) outcome {
 // relative turns a path under the target's directory, as sftp-server's
 // REALPATH gives it, into the absolute path sftpit gives.
 func (s *session) relative(name string) string {
-	dir, err := filepath.EvalSymlinks(s.target.dir)
-	if err != nil {
-		s.t.Fatal(err)
-	}
-	if name == dir {
+	if name == s.target.dir {
 		return "/"
 	}
-	if rest, ok := strings.CutPrefix(name, dir+"/"); ok {
+	if rest, ok := strings.CutPrefix(name, s.target.dir+"/"); ok {
 		return "/" + rest
 	}
 	return name

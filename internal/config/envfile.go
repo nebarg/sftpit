@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"runtime"
 )
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -29,10 +28,8 @@ func readEnvFile(name string, wanted map[string]bool) (map[string]envValue, stri
 	defer clear(data)
 
 	var warning string
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(name); err == nil && info.Mode().Perm()&0o044 != 0 {
-			warning = fmt.Sprintf("env file %s is readable by other users (mode %v)", name, info.Mode().Perm())
-		}
+	if info, err := os.Stat(name); err == nil && info.Mode().Perm()&0o044 != 0 {
+		warning = fmt.Sprintf("env file %s is readable by other users (mode %v)", name, info.Mode().Perm())
 	}
 	values, err := parseEnv(data, wanted)
 	if err != nil {

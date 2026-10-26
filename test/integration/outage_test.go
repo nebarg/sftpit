@@ -2,7 +2,6 @@ package integration
 
 import (
 	"maps"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +15,7 @@ import (
 // at a login, after a request and at a moment of the run. A reconnect during
 // the outage is refused, and one after it succeeds.
 func TestOpenSSHOutages(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	const outage = 1500 * time.Millisecond
@@ -30,6 +30,8 @@ func TestOpenSSHOutages(t *testing.T) {
 		output string
 		// stored is the file the first connection leaves, if any.
 		stored string
+		// slow slows each write, so that the upload outlasts the moment.
+		slow bool
 	}{
 		{
 			name:   "at the first login",
@@ -42,24 +44,25 @@ func TestOpenSSHOutages(t *testing.T) {
 			rule:   faults.Rule{ID: "outage", Match: faults.Match{Operations: []faults.Operation{faults.Rename}}, Action: afterRename},
 			batch:  "put orders.csv orders.csv.part\nrename orders.csv.part orders.csv\n",
 			output: "Connection to 127.0.0.1 closed by remote host.",
-			stored: "orders.csv",
+			stored: "/orders.csv",
 		},
 		{
 			name:   "at a moment of the run",
 			rule:   faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: &faults.Range[time.Duration]{Min: 500 * time.Millisecond, Max: 500 * time.Millisecond}}, Action: down},
 			batch:  "put orders.csv\n",
 			output: "Connection to 127.0.0.1 closed by remote host.",
+			slow:   true,
 		},
 	}
 	data := randomBytes(2 << 20)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{slow, tt.rule}, nil, 0, logs.logger())
-			if err != nil {
-				t.Fatalf("faults.New: %v", err)
+			var logs capturedLog
+			rules := []faults.Rule{tt.rule}
+			if tt.slow {
+				rules = append(rules, slow)
 			}
-			srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+			srv := startScenario(t, rules, 0, logs.logger())
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
@@ -78,11 +81,9 @@ func TestOpenSSHOutages(t *testing.T) {
 			srv.waitForSessions()
 
 			if tt.stored != "" {
-				if stored, err := os.ReadFile(filepath.Join(srv.files, tt.stored)); err != nil || string(stored) != string(data) {
-					t.Errorf("%s holds %d bytes (%v), want the whole upload", tt.stored, len(stored), err)
-				}
+				assertHolds(t, srv, tt.stored, data)
 			}
-			if got := rules.Counts()["outage"].Fired; got != 1 {
+			if got := srv.counts(t, "outage").Fired; got != 1 {
 				t.Errorf("the outage fired %d times, want once", got)
 			}
 			if !strings.Contains(logs.text(), "fault=listener_down") || !strings.Contains(logs.text(), "duration=1.5s close_existing=true") {
@@ -98,30 +99,27 @@ func TestOpenSSHOutages(t *testing.T) {
 // outage and nothing is published: an uploader needs to back off for longer
 // than the outages it should ride out.
 func TestLaravelGivesUpDuringAnOutage(t *testing.T) {
+	t.Parallel()
 	php := phpseclibOrSkip(t)
 
-	var logs snapshotLog
-	rules, err := faults.New([]faults.Rule{{
+	var logs capturedLog
+	srv := startScenario(t, []faults.Rule{{
 		ID:          "outage",
 		MaxTriggers: 1,
 		Match:       faults.Match{Operations: []faults.Operation{faults.Authenticate}},
 		Action:      sftpproxy.ListenerDown{Duration: 2 * time.Second, CloseExisting: true},
-	}}, nil, 0, logs.logger())
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	}}, 0, logs.logger())
 	work := t.TempDir()
 	writeFile(t, filepath.Join(work, "orders.csv"), randomBytes(1<<20))
 
-	outcomes := results(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": false, "upload 2": false, "upload 3": false}; !maps.Equal(outcomes, want) {
 		t.Errorf("publish.php gave %v, want every upload to fail during the outage", outcomes)
 	}
 	assertHolds(t, srv, publishedPath, nil)
-	if got, want := rules.Counts()["outage"], (faults.Counts{Matched: 1, Selected: 1, Fired: 1}); got != want {
+	if got, want := srv.counts(t, "outage"), (faults.Counts{Matched: 1, Selected: 1, Fired: 1}); got != want {
 		t.Errorf("counts = %+v, want only the first login to reach the server", got)
 	}
 }

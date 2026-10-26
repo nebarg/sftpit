@@ -2,6 +2,7 @@ package integration
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ df
 // they leave the bytes below each limit in place, and that df reports the
 // limits.
 func TestOpenSSHStopsAtStorageLimits(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 	limits := backend.Limits{MaxFileBytes: 1 << 20, MaxTotalBytes: 3 << 19, MaxFiles: 2, MaxOpenFiles: 256}
 	big := randomBytes(1<<20 + 1)
@@ -36,7 +38,7 @@ func TestOpenSSHStopsAtStorageLimits(t *testing.T) {
 	transcripts := make(map[route][]line)
 	trees := make(map[route][]treeEntry)
 	for _, via := range routes {
-		srv := startLimitedServer(t, via, nil, sftpproxy.Options{}, limits)
+		srv := startLimitedServer(t, via, sftpproxy.Options{}, limits)
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "big.bin"), big)
 		writeFile(t, filepath.Join(work, "part.bin"), part)
@@ -75,7 +77,7 @@ func TestOpenSSHStopsAtStorageLimits(t *testing.T) {
 			used = append(used, fields[1])
 		}
 	}
-	if want := []string{"0", "1536", "1280"}; strings.Join(used, " ") != strings.Join(want, " ") {
+	if want := []string{"0", "1536", "1280"}; !slices.Equal(used, want) {
 		t.Errorf("df shows %v KiB used, want %v:\n%s", used, want, out)
 	}
 }

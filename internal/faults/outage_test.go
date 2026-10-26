@@ -30,7 +30,7 @@ func TestAListenerDownAtAMomentOfTheRunIsTimedOnceForTheRun(t *testing.T) {
 		if !timers[0].Reserve() {
 			t.Error("Reserve declined the outage")
 		}
-		if got := e.Counts()["outage"]; got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
+		if got := e.Rules().Counts["outage"]; got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
 			t.Errorf("counts = %+v, want the run's outage selected and fired once", got)
 		}
 	})

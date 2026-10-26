@@ -51,8 +51,8 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 		t.Fatalf("Reset: %v", err)
 	}
 	receive(t, ended)
-	if next.ID == first.ID || m.Status().Run != *next {
-		t.Errorf("Reset started run %+v after %+v, and the status has %+v", next, first, m.Status().Run)
+	if next.Run.ID == first.ID || m.Status().Run != next.Run {
+		t.Errorf("Reset started run %+v after %+v, and the status has %+v", next.Run, first, m.Status().Run)
 	}
 	if b, err := os.ReadFile(filepath.Join(first.Files, "outgoing", "uploaded.csv")); err != nil || string(b) != "uploaded" {
 		t.Errorf("the first run's upload holds %q (%v), want it kept", b, err)
@@ -101,7 +101,7 @@ func TestResetChoosesTheNextRunsScenarioAndSeed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Reset: %v", err)
 			}
-			got := next.Scenario
+			got := next.Run.Scenario
 			if tt.fresh {
 				if got.Seed == first.Scenario.Seed {
 					t.Errorf("the next run has seed %d again, want a fresh one", got.Seed)
@@ -261,8 +261,7 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 					io.Copy(io.Discard, f)
 				}
 			}()
-			for msg := receive(t, injected); msg != "injected fault"; msg = receive(t, injected) {
-			}
+			awaitLog(t, injected, "injected fault")
 
 			start := time.Now()
 			if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
@@ -280,8 +279,11 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 				t.Fatalf("the upload left no file: %v", err)
 			}
 			time.Sleep(200 * time.Millisecond)
-			if after, err := os.Stat(uploaded); err != nil || after.Size() != before.Size() {
-				t.Errorf("the upload grew from %d to %d bytes (%v) after the reset", before.Size(), after.Size(), err)
+			switch after, err := os.Stat(uploaded); {
+			case err != nil:
+				t.Errorf("the upload's file after the reset: %v", err)
+			case after.Size() != before.Size():
+				t.Errorf("the upload grew from %d to %d bytes after the reset", before.Size(), after.Size())
 			}
 		})
 	}
@@ -362,7 +364,7 @@ func TestCloseStopsTheRunsTimers(t *testing.T) {
 			t.Fatalf("Close: %v", err)
 		}
 		time.Sleep(time.Hour)
-		if fired := m.current.rules.Counts()["outage"].Fired; fired != 0 {
+		if fired := m.current.rules.Rules().Counts["outage"].Fired; fired != 0 {
 			t.Errorf("the run's timer fired %d times after Close", fired)
 		}
 	})
@@ -426,4 +428,74 @@ func download(t *testing.T, c *sftp.Client, name string) string {
 		t.Fatalf("Read %s: %v", name, err)
 	}
 	return string(b)
+}
+
+// TestAResetUnderwayWhenTheManagerClosesStartsNoRun checks that a reset
+// still waiting for a session when the Manager closes fails, rather than
+// starting a run that nothing would serve.
+func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
+	m, addr := startManager(t, Options{})
+	release := make(chan struct{})
+	free := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(free)
+	started := make(chan struct{}, 1)
+	m.mu.Lock()
+	m.current.handler = func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+	m.mu.Unlock()
+	client := dialSSH(t, addr)
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer session.Close()
+	if err := session.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("RequestSubsystem(sftp): %v", err)
+	}
+	receive(t, started)
+
+	reset := make(chan error, 1)
+	go func() {
+		_, err := m.Reset(t.Context(), ResetRequest{})
+		reset <- err
+	}()
+	awaitState(t, m, StateResetting)
+	closed := make(chan error, 1)
+	go func() { closed <- m.Close() }()
+	// The server closes its listener once it is closed, while the reset
+	// still waits for the session.
+	awaitRefused(t, addr)
+	free()
+
+	if err := receive(t, reset); !errors.Is(err, sshfront.ErrServerClosed) {
+		t.Errorf("Reset = %v, want ErrServerClosed", err)
+	}
+	if err := receive(t, closed); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if runs, err := os.ReadDir(filepath.Join(m.workspace.Dir(), runsDir)); err != nil || len(runs) != 1 {
+		t.Errorf("the workspace holds runs %v (%v), want only the first", runs, err)
+	}
+	if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil, nil); !errors.Is(err, sshfront.ErrServerClosed) {
+		t.Errorf("ChangeRules after Close = %v, want ErrServerClosed", err)
+	}
+}
+
+// TestAResetReturnsWithTheNextRunsStartingOutageUnderWay checks that an
+// outage at the start of the next run, which begins while the reset holds
+// admission closed, has begun by the time Reset returns.
+func TestAResetReturnsWithTheNextRunsStartingOutageUnderWay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(0)}}}, Scenario: "outage"})
+		status, err := m.Reset(t.Context(), ResetRequest{})
+		if err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		if status.State != StateDown || !status.DownUntil.Equal(time.Now().Add(time.Minute)) {
+			t.Errorf("Reset answered %+v, want the next run down from its start", status)
+		}
+	})
 }

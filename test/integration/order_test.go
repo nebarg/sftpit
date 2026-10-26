@@ -27,25 +27,29 @@ const (
 // that the replies to later requests on the same file overtake it. Each
 // client must still transfer the file intact.
 func TestClientsTolerateOutOfOrderReplies(t *testing.T) {
+	t.Parallel()
 	data := randomBytes(4<<20 + 321)
 	clients := []struct {
 		name string
 		// transfer uploads work/orders.csv to /orders.csv, or downloads
 		// /orders.csv to work/orders.csv.
-		transfer func(t *testing.T, srv *server, work string, upload bool)
+		transfer func(t testing.TB, srv *server, work string, upload bool)
 	}{
 		{name: "OpenSSH", transfer: transferWithOpenSSH},
 		{name: "phpseclib", transfer: transferWithPhpseclib},
 	}
 
 	for _, c := range clients {
-		for _, upload := range []bool{true, false} {
-			name := c.name + map[bool]string{true: "/upload", false: "/download"}[upload]
-			t.Run(name, func(t *testing.T) {
+		for _, d := range []struct {
+			name   string
+			upload bool
+		}{{"upload", true}, {"download", false}} {
+			upload := d.upload
+			t.Run(c.name+"/"+d.name, func(t *testing.T) {
 				hold := &firstReplyHold{write: upload}
 				srv := startServer(t, proxied, sftpproxy.Options{Faults: hold.faults, ReplyOrder: sftpproxy.CompletionOrder})
 				work := t.TempDir()
-				source, result := filepath.Join(srv.files, "orders.csv"), filepath.Join(work, "orders.csv")
+				source, result := srv.path("/orders.csv"), filepath.Join(work, "orders.csv")
 				if upload {
 					source, result = result, source
 				}
@@ -63,31 +67,6 @@ func TestClientsTolerateOutOfOrderReplies(t *testing.T) {
 				t.Logf("%d replies overtook the held one", n)
 			})
 		}
-	}
-}
-
-func transferWithOpenSSH(t *testing.T, srv *server, work string, upload bool) {
-	t.Helper()
-	sftpPath := openSSHOrSkip(t)
-	batch := "get /orders.csv orders.csv\n"
-	if upload {
-		batch = "put orders.csv /orders.csv\n"
-	}
-	if out, err := openSSH(t, sftpPath, srv, work, batch); err != nil {
-		t.Fatalf("sftp failed: %v\n%s", err, out)
-	}
-}
-
-func transferWithPhpseclib(t *testing.T, srv *server, work string, upload bool) {
-	t.Helper()
-	php := phpseclibOrSkip(t)
-	op := "get"
-	if upload {
-		op = "put"
-	}
-	transcript := runPhpseclib(t, php, srv, "transfer.php", work, op)
-	if results(t, transcript)[op] != true {
-		t.Fatalf("phpseclib %s failed: %v", op, transcript)
 	}
 }
 

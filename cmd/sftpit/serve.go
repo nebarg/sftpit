@@ -7,13 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -65,7 +65,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
 	flags.StringVar(&opts.Scenario, "scenario", "", "")
 	flags.Func("seed", "", func(s string) error {
-		seed, err := parseSeed(s)
+		seed, err := faults.ParseSeed(s)
 		if err != nil {
 			return err
 		}
@@ -112,7 +112,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := runServer(ctx, cfg, readyPath, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n", err)
 		if errors.Is(err, backend.ErrUnsupportedFile) || errors.Is(err, backend.ErrLimit) ||
-			errors.Is(err, errSeedHoldsWorkspace) || errors.Is(err, runs.ErrNotWorkspace) {
+			errors.Is(err, runs.ErrSeedOverlapsWorkspace) || errors.Is(err, runs.ErrNotWorkspace) {
 			return exitUsage
 		}
 		return exitFailure
@@ -120,49 +120,14 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-var errSeedHoldsWorkspace = errors.New("the seed directory contains the workspace, so it would be copied into itself")
-
 // runServer serves SFTP from runs in the configured workspace, or in a
 // temporary one, and the control API, until ctx is cancelled, then shuts
 // down and deletes a temporary workspace. If readyPath is set, it writes
-// the ready file there once it listens, and removes it as it shuts down.
+// the ready file there once it serves, and removes it as it shuts down.
 func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout, stderr io.Writer) (err error) {
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
-	workspace, err := openWorkspace(cfg.DataDir)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := workspace.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
-	if cfg.SeedDir != "" && within(workspace.Dir(), cfg.SeedDir) {
-		return errSeedHoldsWorkspace
-	}
-	hostKeys, err := sshfront.LoadOrCreateHostKeys(cmp.Or(cfg.HostKeyDir, workspace.IdentityDir()))
-	if err != nil {
-		return err
-	}
-
-	manager, err := runs.Start(workspace, runs.Options{
-		Server:    sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
-		SeedDir:   cfg.SeedDir,
-		Limits:    cfg.Limits,
-		Scenarios: cfg.Scenarios,
-		Scenario:  cfg.Scenario,
-		Seed:      cfg.Seed,
-		Logger:    logger,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := manager.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
+	// Listening first makes a busy port fail before the workspace changes.
 	sftpLn, err := listenLoopback("sftp_listen", cfg.SFTPListen)
 	if err != nil {
 		return err
@@ -172,20 +137,42 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 		sftpLn.Close()
 		return err
 	}
-	// Clients that connect once the file exists wait in the listeners'
-	// backlogs until the servers accept them.
-	if readyPath != "" {
-		ready := newReadyFile(sftpLn.Addr().String(), httpLn.Addr().String(), workspace.Dir(), hostKeys)
-		if err := writeReadyFile(readyPath, ready); err != nil {
+	serving := false
+	defer func() {
+		if !serving {
 			sftpLn.Close()
 			httpLn.Close()
-			return err
 		}
+	}()
+
+	workspace, err := openWorkspace(cfg.DataDir)
+	if err != nil {
+		return err
 	}
+	defer func() { err = errors.Join(err, workspace.Close()) }()
+	hostKeys, err := sshfront.LoadOrCreateHostKeys(cmp.Or(cfg.HostKeyDir, workspace.IdentityDir()))
+	if err != nil {
+		return err
+	}
+	manager, err := runs.Start(workspace, runs.Options{
+		Server:     sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
+		SeedDir:    cfg.SeedDir,
+		Limits:     cfg.Limits,
+		ReplyOrder: cfg.ReplyOrder,
+		Scenarios:  cfg.Scenarios,
+		Scenario:   cfg.Scenario,
+		Seed:       cfg.Seed,
+		Logger:     logger,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, manager.Close()) }()
 
 	srv := manager.Server()
+	sftp := &announcedListener{Listener: sftpLn, taken: make(chan struct{})}
 	sftpServed := make(chan error, 1)
-	go func() { sftpServed <- srv.Serve(sftpLn) }()
+	go func() { sftpServed <- srv.Serve(sftp) }()
 	api := &http.Server{
 		Handler:           control.Handler(manager),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -193,20 +180,30 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 	}
 	apiServed := make(chan error, 1)
 	go func() { apiServed <- api.Serve(httpLn) }()
+	serving = true
 
-	printBanner(stdout, sftpLn.Addr().String(), httpLn.Addr().String(), workspace, manager.Status().Run, hostKeys, cfg)
-
-	select {
-	case <-ctx.Done():
-		fmt.Fprintln(stdout, "Stopping.")
-	case err = <-sftpServed:
-		sftpServed = nil
-	case err = <-apiServed:
-		apiServed = nil
-	}
+	// Announcing only once Serve has the listener means a client that then
+	// connects is served, or refused if the run starts with an outage.
+	<-sftp.taken
 	if readyPath != "" {
-		if removeErr := os.Remove(readyPath); removeErr != nil {
-			err = errors.Join(err, fmt.Errorf("remove ready file: %w", removeErr))
+		ready := newReadyFile(sftpLn.Addr().String(), httpLn.Addr().String(), workspace.Dir(), hostKeys)
+		err = writeReadyFile(readyPath, ready)
+	}
+	if err == nil {
+		printBanner(stdout, sftpLn.Addr().String(), httpLn.Addr().String(), workspace, manager.Status().Run, hostKeys, cfg)
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(stdout, "Stopping.")
+		case err = <-sftpServed:
+			sftpServed = nil
+		case err = <-apiServed:
+			apiServed = nil
+		}
+		if readyPath != "" {
+			// A harness may have removed the file, or its directory, first.
+			if removeErr := os.Remove(readyPath); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove ready file: %w", removeErr))
+			}
 		}
 	}
 	err = errors.Join(err, api.Close(), srv.Close())
@@ -219,13 +216,23 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 	return err
 }
 
-// parseSeed parses a seed given on the command line.
-func parseSeed(s string) (faults.Seed, error) {
-	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil {
-		return 0, errors.New("a seed is a whole number from 0 to 18446744073709551615")
-	}
-	return faults.Seed(n), nil
+// announcedListener closes taken once Serve has taken it: at its first
+// Accept, once the server tracks it, so that an outage closes it, or when
+// the server closes it, as it does at once if the run starts with an outage.
+type announcedListener struct {
+	net.Listener
+	once  sync.Once
+	taken chan struct{}
+}
+
+func (l *announcedListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.taken) })
+	return l.Listener.Accept()
+}
+
+func (l *announcedListener) Close() error {
+	l.once.Do(func() { close(l.taken) })
+	return l.Listener.Close()
 }
 
 func openWorkspace(dataDir string) (*runs.Workspace, error) {
@@ -235,27 +242,12 @@ func openWorkspace(dataDir string) (*runs.Workspace, error) {
 	return runs.OpenWorkspace(dataDir)
 }
 
-// within reports whether name is dir or lies under it, once symlinks in
-// both are resolved.
-func within(name, dir string) bool {
-	name, err := filepath.EvalSymlinks(name)
-	if err != nil {
-		return false
-	}
-	dir, err = filepath.EvalSymlinks(dir)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(dir, name)
-	return err == nil && filepath.IsLocal(rel)
-}
-
 // listenLoopback listens on addr, the value of setting, and refuses an
 // address that turns out not to be loopback, as a host name could.
 func listenLoopback(setting, addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", setting, err)
 	}
 	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
 		ln.Close()
@@ -274,11 +266,7 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 	}
 	fmt.Fprintf(w, "  run: %s\n", run.ID)
 	if s := run.Scenario; s.Name != "" {
-		rules := "rules"
-		if len(cfg.Rules()) == 1 {
-			rules = "rule"
-		}
-		fmt.Fprintf(w, "  scenario: %s (%d fault %s)\n", s.Name, len(cfg.Rules()), rules)
+		fmt.Fprintf(w, "  scenario: %s (%s)\n", s.Name, count(len(cfg.Rules()), "fault rule"))
 		if c := cfg.Scenarios[s.Name].Chaos; c != nil {
 			paused := ""
 			if c.Paused {

@@ -189,7 +189,7 @@ func TestPausedChaosMatchesNothingAndKeepsItsCounts(t *testing.T) {
 		if got := decide(on(&sftpwire.LStat{}, "/g")); got != denied {
 			t.Errorf("step %d: an lstat got %#v, want the scenario's own rule whatever chaos does", i+1, got)
 		}
-		counts := e.Counts()
+		counts := e.Rules().Counts
 		if got := counts["chaos-delay"].Matched; got != step.matched || counts["chaos-fail"].Matched != got {
 			t.Errorf("step %d: chaos matched %+v, want %d stats", i+1, counts, step.matched)
 		}

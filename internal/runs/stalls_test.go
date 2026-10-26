@@ -66,8 +66,7 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 				t.Fatalf("Dial: %v", err)
 			}
 			defer raw.Close()
-			for msg := ""; msg != "injected fault"; msg = receive(t, logs) {
-			}
+			awaitLog(t, logs, "injected fault")
 			if err := m.ReleaseStalls(m.Status().Run.ID); err != nil {
 				t.Fatalf("ReleaseStalls: %v", err)
 			}
@@ -86,8 +85,7 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 				t.Errorf("read %q (%v), want the delay to go on", line, err)
 			}
 			if tt.closed {
-				for msg := ""; msg != "fault released"; msg = receive(t, logs) {
-				}
+				awaitLog(t, logs, "fault released")
 			}
 		})
 	}
@@ -97,14 +95,14 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 	var logs syncBuffer
 	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"chaos": {}}, Scenario: "chaos", Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	inline := &InlineScenario{Rules: []faults.Rule{denyStats}}
-	run, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: new(faults.Seed(7))})
+	status, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: new(faults.Seed(7))})
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	if want := (Scenario{Inline: true, Seed: 7, Pinned: true}); run.Scenario != want {
-		t.Errorf("the run's scenario is %+v, want %+v", run.Scenario, want)
+	if want := (Scenario{Inline: true, Seed: 7, Pinned: true}); status.Run.Scenario != want {
+		t.Errorf("the run's scenario is %+v, want %+v", status.Run.Scenario, want)
 	}
-	if want := "msg=reset run=" + run.ID + " inline=true seed=7 seed_pinned=true"; !strings.Contains(logs.String(), want) {
+	if want := "msg=reset run=" + status.Run.ID + " inline=true seed=7 seed_pinned=true"; !strings.Contains(logs.String(), want) {
 		t.Errorf("logs lack %s:\n%s", want, logs.String())
 	}
 	c, _ := dialSFTP(t, addr)
@@ -114,20 +112,20 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 
 	// A bare reset repeats the inline scenario, with its pinned seed, and
 	// not the rules the run had come to.
-	if _, err := m.ChangeRules(run.ID, 1, nil, nil); err != nil {
+	if _, err := m.ChangeRules(status.Run.ID, 1, nil, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
-	run, err = m.Reset(t.Context(), ResetRequest{})
+	status, err = m.Reset(t.Context(), ResetRequest{})
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	set, err := m.Rules(run.ID)
-	if want := (Scenario{Inline: true, Seed: 7, Pinned: true}); err != nil || run.Scenario != want || len(set.Rules) != 1 || set.Rules[0].ID != "deny-stats" {
-		t.Errorf("after a bare reset, the run has %+v and rules %+v (%v), want the inline scenario again", run.Scenario, set, err)
+	set, err := m.Rules(status.Run.ID)
+	if want := (Scenario{Inline: true, Seed: 7, Pinned: true}); err != nil || status.Run.Scenario != want || len(set.Rules) != 1 || set.Rules[0].ID != "deny-stats" {
+		t.Errorf("after a bare reset, the run has %+v and rules %+v (%v), want the inline scenario again", status.Run.Scenario, set, err)
 	}
-	run, err = m.Reset(t.Context(), ResetRequest{Inline: inline})
-	if err != nil || !run.Scenario.Inline || run.Scenario.Pinned {
-		t.Errorf("an inline reset without a seed started %+v (%v), want a fresh seed", run, err)
+	status, err = m.Reset(t.Context(), ResetRequest{Inline: inline})
+	if err != nil || !status.Run.Scenario.Inline || status.Run.Scenario.Pinned {
+		t.Errorf("an inline reset without a seed started %+v (%v), want a fresh seed", status, err)
 	}
 
 	tests := []struct {

@@ -18,6 +18,7 @@ import (
 // upload's file once the reset has returned, and the next connection finds
 // only the seed's files.
 func TestOpenSSHAcrossAReset(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	seed := t.TempDir()
@@ -36,11 +37,12 @@ func TestOpenSSHAcrossAReset(t *testing.T) {
 		err error
 	}
 	uploaded := make(chan result, 1)
+	cmd := openSSHCommand(t, sftpPath, srv, work, "put big.bin\n")
 	go func() {
-		out, err := openSSH(t, sftpPath, srv, work, "put big.bin\n")
+		out, err := cmd.CombinedOutput()
 		uploaded <- result{out, err}
 	}()
-	upload := filepath.Join(srv.files, "big.bin")
+	upload := srv.path("/big.bin")
 	deadline := time.Now().Add(clientTimeout)
 	for info, err := os.Stat(upload); err != nil || info.Size() == 0; info, err = os.Stat(upload) {
 		if time.Now().After(deadline) {
@@ -61,8 +63,11 @@ func TestOpenSSHAcrossAReset(t *testing.T) {
 		t.Errorf("sftp across the reset = %v, want the connection closed:\n%s", r.err, r.out)
 	}
 	time.Sleep(200 * time.Millisecond)
-	if after, err := os.Stat(upload); err != nil || after.Size() != before.Size() || before.Size() >= 8<<20 {
-		t.Errorf("the upload's file had %d bytes at the reset and %d (%v) later, want it cut short and unchanged", before.Size(), after.Size(), err)
+	switch after, err := os.Stat(upload); {
+	case err != nil:
+		t.Errorf("the upload's file after the reset: %v", err)
+	case after.Size() != before.Size() || before.Size() >= 8<<20:
+		t.Errorf("the upload's file had %d bytes at the reset and %d later, want it cut short and unchanged", before.Size(), after.Size())
 	}
 
 	out, err := openSSH(t, sftpPath, srv, work, "ls -1\n")

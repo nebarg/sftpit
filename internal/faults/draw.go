@@ -11,9 +11,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"log/slog"
 	"math"
 	"math/bits"
+	"strconv"
 )
 
 // drawVersion is part of every key. A change to how draws are made changes
@@ -22,6 +24,16 @@ const drawVersion = 1
 
 // Seed fixes every random decision of a run.
 type Seed uint64
+
+// ParseSeed parses a seed written as a decimal number, as a command line or
+// the control API gives one.
+func ParseSeed(s string) (Seed, error) {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, errors.New("a seed is a whole number from 0 to 18446744073709551615")
+	}
+	return Seed(n), nil
+}
 
 // RandomSeed returns a seed from the operating system's random source, for a
 // run whose seed is not pinned. It fits in 32 bits, so that it is easy to

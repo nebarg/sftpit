@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"time"
@@ -53,9 +54,13 @@ type seedEntry struct {
 // with each file's size and SHA-256. Runs restore their files from the
 // snapshot, so later changes to src reach none of them. An entry that is
 // neither a directory nor a regular file is an error wrapping
-// backend.ErrUnsupportedFile. An empty src removes the snapshot and returns
-// nil.
+// backend.ErrUnsupportedFile, and a src that holds the workspace or lies
+// within its fixtures is refused with ErrSeedOverlapsWorkspace before
+// anything changes. An empty src removes the snapshot and returns nil.
 func (w *Workspace) snapshotSeed(src string) (*seedSnapshot, error) {
+	if src != "" && (within(w.dir, src) || within(src, filepath.Join(w.dir, filepath.FromSlash(path.Dir(seedDir))))) {
+		return nil, fmt.Errorf("runs: seed %s: %w", src, ErrSeedOverlapsWorkspace)
+	}
 	if err := removeAll(w.root, seedDir); err != nil {
 		return nil, fmt.Errorf("runs: remove the seed snapshot: %w", err)
 	}
@@ -254,4 +259,33 @@ func hashFile(root *os.Root, name string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// within reports whether the host path name is the directory dir or lies
+// under it. It compares directories rather than spellings, so a relative
+// path, a symlink or a difference in letter case on a case-insensitive
+// volume, as macOS's is by default, hides no overlap.
+func within(name, dir string) bool {
+	target, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	name, err = filepath.Abs(name)
+	if err != nil {
+		return false
+	}
+	name, err = filepath.EvalSymlinks(name)
+	if err != nil {
+		return false
+	}
+	for {
+		if info, err := os.Stat(name); err == nil && os.SameFile(info, target) {
+			return true
+		}
+		parent := filepath.Dir(name)
+		if parent == name {
+			return false
+		}
+		name = parent
+	}
 }

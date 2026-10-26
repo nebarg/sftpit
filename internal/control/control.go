@@ -28,8 +28,8 @@ import (
 	"github.com/nebarg/sftpit/internal/runs"
 )
 
-// RequestHeader must be set, to any value, on every request that changes
-// something.
+// RequestHeader must be set, to any non-empty value, on every request that
+// changes something.
 const RequestHeader = "Sftpit-Control"
 
 const (
@@ -79,8 +79,7 @@ func (a *api) status(w http.ResponseWriter, _ *http.Request) {
 
 func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 	var body ResetRequest
-	if err := decodeBody(w, r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	req := runs.ResetRequest{Run: body.Run, Scenario: body.Scenario, Seed: (*faults.Seed)(body.Seed)}
@@ -96,23 +95,29 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 	// part way would leave admission closed.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resetTimeout)
 	defer cancel()
-	_, err := a.runs.Reset(ctx, req)
-	switch {
-	case errors.Is(err, runs.ErrStaleRun):
-		writeError(w, http.StatusConflict, err)
-	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios):
-		writeError(w, http.StatusBadRequest, err)
-	case err != nil:
-		writeError(w, http.StatusInternalServerError, err)
-	default:
-		writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
+	status, err := a.runs.Reset(ctx, req)
+	if err != nil {
+		writeError(w, statusFor(err), err)
+		return
 	}
+	writeJSON(w, http.StatusOK, newStatus(status))
+}
+
+// statusFor returns the HTTP status that answers err from the runs.
+func statusFor(err error) int {
+	switch {
+	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
+		return http.StatusConflict
+	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios):
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 func (a *api) rules(w http.ResponseWriter, r *http.Request) {
 	set, err := a.runs.Rules(r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusConflict, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 	writeRules(w, set)
@@ -124,8 +129,7 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 		Faults   json.RawMessage `json:"faults"`
 		Chaos    json.RawMessage `json:"chaos"`
 	}
-	if err := decodeBody(w, r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	switch {
@@ -147,14 +151,11 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	set, err := a.runs.ChangeRules(r.PathValue("id"), *body.Revision, rules, chaos)
-	switch {
-	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
-		writeError(w, http.StatusConflict, err)
-	case err != nil:
-		writeError(w, http.StatusInternalServerError, err)
-	default:
-		writeRules(w, set)
+	if err != nil {
+		writeError(w, statusFor(err), err)
+		return
 	}
+	writeRules(w, set)
 }
 
 // inline returns the inline scenario of a reset that gives rules, chaos or
@@ -189,7 +190,7 @@ func given(raw json.RawMessage) bool {
 
 func (a *api) releaseStalls(w http.ResponseWriter, r *http.Request) {
 	if err := a.runs.ReleaseStalls(r.PathValue("id")); err != nil {
-		writeError(w, http.StatusConflict, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
@@ -214,7 +215,7 @@ func writeRules(w http.ResponseWriter, set faults.RuleSet) {
 	}
 	counts := make(map[string]ruleCounts, len(set.Counts))
 	for id, c := range set.Counts {
-		counts[id] = ruleCounts{Matched: c.Matched, Selected: c.Selected, Fired: c.Fired}
+		counts[id] = ruleCounts(c)
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Revision uint64                `json:"revision"`
@@ -243,7 +244,7 @@ type ResetRequest struct {
 	Seed     *Seed           `json:"seed,omitempty"`
 }
 
-// Status is the reply to a status request or a reset.
+// Status is the reply to a status request, a reset or a release of stalls.
 type Status struct {
 	SFTP    SFTPStatus `json:"sftp"`
 	Backend string     `json:"backend"`
@@ -253,7 +254,7 @@ type Status struct {
 // SFTPStatus says whether clients can reach the current run.
 type SFTPStatus struct {
 	State     runs.State `json:"state"`
-	DownUntil *time.Time `json:"down_until,omitempty"`
+	DownUntil time.Time  `json:"down_until,omitzero"`
 	Error     string     `json:"error,omitempty"`
 }
 
@@ -269,20 +270,22 @@ type RunStatus struct {
 }
 
 func newStatus(s runs.Status) Status {
+	sc := s.Run.Scenario
 	body := Status{
-		SFTP:    SFTPStatus{State: s.State},
+		SFTP:    SFTPStatus{State: s.State, DownUntil: s.DownUntil.UTC()},
 		Backend: "embedded",
-		Run:     RunStatus{ID: s.Run.ID},
-	}
-	if !s.DownUntil.IsZero() {
-		until := s.DownUntil.UTC()
-		body.SFTP.DownUntil = &until
+		Run: RunStatus{
+			ID:         s.Run.ID,
+			Scenario:   sc.Name,
+			Inline:     sc.Inline,
+			Seed:       Seed(sc.Seed),
+			SeedPinned: sc.Pinned,
+			Revision:   s.Revision,
+		},
 	}
 	if s.Err != nil {
 		body.SFTP.Error = s.Err.Error()
 	}
-	sc := s.Run.Scenario
-	body.Run.Scenario, body.Run.Inline, body.Run.Seed, body.Run.SeedPinned, body.Run.Revision = sc.Name, sc.Inline, Seed(sc.Seed), sc.Pinned, s.Revision
 	return body
 }
 
@@ -302,26 +305,40 @@ func (s *Seed) UnmarshalJSON(b []byte) error {
 			return err
 		}
 	}
-	n, err := strconv.ParseUint(text, 10, 64)
+	seed, err := faults.ParseSeed(text)
 	if err != nil {
-		return errors.New("a seed is a whole number from 0 to 18446744073709551615")
+		return err
 	}
-	*s = Seed(n)
+	*s = Seed(seed)
 	return nil
 }
 
 // decodeBody decodes the JSON body of r into v, which an empty body leaves
-// as it is.
-func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+// as it is, and reports whether it could. If it could not, it has answered
+// the request: 413 for a body over maxBodyBytes, and 400 otherwise.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("invalid request body: %w", err)
+	err := dec.Decode(v)
+	if errors.Is(err, io.EOF) {
+		err = nil
 	}
-	if dec.More() {
-		return errors.New("invalid request body: expected a single JSON object")
+	if err == nil {
+		if err = dec.Decode(new(json.RawMessage)); errors.Is(err, io.EOF) {
+			err = nil
+		} else if _, tooLarge := errors.AsType[*http.MaxBytesError](err); !tooLarge {
+			err = errors.New("expected a single JSON object")
+		}
 	}
-	return nil
+	if err == nil {
+		return true
+	}
+	code := http.StatusBadRequest
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		code = http.StatusRequestEntityTooLarge
+	}
+	writeError(w, code, fmt.Errorf("invalid request body: %w", err))
+	return false
 }
 
 // protect refuses a request addressed to a host other than a loopback one,
@@ -340,7 +357,7 @@ func protect(next http.Handler) http.Handler {
 			return
 		}
 		if !isSafe(r.Method) && r.Header.Get(RequestHeader) == "" {
-			writeError(w, http.StatusForbidden, fmt.Errorf("a %s needs the %s header", r.Method, RequestHeader))
+			writeError(w, http.StatusForbidden, fmt.Errorf("a %s needs a non-empty %s header", r.Method, RequestHeader))
 			return
 		}
 		next.ServeHTTP(w, r)

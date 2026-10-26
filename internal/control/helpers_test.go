@@ -3,8 +3,11 @@ package control_test
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -44,4 +47,36 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	}
 	t.Cleanup(func() { m.Close() })
 	return m, control.Handler(m)
+}
+
+const denyStats = `{"id": "deny-stats", "match": {"operation": "stat", "user": "test"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}`
+
+const host = "127.0.0.1:8122"
+
+// call makes a request to api as the command line would, and returns the
+// status code and decoded body.
+func call(t *testing.T, api http.Handler, method, path, body string) (int, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Host = host
+	if method != "GET" {
+		req.Header.Set(control.RequestHeader, "1")
+	}
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, req)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("%s %s has Content-Type %q", method, path, ct)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("%s %s = %d %q: %v", method, path, rec.Code, rec.Body, err)
+	}
+	return rec.Code, decoded
+}
+
+// equalJSON reports whether two decoded JSON values are equal.
+func equalJSON(a, b any) bool {
+	x, errX := json.Marshal(a)
+	y, errY := json.Marshal(b)
+	return errX == nil && errY == nil && string(x) == string(y)
 }

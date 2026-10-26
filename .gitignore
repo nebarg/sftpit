@@ -1,12 +1,10 @@
 /bin/
-/dist/
 /sandbox-data/
 /work/
 /test/integration/php/vendor/
 
 .env
 .env.*
-!.env.example
 
 *.out
 *.test

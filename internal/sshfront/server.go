@@ -121,9 +121,10 @@ type Server struct {
 	conns map[*gate]chan struct{}
 	// outage is set while the server is down.
 	outage *outage
-	// paused is set while admission is closed.
-	paused bool
-	wg     sync.WaitGroup
+	// paused is set while admission is closed, and ending while Pause ends
+	// the connections of what served them, until it has.
+	paused, ending bool
+	wg             sync.WaitGroup
 }
 
 // outage is a span in which a server accepts no connections.
@@ -317,11 +318,14 @@ func (s *Server) sleep(d time.Duration) bool {
 // address again once d has passed. A connection accepted as the outage
 // begins is closed at once. If closeExisting, Down also closes every
 // connection, as Conn.Close does. Down while the server is down extends the
-// outage if it would end later. Down does nothing while admission is closed.
+// outage if it would end later. Down does nothing while Pause ends the
+// connections, so that no fault of what served them outlasts it, or after a
+// Pause that failed, until Resume. Once Pause has returned, an outage can
+// begin while admission is closed, and lasts beyond Resume.
 func (s *Server) Down(d time.Duration, closeExisting bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.paused {
+	if s.closed || s.ending {
 		return
 	}
 	until := time.Now().Add(d)
@@ -375,18 +379,19 @@ func (s *Server) Outage() (until time.Time, down bool) {
 // Pause closes admission and ends every connection, so that what serves
 // them can change while no client is connected. Until Resume, the server
 // accepts each new connection and closes it before its handshake, keeping
-// its listeners open, and Down does nothing. An outage ends, so that Serve
-// listens again. Pause closes every connection, as Conn.Close does, and
-// waits until each has ended, its handlers included, or until ctx is done,
-// whose error it then returns. Admission stays closed however Pause returns.
-// Pause fails with ErrServerClosed once Close has been called.
+// its listeners open unless Down takes them down. An outage ends, so that
+// Serve listens again. Pause closes every connection, as Conn.Close does,
+// and waits until each has ended, its handlers included, or until ctx is
+// done, whose error it then returns. Admission stays closed however Pause
+// returns. Pause fails with ErrServerClosed once Close has been called,
+// before or while it waits.
 func (s *Server) Pause(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return ErrServerClosed
 	}
-	s.paused = true
+	s.paused, s.ending = true, true
 	if o := s.outage; o != nil {
 		o.timer.Stop()
 		s.outage = nil
@@ -406,6 +411,13 @@ func (s *Server) Pause(ctx context.Context) error {
 			return fmt.Errorf("sshfront: pause: %w", ctx.Err())
 		}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Close ends every connection, which also ends the wait.
+	if s.closed {
+		return ErrServerClosed
+	}
+	s.ending = false
 	return nil
 }
 
@@ -413,7 +425,7 @@ func (s *Server) Pause(ctx context.Context) error {
 func (s *Server) Resume() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.paused = false
+	s.paused, s.ending = false, false
 }
 
 // outageOver returns a channel that is closed when the outage ends, or nil

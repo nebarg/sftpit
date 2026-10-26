@@ -2,6 +2,7 @@ package config
 
 import (
 	"cmp"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -46,7 +47,7 @@ func TestExplainedConfigurationsLoadTheSame(t *testing.T) {
 			t.Errorf("the explained configuration lists %q after %q, which is tried after it:\n%s", tried[i-1], tried[i], explained)
 		}
 	}
-	elsewhere := writeTestFile(t, filepath.Join(t.TempDir(), "explained.yaml"), string(explained), 0o600)
+	elsewhere := writeTestFile(t, filepath.Join(t.TempDir(), "explained.yaml"), string(explained))
 	got, err := Load(Options{ConfigFile: elsewhere, LookupEnv: opts.LookupEnv})
 	if err != nil {
 		t.Fatalf("Load of the explained configuration: %v\n%s", err, explained)
@@ -95,11 +96,11 @@ func writeEveryAction(t *testing.T) Options {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "keys", "partner-b.pub"), "")
 	writeAuthorizedKeys(t, filepath.Join(dir, "keys", "robot.pub"), "")
-	writeTestFile(t, filepath.Join(dir, ".env"), "P2=second-secret\n", 0o600)
-	writeTestFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "", 0o600)
+	writeTestFile(t, filepath.Join(dir, ".env"), "P2=second-secret\n")
+	writeTestFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "")
 	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: .env
-server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys}
+server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys, reply_order: completion}
 storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
 users:
   - {name: test, password_env: P}
@@ -153,7 +154,7 @@ scenarios:
         fail_randomly: {operations: [write, rename], path_glob: /incoming/*, probability: 0.05}
       - id: missing-chunk
         corrupt_download: {path_glob: /outgoing/*.csv, attempts: [1], transform: omit_range, offset: 1048576, length: 4096}
-`, 0o600)
+`)
 	return Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "first-secret"}.lookup}
 }
 
@@ -165,7 +166,7 @@ scenarios:
     faults:
       - id: first-upload-cutoff
         fail_upload: {path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576, result: status}
-`, 0o600)
+`)
 	explained, err := Explain(Options{ConfigFile: config, LookupEnv: noEnv})
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
@@ -199,7 +200,7 @@ scenarios:
 
 func TestExplainSaysWhereEachSecretComesFrom(t *testing.T) {
 	dir := t.TempDir()
-	envFile := writeTestFile(t, filepath.Join(dir, ".env"), "FROM_FILE=x\nEMPTY=\n", 0o600)
+	envFile := writeTestFile(t, filepath.Join(dir, ".env"), "FROM_FILE=x\nEMPTY=\n")
 	absent := filepath.Join(dir, "absent.env")
 	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: [.env, absent.env]
@@ -208,7 +209,7 @@ users:
   - {name: b, password_env: FROM_FILE}
   - {name: c, password_env: EMPTY}
   - {name: d, password_env: MISSING}
-`, 0o600)
+`)
 	opts := Options{ConfigFile: config, LookupEnv: fakeEnv{"FROM_ENV": "x"}.lookup}
 	if _, err := Load(opts); err == nil {
 		t.Fatal("Load accepted a missing secret")
@@ -231,8 +232,54 @@ users:
 }
 
 func TestExplainStillRejectsInvalidConfigurations(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nscenarios:\n  s:\n    faults:\n      - {id: r, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n", 0o600)
+	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nscenarios:\n  s:\n    faults:\n      - {id: r, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n")
 	if _, err := Explain(Options{ConfigFile: config, LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), `unknown operation "upload"`) {
 		t.Errorf("Explain = %v, want the unknown operation reported", err)
+	}
+}
+
+// TestExplainWritesAbsolutePathsForARelativeConfig checks a configuration
+// named by a relative path, whose own paths are relative too: ./workspace
+// must not come out as the keyword for the workspace's own keys.
+func TestExplainWritesAbsolutePathsForARelativeConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeAuthorizedKeys(t, "configs/keys/partner.pub", "")
+	writeTestFile(t, "configs/.env", "P=first\n")
+	writeTestFile(t, "extra.env", "Q=second\n")
+	writeTestFile(t, "configs/sftpit.yaml", `schema_version: 1
+env_file: .env
+server:
+  host_key: ./workspace
+users:
+  - name: partner
+    password_env: P
+    authorized_keys: keys/partner.pub
+`)
+	opts := Options{ConfigFile: "configs/sftpit.yaml", EnvFiles: []string{"extra.env"}, LookupEnv: noEnv}
+	want, err := Load(opts)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	explained, err := Explain(opts)
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"configs/.env", "configs/workspace", "configs/keys/partner.pub", "extra.env"} {
+		if abs := filepath.Join(dir, name); !strings.Contains(string(explained), abs) {
+			t.Errorf("the explained configuration lacks the absolute path %s:\n%s", abs, explained)
+		}
+	}
+
+	t.Chdir(t.TempDir())
+	got, err := Load(Options{ConfigFile: writeTestFile(t, "explained.yaml", string(explained)), LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load of the explained configuration from elsewhere: %v\n%s", err, explained)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the explained configuration loads as\n%+v\nwant\n%+v\nexplained:\n%s", got, want, explained)
 	}
 }

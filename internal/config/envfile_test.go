@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -135,9 +134,6 @@ func TestParseEnvRejectsAWantedVariableSetTwice(t *testing.T) {
 }
 
 func TestReadEnvFileWarnsWhenOthersCanReadIt(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows file modes do not describe access")
-	}
 	dir := t.TempDir()
 	private := filepath.Join(dir, "private.env")
 	shared := filepath.Join(dir, "shared.env")

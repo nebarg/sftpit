@@ -3,7 +3,6 @@ package integration
 import (
 	"errors"
 	"io/fs"
-	"log/slog"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -17,25 +16,18 @@ import (
 // that logs in with the test key, and checks that the same user logged in
 // with a password is unaffected.
 func TestRulesMatchTheKeyAClientLoggedInWith(t *testing.T) {
-	signer, err := ssh.NewSignerFromKey(clientKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rules, err := faults.New([]faults.Rule{{
+	t.Parallel()
+	srv := startScenario(t, []faults.Rule{{
 		ID: "deny-key",
 		Match: faults.Match{
 			User:           testUser,
-			KeyFingerprint: ssh.FingerprintSHA256(signer.PublicKey()),
+			KeyFingerprint: ssh.FingerprintSHA256(clientSigner.PublicKey()),
 			Operations:     []faults.Operation{faults.Mkdir},
 		},
 		Action: sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied},
-	}}, nil, 0, slog.New(slog.DiscardHandler))
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{})
+	}}, 0, nil)
 
-	byKey := pkgSFTPClient(t, srv, ssh.PublicKeys(signer))
+	byKey := pkgSFTPClient(t, srv, ssh.PublicKeys(clientSigner))
 	defer byKey.Close()
 	if err := byKey.Mkdir("/by-key"); !errors.Is(err, fs.ErrPermission) {
 		t.Errorf("Mkdir after a key login = %v, want permission denied", err)

@@ -58,14 +58,74 @@ func TestPauseEndsAnOutage(t *testing.T) {
 		t.Error("the server is still down after Pause")
 	}
 	awaitLog(t, logs, listeningAgain)
-	srv.Down(time.Minute, true)
-	if _, down := srv.Outage(); down {
-		t.Error("Down took the server down while admission was closed")
-	}
 	assertClosedBeforeHandshake(t, addr)
 
 	srv.Resume()
 	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
+}
+
+// TestAnOutageCanBeginOnceAPauseHasReturned checks that an outage begun
+// while admission is closed, as the next run's start can begin one, lasts
+// beyond Resume.
+func TestAnOutageCanBeginOnceAPauseHasReturned(t *testing.T) {
+	handler, conns, _ := connPublisher()
+	logs := make(messages, 64)
+	addr, srv := startServer(t, sshfront.Config{Handler: handler, Logger: slog.New(logs)})
+	awaitServing(t, addr)
+	if err := srv.Pause(t.Context()); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	srv.Down(300*time.Millisecond, false)
+	if _, down := srv.Outage(); !down {
+		t.Fatal("Down after Pause left the server up")
+	}
+
+	srv.Resume()
+	if raw, err := net.Dial("tcp", addr); err == nil {
+		raw.Close()
+		t.Error("a connection was accepted during the outage")
+	}
+	awaitLog(t, logs, listeningAgain)
+	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
+}
+
+// TestDownDoesNothingWhilePauseEndsTheConnections checks that a fault of
+// what served the connections Pause ends cannot take the server down.
+func TestDownDoesNothingWhilePauseEndsTheConnections(t *testing.T) {
+	conns := make(chan *sshfront.Conn, 1)
+	addr, srv := startServer(t, sshfront.Config{
+		Handler: func(ctx context.Context, conn *sshfront.Conn, _ io.ReadWriteCloser) error {
+			conns <- conn
+			<-ctx.Done()
+			conn.Server().Down(time.Minute, false)
+			return nil
+		},
+	})
+	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
+	if err := srv.Pause(t.Context()); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if _, down := srv.Outage(); down {
+		t.Error("a handler that Pause ended took the server down")
+	}
+}
+
+func TestPauseFailsIfCloseEndsItsWait(t *testing.T) {
+	handler, conns, _ := connPublisher()
+	addr, srv := startServer(t, sshfront.Config{Handler: handler})
+	// A client that ignores the server's FIN holds Pause in the drain.
+	client, _ := lingeringClient(t, addr)
+	openSFTP(t, client, conns)
+	paused := make(chan error, 1)
+	go func() { paused <- srv.Pause(t.Context()) }()
+	time.Sleep(100 * time.Millisecond)
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := receive(t, paused); !errors.Is(err, sshfront.ErrServerClosed) {
+		t.Errorf("Pause = %v, want ErrServerClosed", err)
+	}
 }
 
 func TestPauseStopsWaitingWhenItsContextIsDone(t *testing.T) {

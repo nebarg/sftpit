@@ -23,10 +23,10 @@ import (
 // in the long form and each scenario's rules in the order they are tried.
 // Comments say where each secret comes from, without its value, and show the
 // rules that each chaos applies. Loading the result gives the same
-// configuration. Unlike Load, Explain reports a
-// missing or empty secret in a comment rather than as an error.
+// configuration. Unlike Load, Explain reports a missing or empty secret in a
+// comment rather than as an error.
 func Explain(opts Options) ([]byte, error) {
-	r, err := read(opts, false)
+	r, err := read(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func Explain(opts Options) ([]byte, error) {
 	f := fileConfig{
 		SchemaVersion: SchemaVersion,
 		EnvFile:       r.envFiles,
-		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HTTPListen: cfg.HTTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace)},
+		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HTTPListen: cfg.HTTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace), ReplyOrder: cfg.ReplyOrder.String()},
 		Storage: storageConfig{
 			DataDir:       cfg.DataDir,
 			SeedDir:       cfg.SeedDir,
@@ -181,11 +181,7 @@ func longForm(r faults.Rule) ruleConfig {
 	rc := ruleConfig{ID: r.ID, Priority: r.Priority, MaxTriggers: r.MaxTriggers, Match: longMatch(r.Match), Trigger: longTrigger(r.Trigger), Action: longAction(r)}
 	if r.Probability != nil {
 		scope := "operation"
-		switch r.Action.(type) {
-		case sftpproxy.PartialUpload, sftpproxy.CorruptDownload:
-			scope = "transfer"
-		}
-		if r.Trigger != nil && r.Trigger.Anchor == faults.Transfer {
+		if r.IsTransfer() {
 			scope = "transfer"
 		}
 		rc.Decision = &decisionConfig{Probability: r.Probability, Scope: scope}
@@ -249,9 +245,9 @@ func longAction(r faults.Rule) actionConfig {
 	case sftpproxy.Delay:
 		return actionConfig{Type: "delay", When: actionWhen(r, a.When), Duration: longDuration(r, a.Duration)}
 	case sftpproxy.Stall:
-		return actionConfig{Type: "stall", When: whenName(a.When), MaxStall: a.Limit.String()}
+		return actionConfig{Type: "stall", When: a.When.String(), MaxStall: a.Limit.String()}
 	case sftpproxy.Fail:
-		return actionConfig{Type: "fail", When: whenName(a.When), Status: statusName(a.Status)}
+		return actionConfig{Type: "fail", When: a.When.String(), Status: statusName(a.Status)}
 	case sftpproxy.Drop:
 		return actionConfig{Type: "close_connection", When: connectionWhen(r, a.When), Mode: dropMode(a)}
 	case sftpproxy.Freeze:
@@ -276,11 +272,7 @@ func longAction(r faults.Rule) actionConfig {
 		return ac
 	case sftpproxy.CorruptDownload:
 		ac := actionConfig{Type: "corrupt_download", Offset: &a.Offset}
-		for name, c := range corruptions {
-			if c == a.Corruption {
-				ac.Transform = name
-			}
-		}
+		ac.Transform = a.Corruption.String()
 		if a.Corruption != sftpproxy.Truncate {
 			ac.Length = &a.Length
 		}
@@ -307,26 +299,19 @@ func longDuration(r faults.Rule, d time.Duration) *valueRange[string] {
 // actionWhen returns the when of r's action, which has none at connect or
 // authenticate.
 func actionWhen(r faults.Rule, w sftpproxy.When) string {
-	if slices.ContainsFunc(r.Match.Operations, func(op faults.Operation) bool { return op == faults.Connect || op == faults.Authenticate }) {
+	if slices.ContainsFunc(r.Match.Operations, faults.Operation.IsEvent) {
 		return ""
 	}
-	return whenName(w)
+	return w.String()
 }
 
 // connectionWhen returns the when of r's connection action, which has none
 // at a moment either.
 func connectionWhen(r faults.Rule, w sftpproxy.When) string {
-	if r.Trigger != nil && r.Trigger.At != nil {
+	if r.AtMoment() {
 		return ""
 	}
 	return actionWhen(r, w)
-}
-
-func whenName(w sftpproxy.When) string {
-	if w == sftpproxy.After {
-		return "after"
-	}
-	return "before"
 }
 
 func dropMode(d sftpproxy.Drop) string {

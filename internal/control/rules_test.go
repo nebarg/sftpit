@@ -9,13 +9,9 @@ import (
 	"github.com/nebarg/sftpit/internal/runs"
 )
 
-const (
-	denyStats = `{"id": "deny-stats", "match": {"operation": "stat", "user": "test"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}`
-
-	// outageLater is selected for the run as it is applied, so it has
-	// counts at once.
-	outageLater = `{"id": "outage-later", "trigger": {"at": "1h", "anchor": "run"}, "action": {"type": "listener_down", "duration": "1s"}}`
-)
+// outageLater is selected for the run as it is applied, so it has counts at
+// once.
+const outageLater = `{"id": "outage-later", "trigger": {"at": "1h", "anchor": "run"}, "action": {"type": "listener_down", "duration": "1s"}}`
 
 func TestRulesChangeThroughTheAPI(t *testing.T) {
 	m, api := start(t, runs.Options{Scenario: "chaos"})

@@ -183,7 +183,9 @@ const (
 
 var operations = []Operation{OpenRead, OpenWrite, Read, Write, Close, Stat, LStat, FStat, List, Mkdir, Rmdir, Remove, Rename, SetStat, RealPath, StatVFS}
 
-func isEvent(op Operation) bool { return op == Connect || op == Authenticate }
+// IsEvent reports whether op is a connection event, Connect or Authenticate,
+// rather than a kind of request.
+func (op Operation) IsEvent() bool { return op == Connect || op == Authenticate }
 
 // listEntry is the operation of one entry of a list's reply, which only a
 // WrongSize applies to.
@@ -341,7 +343,7 @@ func (r Rule) check() error {
 		return errors.New("needs at least one operation")
 	}
 	for i, op := range m.Operations {
-		if op != Any && !isEvent(op) && !slices.Contains(operations, op) {
+		if op != Any && !op.IsEvent() && !slices.Contains(operations, op) {
 			return fmt.Errorf("unknown operation %q", op)
 		}
 		if slices.Contains(m.Operations[:i], op) {
@@ -382,10 +384,10 @@ func (r Rule) check() error {
 // them: they have no path, and connect comes before the client logs in.
 func (r Rule) checkEvents() error {
 	m := r.Match
-	if !slices.ContainsFunc(m.Operations, isEvent) {
+	if !slices.ContainsFunc(m.Operations, Operation.IsEvent) {
 		return nil
 	}
-	if slices.ContainsFunc(m.Operations, func(op Operation) bool { return !isEvent(op) }) {
+	if slices.ContainsFunc(m.Operations, func(op Operation) bool { return !op.IsEvent() }) {
 		return errors.New("connect and authenticate cannot share a rule with file operations")
 	}
 	if m.Path.Kind != Anywhere {
@@ -506,7 +508,7 @@ func (r Rule) checkSelection() error {
 	case m.Attempt != nil && m.Occurrence != nil:
 		return errors.New("attempt and occurrence cannot both be set")
 	case m.Attempt != nil:
-		if !r.isTransfer() && slices.ContainsFunc(m.Operations, func(op Operation) bool { return op != OpenRead && op != OpenWrite }) {
+		if !r.IsTransfer() && slices.ContainsFunc(m.Operations, func(op Operation) bool { return op != OpenRead && op != OpenWrite }) {
 			return errors.New("attempts count opens, so they need a transfer or the open_read and open_write operations; use occurrence for other operations")
 		}
 		return checkNumbers("attempt", m.Attempt.Numbers)
@@ -531,9 +533,9 @@ func checkNumbers(name string, numbers []uint64) error {
 	return nil
 }
 
-// isTransfer reports whether the rule's action applies to a transfer, and
+// IsTransfer reports whether the rule's action applies to a transfer, and
 // so is chosen when the file is opened.
-func (r Rule) isTransfer() bool {
+func (r Rule) IsTransfer() bool {
 	switch r.Action.(type) {
 	case sftpproxy.PartialUpload, sftpproxy.CorruptDownload:
 		return true
@@ -548,6 +550,10 @@ func (r Rule) isConnectionAction() bool {
 	}
 	return false
 }
+
+// AtMoment reports whether the rule takes a connection action at a moment,
+// of the run, the connection or a transfer, rather than at a request.
+func (r Rule) AtMoment() bool { return r.timedBySession() || r.timedByTransfer() }
 
 // timedBySession reports whether the rule fires at a moment measured from
 // the run or the connection, rather than at a request.

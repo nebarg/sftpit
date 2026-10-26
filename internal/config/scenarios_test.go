@@ -14,20 +14,10 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-// withScenarios is a configuration with two users, followed by scenarios.
-const withScenarios = `schema_version: 1
-users:
-  - name: test
-    password_env: P
-  - name: partner-b
-    authorized_keys: partner-b.pub
-scenarios:
-`
-
 func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+`  upload-recovery:
+	cfg, err := loadScenarios(t, dir, `  upload-recovery:
     seed: 481516
     faults:
       - id: first-upload-cutoff
@@ -99,9 +89,7 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
       - id: deny
         match: {operation: remove}
         action: {type: fail, when: before, status: permission_denied}
-`, 0o600)
-
-	cfg, err := Load(Options{ConfigFile: config, Scenario: "upload-recovery", LookupEnv: fakeEnv{"P": "password"}.lookup})
+`, "upload-recovery")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -210,12 +198,15 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Rules(), want) {
 		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Rules(), want)
 	}
-	if cfg.Seed == nil || *cfg.Seed != 481516 {
-		t.Errorf("Seed = %v, want the scenario's 481516", cfg.Seed)
+	if s := cfg.Scenarios["upload-recovery"].Seed; s == nil || *s != 481516 {
+		t.Errorf("the scenario's Seed = %v, want 481516", s)
 	}
 }
 
-func TestLoadPinsTheSeedOfTheSelectedScenario(t *testing.T) {
+// TestLoadKeepsTheSeedOptionApartFromTheScenariosSeed checks that the seed
+// option, which a run puts in place of its scenario's own, is kept as given,
+// beside the scenario's seed.
+func TestLoadKeepsTheSeedOptionApartFromTheScenariosSeed(t *testing.T) {
 	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
 scenarios:
   pinned:
@@ -223,26 +214,27 @@ scenarios:
     faults: []
   fresh:
     faults: []
-`, 0o600)
-	seven := faults.Seed(7)
+`)
 	tests := []struct {
 		scenario string
 		seed     *faults.Seed
-		want     *faults.Seed
 	}{
-		{"pinned", nil, new(faults.Seed)},
-		{"pinned", &seven, &seven},
-		{"fresh", nil, nil},
-		{"fresh", &seven, &seven},
-		{"", nil, nil},
+		{"pinned", nil},
+		{"pinned", new(faults.Seed(7))},
+		{"fresh", nil},
+		{"fresh", new(faults.Seed(7))},
+		{"", nil},
 	}
 	for _, tt := range tests {
 		cfg, err := Load(Options{ConfigFile: config, Scenario: tt.scenario, Seed: tt.seed, LookupEnv: noEnv})
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if !reflect.DeepEqual(cfg.Seed, tt.want) {
-			t.Errorf("scenario %q with option %v has seed %v, want %v", tt.scenario, tt.seed, cfg.Seed, tt.want)
+		if !reflect.DeepEqual(cfg.Seed, tt.seed) {
+			t.Errorf("scenario %q with option %v has Seed %v, want the option", tt.scenario, tt.seed, cfg.Seed)
+		}
+		if s := cfg.Scenarios["pinned"].Seed; s == nil || *s != 0 {
+			t.Errorf("scenario pinned's own seed = %v, want 0", s)
 		}
 	}
 }
@@ -256,8 +248,7 @@ func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
         match: {operation: remove}
         action: {type: fail, when: before, status: permission_denied}
 `
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+valid, 0o600)
-	cfg, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+	cfg, err := loadScenarios(t, dir, valid, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -270,7 +261,7 @@ func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
       - id: deny
         match: {operation: upload}
         action: {type: fail, when: before, status: failure}
-`, 0o600)
+`)
 	if _, err := Load(Options{ConfigFile: broken, Scenario: "valid", LookupEnv: fakeEnv{"P": "password"}.lookup}); err == nil || !strings.Contains(err.Error(), `scenarios.broken: faults: rule "deny": unknown operation "upload"`) {
 		t.Errorf("Load = %v, want the broken scenario reported although another is selected", err)
 	}
@@ -295,7 +286,9 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"an undefined scenario", rule("{operation: stat}", deny), "missing", `scenario "missing" is not defined; the configuration defines s`},
 		{"a bad scenario name", "  Bad_Name:\n    faults: []\n", "", "scenarios.Bad_Name: a scenario name may hold only"},
 		{"a bad rule ID", "  s:\n    faults:\n      - id: First Rule\n        match: {operation: stat}\n        action: " + deny + "\n", "", `scenarios.s.faults[0]: id "First Rule" must hold only`},
+		{"no rule ID", "  s:\n    faults:\n      - match: {operation: stat}\n        action: " + deny + "\n", "", "scenarios.s.faults[0]: id is required"},
 		{"a repeated rule ID", "  s:\n    faults:\n      - {id: r, match: {operation: stat}, action: " + deny + "}\n      - {id: r, match: {operation: stat}, action: " + deny + "}\n", "", `scenarios.s: faults: rule ID "r" is used twice`},
+		{"an operation that is not a name", rule("{operation: {a: b}}", deny), "", "expected a string or a list of strings"},
 		{"an unknown field", rule("{operation: stat, paths: /a}", deny), "", "field paths not found"},
 		{"no operation", rule("{path: /a}", deny), "", "scenarios.s.faults[0] (r): match: operation is required"},
 		{"two path fields", rule("{operation: stat, path: /a, path_prefix: /b}", deny), "", "path and path_prefix cannot both be set"},
@@ -359,8 +352,7 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+tt.scenarios, 0o600)
-			_, err := Load(Options{ConfigFile: config, Scenario: tt.selected, LookupEnv: fakeEnv{"P": "password"}.lookup})
+			_, err := loadScenarios(t, dir, tt.scenarios, tt.selected)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

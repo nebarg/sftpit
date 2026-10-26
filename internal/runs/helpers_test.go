@@ -193,3 +193,28 @@ func outageAt(moment time.Duration) faults.Rule {
 }
 
 var denyStats = faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}
+
+// awaitLog waits until the logs carry the message want, whatever they carry
+// before it.
+func awaitLog(t *testing.T, logs messages, want string) {
+	t.Helper()
+	for receive(t, logs) != want {
+	}
+}
+
+// awaitRefused waits until nothing listens at addr.
+func awaitRefused(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still accepts connections", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

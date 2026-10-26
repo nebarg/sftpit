@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +25,7 @@ import (
 )
 
 func TestServeTransfersFilesAndCleansUp(t *testing.T) {
-	s := startServe(t, "--sftp-listen", "127.0.0.1:0")
+	s := startServe(t)
 	if !strings.Contains(s.stdout.String(), `login: user "test", password "test"`) {
 		t.Errorf("banner does not show the default login:\n%s", s.stdout.String())
 	}
@@ -71,7 +70,7 @@ users:
 `)
 	writeTestFile(t, filepath.Join(dir, "test.env"), "PARTNER_B_PASSWORD=s3cret-value\n")
 
-	first := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0")
+	first := startServe(t, "--config", config)
 	if out := first.stdout.String(); !strings.Contains(out, "users: partner-b (password)") || strings.Contains(out, "s3cret-value") {
 		t.Errorf("banner should list the user without the password:\n%s", out)
 	}
@@ -82,7 +81,7 @@ users:
 	c.Close()
 	first.stop(t)
 
-	second := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0")
+	second := startServe(t, "--config", config)
 	second.stop(t)
 	if a, b := fingerprints(first.stdout.String()), fingerprints(second.stdout.String()); strings.Count(a, "SHA256:") != 2 || a != b {
 		t.Errorf("host keys changed between runs: %v then %v", a, b)
@@ -95,6 +94,8 @@ users:
 func TestServeInjectsTheSelectedScenariosFaults(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	writeTestFile(t, config, `schema_version: 1
+server:
+  host_key: keys
 scenarios:
   deny-ack:
     faults:
@@ -103,7 +104,7 @@ scenarios:
         action: {type: fail, when: before, status: permission_denied}
 `)
 	for _, scenario := range []string{"deny-ack", ""} {
-		args := []string{"--config", config, "--sftp-listen", "127.0.0.1:0"}
+		args := []string{"--config", config}
 		if scenario != "" {
 			args = append(args, "--scenario", scenario)
 		}
@@ -137,7 +138,7 @@ scenarios:
 		if out := s.stdout.String(); !strings.Contains(out, "scenario: deny-ack (1 fault rule)") {
 			t.Errorf("banner does not name the scenario:\n%s", out)
 		}
-		if logs := s.stderr.String(); !strings.Contains(logs, `msg="rule fired" rule=deny-remove request=remove path=/outgoing/orders.csv user=test ordinal=1`) {
+		if logs := s.stderr.String(); !strings.Contains(logs, `msg="rule fired" rule=deny-remove operation=remove path=/outgoing/orders.csv user=test ordinal=1`) {
 			t.Errorf("stderr does not log the rule firing:\n%s", logs)
 		}
 	}
@@ -146,6 +147,8 @@ scenarios:
 func TestServeShowsTheScenariosChaos(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	writeTestFile(t, config, `schema_version: 1
+server:
+  host_key: keys
 scenarios:
   dev-chaos:
     chaos: {preset: moderate}
@@ -157,7 +160,7 @@ scenarios:
 		{"paused-chaos", "  scenario: paused-chaos (0 fault rules)\n  chaos: heavy, paused\n"},
 	}
 	for _, tt := range tests {
-		s := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", tt.scenario)
+		s := startServe(t, "--config", config, "--scenario", tt.scenario)
 		s.stop(t)
 		if out := s.stdout.String(); !strings.Contains(out, tt.want) {
 			t.Errorf("the banner of %s lacks %q:\n%s", tt.scenario, tt.want, out)
@@ -175,7 +178,7 @@ scenarios:
         match: {operation: authenticate, occurrence: [1]}
         action: {type: close_connection}
 `)
-	s := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", "cut-first-login")
+	s := startServe(t, "--config", config, "--scenario", "cut-first-login")
 	if conn, err := ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
 		User:            "test",
 		Auth:            []ssh.AuthMethod{ssh.Password("test")},
@@ -187,7 +190,7 @@ scenarios:
 	}
 	s.dial(t, "test", "test").Close()
 	s.stop(t)
-	if logs := s.stderr.String(); !strings.Contains(logs, `msg="injected fault" conn=1 request=authenticate user=test fault=close_connection mode=fin`) {
+	if logs := s.stderr.String(); !strings.Contains(logs, `msg="injected fault" conn=1 operation=authenticate user=test fault=close_connection mode=fin`) {
 		t.Errorf("stderr does not log the fault at the first login:\n%s", logs)
 	}
 }
@@ -202,13 +205,10 @@ scenarios:
         trigger: {at: 0s, anchor: run}
         action: {type: listener_down, duration: 1m}
 `)
-	s := startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", "outage")
-	deadline := time.Now().Add(startTimeout)
-	for !strings.Contains(s.stderr.String(), `msg="injected fault" fault=listener_down when=timer duration=1m0s close_existing=false`) {
-		if time.Now().After(deadline) {
-			t.Fatalf("serve did not take the listener down:\n%s", s.stderr.String())
-		}
-		time.Sleep(10 * time.Millisecond)
+	s := startServe(t, "--config", config, "--scenario", "outage")
+	// The run starts with the outage, before serve announces itself.
+	if want := `msg="injected fault" fault=listener_down when=timer duration=1m0s close_existing=false`; !strings.Contains(s.stderr.String(), want) {
+		t.Fatalf("serve did not take the listener down as the run started:\n%s", s.stderr.String())
 	}
 	if conn, err := net.Dial("tcp", s.addr); !errors.Is(err, syscall.ECONNREFUSED) {
 		if err == nil {
@@ -225,7 +225,7 @@ func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
         match: {operation: stat}
         action: {type: delay, when: before, duration: {min: 1ms, max: 20ms}}
 `
-	writeTestFile(t, config, "schema_version: 1\nscenarios:\n  pinned:\n    seed: 481516\n    faults:"+slowStat+"  fresh:\n    faults:"+slowStat)
+	writeTestFile(t, config, "schema_version: 1\nserver:\n  host_key: keys\nscenarios:\n  pinned:\n    seed: 481516\n    faults:"+slowStat+"  fresh:\n    faults:"+slowStat)
 	freshLine := regexp.MustCompile(`  seed: (\d+) \(fresh; --seed (\d+) repeats its decisions\)\n`)
 	tests := []struct {
 		args []string
@@ -240,7 +240,7 @@ func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
 	}
 	var fresh []string
 	for _, tt := range tests {
-		s := startServe(t, append([]string{"--config", config, "--sftp-listen", "127.0.0.1:0"}, tt.args...)...)
+		s := startServe(t, append([]string{"--config", config}, tt.args...)...)
 		var record struct {
 			Scenario   string `json:"scenario"`
 			Seed       uint64 `json:"seed"`
@@ -281,7 +281,7 @@ func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
 		seed, _ := strconv.ParseUint(shown, 10, 64)
 		key := faults.Key{Rule: "slow-stat", Choice: "duration", User: "test", Path: "/", Operation: "stat", Ordinal: 1}
 		duration := faults.Between(faults.Seed(seed).Draw(key), time.Millisecond, 20*time.Millisecond)
-		if fired := fmt.Sprintf(`msg="rule fired" rule=slow-stat request=stat path=/ user=test ordinal=1 duration=%v`, duration); !strings.Contains(s.stderr.String(), fired) {
+		if fired := fmt.Sprintf(`msg="rule fired" rule=slow-stat operation=stat path=/ user=test ordinal=1 duration=%v`, duration); !strings.Contains(s.stderr.String(), fired) {
 			t.Errorf("%v: stderr lacks %s, drawn from seed %s:\n%s", tt.args, fired, shown, s.stderr.String())
 		}
 	}
@@ -294,7 +294,7 @@ func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
 func TestServeKeepsADataDirectory(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "sandbox-data")
 
-	first := startServe(t, "--sftp-listen", "127.0.0.1:0", "--data-dir", dataDir)
+	first := startServe(t, "--data-dir", dataDir)
 	if !strings.Contains(first.stdout.String(), "workspace: "+dataDir+" (kept, with its last five runs)") {
 		t.Errorf("banner does not say the workspace is kept:\n%s", first.stdout.String())
 	}
@@ -314,7 +314,7 @@ func TestServeKeepsADataDirectory(t *testing.T) {
 		t.Errorf("the first run's upload is %q (%v) after it stopped, want it kept", got, err)
 	}
 
-	second := startServe(t, "--sftp-listen", "127.0.0.1:0", "--data-dir", dataDir)
+	second := startServe(t, "--data-dir", dataDir)
 	if second.run == first.run {
 		t.Errorf("both starts ran %s, want a new run each time", first.run)
 	}
@@ -331,15 +331,15 @@ func TestServeRefusesUnusableDataDirectories(t *testing.T) {
 	notEmpty := t.TempDir()
 	writeTestFile(t, filepath.Join(notEmpty, "notes.txt"), "keep me")
 	var stdout, stderr syncBuffer
-	code := run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--data-dir", notEmpty}, &stdout, &stderr)
+	code := run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--data-dir", notEmpty}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "is not empty: not an sftpit workspace") {
 		t.Errorf("a directory with other files: exit %d, stderr %q", code, stderr.String())
 	}
 
 	inUse := t.TempDir()
-	startServe(t, "--sftp-listen", "127.0.0.1:0", "--data-dir", inUse)
+	startServe(t, "--data-dir", inUse)
 	stderr = syncBuffer{}
-	code = run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--data-dir", inUse}, &stdout, &stderr)
+	code = run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--data-dir", inUse}, &stdout, &stderr)
 	if code != exitFailure || !strings.Contains(stderr.String(), "workspace in use by another sftpit process") {
 		t.Errorf("a workspace in use: exit %d, stderr %q", code, stderr.String())
 	}
@@ -353,7 +353,7 @@ func TestServeStartsEveryRunFromTheSeed(t *testing.T) {
 	writeTestFile(t, filepath.Join(seed, "outgoing", "orders.csv"), "id,total\n1,9.99\n")
 
 	for run := 1; run <= 2; run++ {
-		s := startServe(t, "--sftp-listen", "127.0.0.1:0", "--seed-dir", seed)
+		s := startServe(t, "--seed-dir", seed)
 		if !strings.Contains(s.stdout.String(), "seeded from: "+seed) {
 			t.Errorf("run %d: banner does not name the seed:\n%s", run, s.stdout.String())
 		}
@@ -389,7 +389,7 @@ func TestServeStartsEveryRunFromTheSeed(t *testing.T) {
 func TestServeResetsThroughTheControlAPI(t *testing.T) {
 	seed := t.TempDir()
 	writeTestFile(t, filepath.Join(seed, "orders.csv"), "id,total\n")
-	s := startServe(t, "--sftp-listen", "127.0.0.1:0", "--seed-dir", seed)
+	s := startServe(t, "--seed-dir", seed)
 	c := s.dial(t, "test", "test")
 	if err := c.Remove("/orders.csv"); err != nil {
 		t.Fatalf("Remove: %v", err)
@@ -440,7 +440,7 @@ func TestServeRejectsUnusableSeeds(t *testing.T) {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
 	var stdout, stderr syncBuffer
-	code := run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--seed-dir", withLink}, &stdout, &stderr)
+	code := run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--seed-dir", withLink}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "link.csv: only regular files and directories") {
 		t.Errorf("seed with a symlink: exit %d, stderr %q", code, stderr.String())
 	}
@@ -450,14 +450,11 @@ func TestServeRejectsUnusableSeeds(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	writeTestFile(t, config, "schema_version: 1\nstorage:\n  max_file_bytes: 4\n")
 	stderr = syncBuffer{}
-	code = run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--config", config, "--seed-dir", tooBig}, &stdout, &stderr)
+	code = run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--config", config, "--seed-dir", tooBig}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "orders.csv: storage limit reached: max_file_bytes is 4") {
 		t.Errorf("seed past a limit: exit %d, stderr %q", code, stderr.String())
 	}
 
-	if runtime.GOOS == "windows" {
-		return
-	}
 	holdsWorkspace := t.TempDir()
 	tmp := filepath.Join(holdsWorkspace, "tmp")
 	if err := os.Mkdir(tmp, 0o700); err != nil {
@@ -465,8 +462,8 @@ func TestServeRejectsUnusableSeeds(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", tmp)
 	stderr = syncBuffer{}
-	code = run(context.Background(), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--seed-dir", holdsWorkspace}, &stdout, &stderr)
-	if code != exitUsage || !strings.Contains(stderr.String(), "contains the workspace") {
+	code = run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--seed-dir", holdsWorkspace}, &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "overlaps the workspace") {
 		t.Errorf("seed holding the workspace: exit %d, stderr %q", code, stderr.String())
 	}
 	if entries, _ := os.ReadDir(tmp); len(entries) != 0 {
@@ -496,7 +493,7 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr syncBuffer
-			code := run(context.Background(), append([]string{"serve"}, tt.args...), &stdout, &stderr)
+			code := run(commandContext(t), append([]string{"serve"}, tt.args...), &stdout, &stderr)
 			if code != exitUsage {
 				t.Errorf("exit code = %d, want %d", code, exitUsage)
 			}
@@ -515,17 +512,21 @@ func TestServeFailsClearlyOnAnOccupiedPort(t *testing.T) {
 	defer ln.Close()
 
 	occupied := ln.Addr().String()
-	for _, args := range [][]string{
-		{"--sftp-listen", occupied, "--http-listen", "127.0.0.1:0"},
-		{"--sftp-listen", "127.0.0.1:0", "--http-listen", occupied},
-	} {
+	for _, setting := range []string{"sftp_listen", "http_listen"} {
+		// A busy port must fail before the workspace changes, so that a kept
+		// run is never pruned for a run that never served.
+		dataDir := t.TempDir()
 		var stdout, stderr syncBuffer
-		code := run(context.Background(), append([]string{"serve"}, args...), &stdout, &stderr)
+		args := []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--data-dir", dataDir, "--" + strings.ReplaceAll(setting, "_", "-"), occupied}
+		code := run(commandContext(t), args, &stdout, &stderr)
 		if code != exitFailure {
-			t.Errorf("%v: exit code = %d, want %d", args, code, exitFailure)
+			t.Errorf("%s: exit code = %d, want %d", setting, code, exitFailure)
 		}
-		if !strings.Contains(stderr.String(), "address already in use") {
-			t.Errorf("%v: stderr = %q, want the listen error", args, stderr.String())
+		if !strings.Contains(stderr.String(), setting+": listen tcp") || !strings.Contains(stderr.String(), "address already in use") {
+			t.Errorf("%s: stderr = %q, want the listen error, naming the setting", setting, stderr.String())
+		}
+		if entries, err := os.ReadDir(dataDir); err != nil || len(entries) != 0 {
+			t.Errorf("%s: the data directory holds %v (%v), want it untouched", setting, entries, err)
 		}
 	}
 }
@@ -535,7 +536,7 @@ func TestListenLoopbackRefusesAnAddressThatIsNotLoopback(t *testing.T) {
 	// ones, so only localhost resolving elsewhere would reach the check.
 	// The test listens on every interface instead.
 	if runtime.GOOS != "linux" {
-		t.Skip("listening on every interface makes the firewall of macOS or Windows ask to allow it")
+		t.Skip("listening on every interface makes the firewall of macOS ask to allow it")
 	}
 	ln, err := listenLoopback("http_listen", "0.0.0.0:0")
 	if err == nil {
@@ -548,7 +549,7 @@ func TestListenLoopbackRefusesAnAddressThatIsNotLoopback(t *testing.T) {
 
 func TestServeHelp(t *testing.T) {
 	var stdout, stderr syncBuffer
-	if code := run(context.Background(), []string{"serve", "--help"}, &stdout, &stderr); code != exitOK {
+	if code := run(commandContext(t), []string{"serve", "--help"}, &stdout, &stderr); code != exitOK {
 		t.Errorf("exit code = %d, want %d", code, exitOK)
 	}
 	if !strings.Contains(stdout.String(), "Usage: sftpit serve") {

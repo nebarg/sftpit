@@ -338,7 +338,7 @@ func TestRepliesMatchOpenSSH(t *testing.T) {
 	server := sftpServer(t)
 	for name, steps := range scripts {
 		t.Run(name, func(t *testing.T) {
-			targets := []*target{sftpitTarget(t, false), openSSHTarget(t, server), sftpitTarget(t, true)}
+			targets := []*target{sftpitTarget(t), openSSHTarget(t, server), proxiedTarget(t)}
 			var outcomes [3][]outcome
 			for i, target := range targets {
 				s := startSession(t, target)
@@ -374,6 +374,31 @@ func TestRepliesMatchOpenSSH(t *testing.T) {
 	}
 }
 
+// TestDifferencesNameExistingSteps checks, on every host, that each listed
+// difference names a step, a step's longnames or a script's files, which a
+// comparison visits, and that no script repeats a step's name, whose handle
+// would take the place of the first.
+func TestDifferencesNameExistingSteps(t *testing.T) {
+	keys := make(map[string]bool)
+	for name, steps := range scripts {
+		keys[name+"/files"] = true
+		seen := make(map[string]bool)
+		for _, st := range steps {
+			if seen[st.name] {
+				t.Errorf("%s repeats the step %q", name, st.name)
+			}
+			seen[st.name] = true
+			keys[name+"/"+st.name] = true
+			keys[name+"/"+st.name+" longnames"] = true
+		}
+	}
+	for key := range differences {
+		if !keys[key] {
+			t.Errorf("the differences list %q, which no comparison visits", key)
+		}
+	}
+}
+
 // compare requires sftpit's result for key to match OpenSSH's unless the
 // difference is listed, and a listed difference to remain.
 func compare(t *testing.T, key, sftpit, openSSH string) {
@@ -390,8 +415,9 @@ func compare(t *testing.T, key, sftpit, openSSH string) {
 }
 
 func TestExtensionsAreOpenSSHs(t *testing.T) {
-	sftpit := startSession(t, sftpitTarget(t, false))
-	openSSH := startSession(t, openSSHTarget(t, sftpServer(t)))
+	server := sftpServer(t)
+	sftpit := startSession(t, sftpitTarget(t))
+	openSSH := startSession(t, openSSHTarget(t, server))
 	for _, ext := range sftpit.version.Extensions {
 		if !slices.Contains(openSSH.version.Extensions, ext) {
 			t.Errorf("sftpit offers %s version %s, which OpenSSH does not; OpenSSH offers %v", ext.Name, ext.Data, openSSH.version.Extensions)

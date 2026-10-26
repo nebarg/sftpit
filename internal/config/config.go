@@ -1,5 +1,8 @@
 // Package config loads sftpit's configuration file, applies command-line
-// overrides and resolves the secrets the configuration references.
+// overrides and resolves the secrets the configuration references. It
+// validates every scenario, explains a configuration as the file sftpit
+// reads it as, and reads and writes rules and chaos in the JSON form that the
+// control API uses.
 //
 // Secrets come only from the fields that name an environment variable, such
 // as password_env. Each variable is looked up in the process environment
@@ -32,6 +35,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
@@ -45,12 +49,13 @@ const (
 	DefaultHTTPListen = "127.0.0.1:8122"
 	DefaultUser       = "test"
 	DefaultPassword   = "test"
-
-	DefaultMaxFileBytes  = 1 << 30
-	DefaultMaxTotalBytes = 4 << 30
-	DefaultMaxFiles      = 10000
-	DefaultMaxOpenFiles  = 256
 )
+
+// DefaultLimits returns the storage limits sftpit serve has when the
+// configuration sets none.
+func DefaultLimits() backend.Limits {
+	return backend.Limits{MaxFileBytes: 1 << 30, MaxTotalBytes: 4 << 30, MaxFiles: 10000, MaxOpenFiles: 256}
+}
 
 // hostKeyWorkspace selects the host keys kept in the workspace.
 const hostKeyWorkspace = "workspace"
@@ -62,9 +67,13 @@ type Config struct {
 	SFTPListen string
 	HTTPListen string
 
-	// HostKeyDir is the directory holding the host keys, or "" for the
-	// workspace's own.
+	// HostKeyDir is the absolute path of the directory holding the host
+	// keys, or "" for the workspace's own.
 	HostKeyDir string
+
+	// ReplyOrder is the order in which each session's replies reach its
+	// client.
+	ReplyOrder sftpproxy.ReplyOrder
 
 	// SeedDir is the absolute path of the directory copied into the
 	// workspace at startup, or "" for an empty workspace.
@@ -77,6 +86,8 @@ type Config struct {
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
 
+	// Users are the configured users, with their passwords resolved and
+	// their homes cleaned, or the built-in test user if none are configured.
 	Users []sshfront.User
 
 	// DefaultCredentials reports whether Users is the built-in test user,
@@ -90,8 +101,7 @@ type Config struct {
 	// none.
 	Scenario string
 
-	// Seed is the seed pinned for the chosen scenario's random decisions,
-	// or nil for a fresh seed in every run.
+	// Seed is the seed given in place of the chosen scenario's own, or nil.
 	Seed *faults.Seed
 
 	// Warnings describe problems that do not prevent sftpit from starting.
@@ -171,6 +181,13 @@ type serverConfig struct {
 	SFTPListen string `yaml:"sftp_listen"`
 	HTTPListen string `yaml:"http_listen"`
 	HostKey    string `yaml:"host_key"`
+	ReplyOrder string `yaml:"reply_order"`
+}
+
+// replyOrders are the reply orders a configuration names.
+var replyOrders = map[string]sftpproxy.ReplyOrder{
+	"request":    sftpproxy.RequestOrder,
+	"completion": sftpproxy.CompletionOrder,
 }
 
 type userConfig struct {
@@ -200,7 +217,7 @@ func (l *stringList) UnmarshalYAML(n *yaml.Node) error {
 		*l = ss
 		return nil
 	}
-	return fmt.Errorf("line %d: expected a path or a list of paths", n.Line)
+	return fmt.Errorf("line %d: expected a string or a list of strings", n.Line)
 }
 
 func (l *stringList) UnmarshalJSON(b []byte) error {
@@ -242,8 +259,11 @@ func flowNode(v any) (*yaml.Node, error) {
 // command-line overrides and resolves every referenced secret. It starts no
 // listeners and writes nothing.
 func Load(opts Options) (*Config, error) {
-	r, err := read(opts, true)
+	r, err := read(opts)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.secrets.check(); err != nil {
 		return nil, err
 	}
 	return r.cfg, nil
@@ -262,23 +282,26 @@ type reading struct {
 	secrets  secretLookup
 }
 
-// read reads the configuration as Load does. A missing or empty secret is
-// an error only if requireSecrets is set.
-func read(opts Options, requireSecrets bool) (*reading, error) {
+// read reads the configuration as Load does, but does not check that every
+// secret is set, which Explain reports instead. Every path it gives is
+// absolute.
+func read(opts Options) (*reading, error) {
 	lookupEnv := opts.LookupEnv
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
 
 	var f fileConfig
-	dir := "."
+	dir, err := filepath.Abs(filepath.Dir(cmp.Or(opts.ConfigFile, ".")))
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
 	if opts.ConfigFile != "" {
 		decoded, err := decodeFile(opts.ConfigFile)
 		if err != nil {
 			return nil, err
 		}
 		f = *decoded
-		dir = filepath.Dir(opts.ConfigFile)
 	}
 
 	cfg := &Config{
@@ -290,6 +313,13 @@ func read(opts Options, requireSecrets bool) (*reading, error) {
 	}
 	if err := checkLoopback("http_listen", cfg.HTTPListen); err != nil {
 		return nil, err
+	}
+	if f.Server.ReplyOrder != "" {
+		order, ok := replyOrders[f.Server.ReplyOrder]
+		if !ok {
+			return nil, fmt.Errorf("reply_order %q is not request or completion", f.Server.ReplyOrder)
+		}
+		cfg.ReplyOrder = order
 	}
 	if hostKey := f.Server.HostKey; hostKey != "" && hostKey != hostKeyWorkspace {
 		cfg.HostKeyDir = resolvePath(dir, hostKey)
@@ -329,15 +359,16 @@ func read(opts Options, requireSecrets bool) (*reading, error) {
 	for _, name := range f.EnvFile {
 		envFiles = append(envFiles, resolvePath(dir, name))
 	}
-	envFiles = append(envFiles, opts.EnvFiles...)
+	for _, name := range opts.EnvFiles {
+		abs, err := filepath.Abs(name)
+		if err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		envFiles = append(envFiles, abs)
+	}
 	secrets, err := lookupSecrets(referencedSecrets(f.Users), envFiles, lookupEnv)
 	if err != nil {
 		return nil, err
-	}
-	if requireSecrets {
-		if err := secrets.check(); err != nil {
-			return nil, err
-		}
 	}
 	cfg.Warnings = secrets.warnings
 
@@ -357,11 +388,7 @@ func read(opts Options, requireSecrets bool) (*reading, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Scenario = opts.Scenario
-	cfg.Seed = cfg.Scenarios[opts.Scenario].Seed
-	if opts.Seed != nil {
-		cfg.Seed = opts.Seed
-	}
+	cfg.Scenario, cfg.Seed = opts.Scenario, opts.Seed
 	return &reading{cfg: cfg, file: f, dir: dir, envFiles: envFiles, secrets: secrets}, nil
 }
 
@@ -434,11 +461,20 @@ func checkSeedDir(name string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("seed_dir %s is not a directory", abs)
 	}
-	home, err := os.UserHomeDir()
-	if filepath.Dir(abs) == abs || (err == nil && sameFile(abs, home)) {
+	if isRootOrHome(abs) {
 		return "", fmt.Errorf("seed_dir %s would copy the whole tree under it; use a directory of test fixtures", abs)
 	}
 	return abs, nil
+}
+
+// isRootOrHome reports whether the absolute path abs is the filesystem root
+// or the home directory.
+func isRootOrHome(abs string) bool {
+	if filepath.Dir(abs) == abs {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	return err == nil && sameFile(abs, home)
 }
 
 // checkDataDir refuses the filesystem root, the home directory and a
@@ -449,8 +485,7 @@ func checkDataDir(name, seedDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("data_dir: %w", err)
 	}
-	home, err := os.UserHomeDir()
-	if filepath.Dir(abs) == abs || (err == nil && sameFile(abs, home)) {
+	if isRootOrHome(abs) {
 		return "", fmt.Errorf("data_dir %s is the filesystem root or the home directory; use a directory of its own", abs)
 	}
 	if seedDir != "" {
@@ -462,14 +497,10 @@ func checkDataDir(name, seedDir string) (string, error) {
 }
 
 // limits returns the configured storage limits, with the default for each
-// one left unset. A limit cannot be turned off, only raised.
+// one left unset. A limit can be set to any value of at least 1, but not
+// turned off.
 func (s storageConfig) limits() (backend.Limits, error) {
-	limits := backend.Limits{
-		MaxFileBytes:  DefaultMaxFileBytes,
-		MaxTotalBytes: DefaultMaxTotalBytes,
-		MaxFiles:      DefaultMaxFiles,
-		MaxOpenFiles:  DefaultMaxOpenFiles,
-	}
+	limits := DefaultLimits()
 	settings := []struct {
 		name  string
 		value *int64

@@ -199,8 +199,8 @@ func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
 	}
 	chosen.counts.Selected++
 	action, drawn := e.action(chosen, key)
-	fired := []any{"rule", chosen.ID, "request", op}
-	if !isEvent(op) {
+	fired := []any{"rule", chosen.ID, "operation", op}
+	if !op.IsEvent() {
 		fired = append(fired, "path", r.Path)
 	}
 	if s.client.User != "" {

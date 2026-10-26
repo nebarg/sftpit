@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net"
 	"path/filepath"
 	"regexp"
@@ -26,7 +25,7 @@ func TestResetStartsTheNextRun(t *testing.T) {
 	var last string
 	for _, tt := range tests {
 		var stdout, stderr syncBuffer
-		code := run(context.Background(), append([]string{"reset", "--ready-file", ready}, tt.args...), &stdout, &stderr)
+		code := run(commandContext(t), append([]string{"reset", "--ready-file", ready}, tt.args...), &stdout, &stderr)
 		m := regexp.MustCompile(`^run (\S+): (` + tt.want + `)\n$`).FindStringSubmatch(stdout.String())
 		if code != exitOK || m == nil || m[1] == last {
 			t.Fatalf("reset %q: exit %d, stdout %q, stderr %q, want a new run with %s", tt.args, code, stdout.String(), stderr.String(), tt.want)
@@ -45,7 +44,7 @@ func TestResetFailsClearly(t *testing.T) {
 		t.Fatal(err)
 	}
 	gone := filepath.Join(dir, "gone.json")
-	writeTestFile(t, gone, `{"sftp_address": "127.0.0.1:1", "http_address": "`+ln.Addr().String()+`", "workspace": "/gone", "host_keys": []}`)
+	writeTestFile(t, gone, goneReadyFile(ln.Addr().String()))
 	ln.Close()
 
 	tests := []struct {
@@ -67,7 +66,7 @@ func TestResetFailsClearly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr syncBuffer
-			code := run(context.Background(), append([]string{"reset"}, tt.args...), &stdout, &stderr)
+			code := run(commandContext(t), append([]string{"reset"}, tt.args...), &stdout, &stderr)
 			if code != tt.code || !strings.HasPrefix(stderr.String(), "sftpit reset: ") || !strings.Contains(stderr.String(), tt.want) {
 				t.Errorf("exit %d, stderr %q, want %d and %q", code, stderr.String(), tt.code, tt.want)
 			}
@@ -93,7 +92,7 @@ func TestDescribeRun(t *testing.T) {
 
 func TestResetHelp(t *testing.T) {
 	var stdout, stderr syncBuffer
-	if code := run(context.Background(), []string{"reset", "--help"}, &stdout, &stderr); code != exitOK || !strings.Contains(stdout.String(), "Usage: sftpit reset") {
+	if code := run(commandContext(t), []string{"reset", "--help"}, &stdout, &stderr); code != exitOK || !strings.Contains(stdout.String(), "Usage: sftpit reset") {
 		t.Errorf("exit %d, stdout %q, want the reset usage", code, stdout.String())
 	}
 }
@@ -107,6 +106,6 @@ func serveWithScenarios(t *testing.T) string {
 	config := filepath.Join(dir, "sftpit.yaml")
 	writeTestFile(t, config, "schema_version: 1\nscenarios:\n  chaos: {faults: []}\n  own: {seed: 9, faults: []}\n")
 	ready := filepath.Join(dir, "ready.json")
-	startServe(t, "--config", config, "--sftp-listen", "127.0.0.1:0", "--scenario", "chaos", "--seed", "7", "--ready-file", ready)
+	startServe(t, "--config", config, "--scenario", "chaos", "--seed", "7", "--ready-file", ready)
 	return ready
 }

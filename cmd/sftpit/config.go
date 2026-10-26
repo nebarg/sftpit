@@ -12,8 +12,9 @@ import (
 const configUsage = `Usage: sftpit config <command> --config FILE [flags]
 
 Commands:
-  validate   check the configuration as serve would, every scenario
-             included, without starting anything
+  validate   check the file, its users, secrets and every scenario,
+             without starting anything; serve checks the seed's contents,
+             the data directory and the host keys when it starts
   explain    print the configuration as sftpit reads it: every default
              filled in, recipes in the long form and each secret's
              source, but never its value
@@ -65,7 +66,11 @@ func configCommand(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "sftpit config explain: %v\n", err)
 			return exitUsage
 		}
-		stdout.Write(explained)
+		// The output is the configuration file, so a short write must fail.
+		if _, err := stdout.Write(explained); err != nil {
+			fmt.Fprintf(stderr, "sftpit config explain: %v\n", err)
+			return exitFailure
+		}
 		return exitOK
 	}
 	cfg, err := config.Load(opts)

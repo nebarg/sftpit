@@ -14,7 +14,7 @@ import (
 func TestLoadReadsAScenariosChaos(t *testing.T) {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+`  dev-chaos:
+	cfg, err := loadScenarios(t, dir, `  dev-chaos:
     chaos:
       preset: moderate
       scope: {user: partner-b, key_fingerprint: "`+ssh.FingerprintSHA256(key)+`", path_prefix: /incoming}
@@ -24,8 +24,7 @@ func TestLoadReadsAScenariosChaos(t *testing.T) {
       - {id: deny, match: {operation: remove}, action: {type: fail, when: before, status: permission_denied}}
   light-chaos:
     chaos: {preset: light}
-`, 0o600)
-	cfg, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+`, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -69,8 +68,7 @@ func TestLoadRejectsInvalidChaos(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+tt.scenarios, 0o600)
-			_, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+			_, err := loadScenarios(t, dir, tt.scenarios, "")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

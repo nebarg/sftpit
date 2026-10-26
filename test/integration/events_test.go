@@ -16,14 +16,11 @@ import (
 // accepts it and as the server accepts its login, and checks what the
 // client reports.
 func TestOpenSSHConnectionEvents(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
-	signer, err := ssh.NewSignerFromKey(clientKey)
-	if err != nil {
-		t.Fatalf("client signer: %v", err)
-	}
 	connect := faults.Match{Operations: []faults.Operation{faults.Connect}}
-	login := faults.Match{Operations: []faults.Operation{faults.Authenticate}, User: testUser, KeyFingerprint: ssh.FingerprintSHA256(signer.PublicKey())}
+	login := faults.Match{Operations: []faults.Operation{faults.Authenticate}, User: testUser, KeyFingerprint: ssh.FingerprintSHA256(clientSigner.PublicKey())}
 	tests := []struct {
 		name    string
 		match   faults.Match
@@ -92,12 +89,8 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logs snapshotLog
-			rules, err := faults.New([]faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, nil, 0, logs.logger())
-			if err != nil {
-				t.Fatalf("faults.New: %v", err)
-			}
-			srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+			var logs capturedLog
+			srv := startScenario(t, []faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, 0, logs.logger())
 
 			out, err := openSSH(t, sftpPath, srv, t.TempDir(), "ls\n", tt.options...)
 			if err == nil {
@@ -106,11 +99,11 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 			if !slices.ContainsFunc(tt.output, func(o string) bool { return strings.Contains(string(out), o) }) {
 				t.Errorf("sftp output contains none of %q:\n%s", tt.output, out)
 			}
-			if got := rules.Counts()["event"]; got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
+			if got := srv.counts(t, "event"); got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
 				t.Errorf("counts = %+v, want the one connection's event selected and fired", got)
 			}
 			event := tt.match.Operations[0]
-			if want := `msg="injected fault" conn=1 request=` + string(event) + " " + tt.log; !strings.Contains(logs.text(), want) {
+			if want := `msg="injected fault" conn=1 operation=` + string(event) + " " + tt.log; !strings.Contains(logs.text(), want) {
 				t.Errorf("logs lack %q:\n%s", want, logs.text())
 			}
 		})
@@ -120,18 +113,15 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 // TestOpenSSHWaitsForASlowLogin delays OpenSSH's login, which then goes on
 // as usual.
 func TestOpenSSHWaitsForASlowLogin(t *testing.T) {
+	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
-	var logs snapshotLog
-	rules, err := faults.New([]faults.Rule{{
+	var logs capturedLog
+	srv := startScenario(t, []faults.Rule{{
 		ID:     "slow-login",
 		Match:  faults.Match{Operations: []faults.Operation{faults.Authenticate}},
 		Action: sftpproxy.Delay{Duration: time.Second},
-	}}, nil, 0, logs.logger())
-	if err != nil {
-		t.Fatalf("faults.New: %v", err)
-	}
-	srv := startServerWithRules(t, rules, sftpproxy.Options{Logger: logs.logger()})
+	}}, 0, logs.logger())
 
 	start := time.Now()
 	out, err := openSSH(t, sftpPath, srv, t.TempDir(), "ls\n")
@@ -141,7 +131,7 @@ func TestOpenSSHWaitsForASlowLogin(t *testing.T) {
 	if took := time.Since(start); took < time.Second {
 		t.Errorf("sftp took %v, want at least the second its login was delayed", took)
 	}
-	if want := `msg="injected fault" conn=1 request=authenticate user=test fault=delay duration=1s`; !strings.Contains(logs.text(), want) {
+	if want := `msg="injected fault" conn=1 operation=authenticate user=test fault=delay duration=1s`; !strings.Contains(logs.text(), want) {
 		t.Errorf("logs lack %q:\n%s", want, logs.text())
 	}
 }

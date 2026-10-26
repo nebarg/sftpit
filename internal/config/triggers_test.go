@@ -15,7 +15,7 @@ import (
 func TestLoadReadsTriggersAndConnectionActions(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+`  timed:
+	cfg, err := loadScenarios(t, dir, `  timed:
     faults:
       - id: bad-five-seconds
         match: {operation: any}
@@ -44,12 +44,10 @@ func TestLoadReadsTriggersAndConnectionActions(t *testing.T) {
         trigger: {at: 1s, anchor: transfer}
         decision: {probability: 0.5}
         action: {type: close_connection}
-`, 0o600)
-	cfg, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+`, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	half := 0.5
 	want := []faults.Rule{
 		{
 			ID:      "bad-five-seconds",
@@ -89,7 +87,7 @@ func TestLoadReadsTriggersAndConnectionActions(t *testing.T) {
 			ID:          "random-download-reset",
 			Match:       faults.Match{Operations: []faults.Operation{faults.Read}},
 			Trigger:     &faults.Trigger{Anchor: faults.Transfer, At: &faults.Range[time.Duration]{Min: time.Second, Max: time.Second}},
-			Probability: &half,
+			Probability: new(0.5),
 			Action:      sftpproxy.Drop{},
 		},
 	}
@@ -125,8 +123,7 @@ func TestLoadRejectsInvalidTriggers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+"  s:\n    faults:\n      - id: r\n        "+tt.rule+"\n", 0o600)
-			_, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+			_, err := loadScenarios(t, dir, oneRule(tt.rule), "")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

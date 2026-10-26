@@ -1,4 +1,4 @@
-.PHONY: build test vet lint vuln fmt-check tidy-check check linux-check integration-deps
+.PHONY: build test vet lint vuln fmt-check fix-check tidy-check check linux-check integration-deps
 
 build:
 	go build -o bin/sftpit ./cmd/sftpit
@@ -8,7 +8,6 @@ test:
 
 vet:
 	go vet ./...
-	GOOS=windows go vet ./...
 
 lint:
 	go tool staticcheck ./...
@@ -22,10 +21,13 @@ fmt-check:
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
 
+fix-check:
+	go fix -diff ./...
+
 tidy-check:
 	go mod tidy -diff
 
-check: fmt-check tidy-check vet lint test
+check: fmt-check fix-check tidy-check vet lint test
 
 linux-check:
 	docker build --tag sftpit-linux-check test/linux

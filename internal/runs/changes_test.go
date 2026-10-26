@@ -86,8 +86,7 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 				t.Fatalf("Dial: %v", err)
 			}
 			defer raw.Close()
-			for msg := ""; msg != "injected fault"; msg = receive(t, logs) {
-			}
+			awaitLog(t, logs, "injected fault")
 			if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil, nil); err != nil {
 				t.Fatalf("ChangeRules: %v", err)
 			}
@@ -101,8 +100,7 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 			case !tt.banner && (line != "" || !errors.Is(err, io.EOF)):
 				t.Errorf("read %q (%v), want the frozen connection closed once it is released", line, err)
 			}
-			for msg := ""; msg != "fault released"; msg = receive(t, logs) {
-			}
+			awaitLog(t, logs, "fault released")
 		})
 	}
 }

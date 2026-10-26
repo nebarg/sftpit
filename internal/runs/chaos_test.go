@@ -44,7 +44,7 @@ func TestChaosIsPausedAndResumedDuringARun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	if set, err := m.Rules(next.ID); err != nil || !reflect.DeepEqual(set.Chaos, heavy) {
+	if set, err := m.Rules(next.Run.ID); err != nil || !reflect.DeepEqual(set.Chaos, heavy) {
 		t.Errorf("a run of a scenario with chaos and a fresh seed has %+v (%v), want its chaos", set, err)
 	}
 }
@@ -54,11 +54,11 @@ func TestResetStartsAnInlineScenarioWithChaos(t *testing.T) {
 	moderate := &faults.Chaos{Preset: faults.Moderate}
 	inline := &InlineScenario{Chaos: moderate}
 	for _, seed := range []*faults.Seed{nil, new(faults.Seed(7))} {
-		run, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: seed})
+		status, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: seed})
 		if err != nil {
 			t.Fatalf("Reset: %v", err)
 		}
-		if set, err := m.Rules(run.ID); err != nil || !reflect.DeepEqual(set.Chaos, moderate) || len(set.Rules) != 0 {
+		if set, err := m.Rules(status.Run.ID); err != nil || !reflect.DeepEqual(set.Chaos, moderate) || len(set.Rules) != 0 {
 			t.Errorf("the inline run with seed %v has %+v (%v), want its chaos", seed, set, err)
 		}
 	}
@@ -73,7 +73,7 @@ func TestResetStartsAnInlineScenarioWithChaos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	if set, err := m.Rules(next.ID); err != nil || next.Scenario != run.Scenario || !reflect.DeepEqual(set.Chaos, moderate) || len(set.Rules) != 0 {
-		t.Errorf("after a bare reset, the run has %+v and rules %+v (%v), want the inline chaos again", next.Scenario, set, err)
+	if set, err := m.Rules(next.Run.ID); err != nil || next.Run.Scenario != run.Scenario || !reflect.DeepEqual(set.Chaos, moderate) || len(set.Rules) != 0 {
+		t.Errorf("after a bare reset, the run has %+v and rules %+v (%v), want the inline chaos again", next.Run.Scenario, set, err)
 	}
 }
