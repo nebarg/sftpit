@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -378,11 +379,19 @@ func TestSetstat(t *testing.T) {
 func TestSetstatAttemptsEveryAttribute(t *testing.T) {
 	dir, e := newBackend(t)
 	writeHostFile(t, filepath.Join(dir, "orders.csv"), "0123456789")
+	info, err := os.Stat(filepath.Join(dir, "orders.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := info.Sys().(*syscall.Stat_t)
 	s := startRaw(t, e)
 
+	// Another owner is refused even for root, who could chown(2) the file.
 	s.wantStatus(&sftpwire.SetStat{Path: "/orders.csv", Attrs: sftpwire.Attrs{
 		Flags: sftpwire.AttrUIDGID | sftpwire.AttrSize,
 		Size:  2,
+		UID:   owner.Uid + 1,
+		GID:   owner.Gid,
 	}}, sftpwire.StatusPermissionDenied)
 	assertFile(t, filepath.Join(dir, "orders.csv"), "01")
 }

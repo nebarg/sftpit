@@ -74,6 +74,7 @@ type Key struct {
 
 var _ slog.LogValuer = Key{}
 
+// LogValue logs k as a group of its fields.
 func (k Key) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("rule", k.Rule),

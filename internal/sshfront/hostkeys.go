@@ -54,6 +54,11 @@ func loadOrCreateHostKey(path, keyType string, generate func() (crypto.PrivateKe
 	pemBytes, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		pemBytes, err = createHostKeyFile(path, generate)
+		// Another process sharing the directory saved its key first, and
+		// both must serve that one.
+		if errors.Is(err, fs.ErrExist) {
+			pemBytes, err = os.ReadFile(path)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sshfront: host key %s: %w", path, err)
@@ -94,6 +99,8 @@ func generateRSAKey() (crypto.PrivateKey, error) {
 	return rsa.GenerateKey(rand.Reader, rsaHostKeyBits)
 }
 
+// writeFileAtomic writes data to a new file at path, so that a reader sees
+// either all of it or none. It fails with fs.ErrExist if path exists.
 func writeFileAtomic(path string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -113,5 +120,6 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	// Unlike a rename, a link never replaces a file that is already there.
+	return os.Link(tmpPath, path)
 }

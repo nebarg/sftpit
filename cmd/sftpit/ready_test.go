@@ -131,6 +131,9 @@ func TestServeRefusesAReadyFileItCannotWrite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if filepath.Dir(tt.path) == readOnly && os.Geteuid() == 0 {
+				t.Skip("root can write in any directory")
+			}
 			// A serve that took the file would run until the deadline.
 			ctx, cancel := context.WithTimeout(t.Context(), startTimeout)
 			defer cancel()

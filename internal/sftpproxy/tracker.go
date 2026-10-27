@@ -143,57 +143,39 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 	ok := true
 	switch p := p.(type) {
 	case *sftpwire.Open:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.OpenDir:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.Stat:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.LStat:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.SetStat:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.Remove:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.Mkdir:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.Rmdir:
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.RealPath:
 		// OpenSSH and pkg/sftp both canonicalize an empty path as ".".
 		if p.Path == "" {
 			p.Path = "."
 		}
-		p.Path, _ = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, _ = t.resolveIn(&p.Path)
 	case *sftpwire.Rename:
-		p.OldPath, ok = t.resolve(p.OldPath)
-		if ok {
-			p.NewPath, ok = t.resolve(p.NewPath)
-		}
-		req.path, req.target = p.OldPath, p.NewPath
+		ok = t.resolveRename(req, &p.OldPath, &p.NewPath)
 	case *sftpwire.PosixRename:
 		if !t.extensions[sftpwire.ExtPosixRename] {
 			return req, status(sftpwire.StatusOpUnsupported)
 		}
-		p.OldPath, ok = t.resolve(p.OldPath)
-		if ok {
-			p.NewPath, ok = t.resolve(p.NewPath)
-		}
-		req.path, req.target = p.OldPath, p.NewPath
+		ok = t.resolveRename(req, &p.OldPath, &p.NewPath)
 	case *sftpwire.StatVFS:
 		if !t.extensions[sftpwire.ExtStatVFS] {
 			return req, status(sftpwire.StatusOpUnsupported)
 		}
-		p.Path, ok = t.resolve(p.Path)
-		req.path = p.Path
+		req.path, ok = t.resolveIn(&p.Path)
 	case *sftpwire.Close:
 		t.use(req, p.Handle)
 	case *sftpwire.Read:
@@ -320,6 +302,24 @@ func (t *tracker) register(req *request) {
 		// the close then fails.
 		delete(t.handles, c.Handle)
 	}
+}
+
+// resolveIn resolves the path *p in place, as resolve does, and returns it.
+func (t *tracker) resolveIn(p *string) (string, bool) {
+	var ok bool
+	*p, ok = t.resolve(*p)
+	return *p, ok
+}
+
+// resolveRename resolves a rename's paths in place, as the request's path
+// and target, and reports whether both name a file.
+func (t *tracker) resolveRename(req *request, from, to *string) bool {
+	var ok bool
+	if req.path, ok = t.resolveIn(from); !ok {
+		return false
+	}
+	req.target, ok = t.resolveIn(to)
+	return ok
 }
 
 // resolve makes p absolute against the backend's default directory and

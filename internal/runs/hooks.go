@@ -40,12 +40,12 @@ func Hooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
 }
 
 func inject(ctx context.Context, logger *slog.Logger, rules *faults.Engine, conn *sshfront.Conn, event faults.Operation, action sftpproxy.Action) {
+	if action == nil {
+		return
+	}
 	attrs := []any{"conn", conn.ID(), "operation", event}
 	if conn.User() != "" {
 		attrs = append(attrs, "user", conn.User())
-	}
-	if action == nil {
-		return
 	}
 	attrs = append(attrs, sftpproxy.FaultAttrs(action, "")...)
 	logger.Info("injected fault", attrs...)
