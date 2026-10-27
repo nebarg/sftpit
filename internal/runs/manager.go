@@ -150,7 +150,7 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if m.current, err = m.begin(first); err != nil {
 		return nil, err
 	}
-	m.current.stops = append(m.current.stops, ArmTimers(m.current.rules, m.srv, logger))
+	m.current.stops = append(m.current.stops, armTimers(m.current.rules.Timers(), m.srv, logger))
 	return m, nil
 }
 
@@ -252,7 +252,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 	}
 	// An outage at the start of the run begins before any client is
 	// admitted.
-	next.stops = append(next.stops, ArmTimers(next.rules, m.srv, m.logger))
+	next.stops = append(next.stops, armTimers(next.rules.Timers(), m.srv, m.logger))
 	m.srv.Resume()
 	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(chosen.scenario)...)...)
 	return m.Status(), nil
@@ -491,7 +491,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		root:       root,
 		rules:      rules,
 		handler:    Handler(run, embedded, rules, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger}),
-		hooks:      Hooks(rules, m.logger),
+		hooks:      connectionHooks(rules, m.logger),
 		startRules: chosen.rules,
 		startChaos: chosen.chaos,
 	}, nil

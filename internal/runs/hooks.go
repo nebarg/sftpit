@@ -13,21 +13,14 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// Hooks returns the sshfront.Hooks that inject rules' faults into each
-// connection as it is accepted and as its client logs in: a delay, which
-// ends early if the connection does or its rule is removed, a close, reset
-// or freeze of the connection, or an outage of the server. A frozen
+// connectionHooks returns the sshfront.Hooks that inject rules' faults into
+// each connection as it is accepted and as its client logs in: a delay,
+// which ends early if the connection does or its rule is removed, a close,
+// reset or freeze of the connection, or an outage of the server. A frozen
 // connection is closed at its limit, when its rule is removed or rules
-// releases its stalls, or when the handshake timeout ends the hook. Hooks
-// returns no hooks if rules is nil. It logs each fault it injects to
-// logger, or to slog.Default() if logger is nil.
-func Hooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
-	if rules == nil {
-		return sshfront.Hooks{}
-	}
-	if logger == nil {
-		logger = slog.Default()
-	}
+// releases its stalls, or when the handshake timeout ends the hook. It logs
+// each fault it injects to logger.
+func connectionHooks(rules *faults.Engine, logger *slog.Logger) sshfront.Hooks {
 	return sshfront.Hooks{
 		Connect: func(ctx context.Context, conn *sshfront.Conn) {
 			inject(ctx, logger, rules, conn, faults.Connect, rules.Connect(faults.Client{Connection: conn.ID()}))
@@ -77,22 +70,11 @@ func inject(ctx context.Context, logger *slog.Logger, rules *faults.Engine, conn
 	}
 }
 
-// ArmTimers takes srv down at the moments of the run that rules times,
-// whatever the run's sessions are doing then, until stop is called. A
+// armTimers takes srv down at the moments of timers, the ListenerDowns of a
+// run, whatever the run's sessions are doing then, until stop is called. A
 // moment that has already come, such as the start of the run, takes srv
-// down before ArmTimers returns. Once stop has returned, no outage begins.
-// It logs each outage to logger, or to slog.Default() if logger is nil.
-func ArmTimers(rules *faults.Engine, srv *sshfront.Server, logger *slog.Logger) (stop func()) {
-	if rules == nil {
-		return func() {}
-	}
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return armTimers(rules.Timers(), srv, logger)
-}
-
-// armTimers takes srv down at the moments of timers, as ArmTimers does.
+// down before armTimers returns. Once stop has returned, no outage begins.
+// It logs each outage to logger.
 func armTimers(timers []sftpproxy.Timer, srv *sshfront.Server, logger *slog.Logger) (stop func()) {
 	var (
 		mu      sync.Mutex

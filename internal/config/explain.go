@@ -32,7 +32,7 @@ func Explain(opts Options) ([]byte, error) {
 	}
 	cfg := r.cfg
 	f := fileConfig{
-		SchemaVersion: SchemaVersion,
+		SchemaVersion: schemaVersion,
 		EnvFile:       r.envFiles,
 		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HTTPListen: cfg.HTTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace), ReplyOrder: cfg.ReplyOrder.String()},
 		Storage: storageConfig{

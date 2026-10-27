@@ -39,8 +39,8 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// SchemaVersion is the configuration file format this package reads.
-const SchemaVersion = 1
+// schemaVersion is the configuration file format this package reads.
+const schemaVersion = 1
 
 // Defaults used when neither the configuration nor the command line sets a
 // value.
@@ -402,7 +402,7 @@ func decodeFile(name string) (*fileConfig, error) {
 	var f fileConfig
 	if err := dec.Decode(&f); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("%s: the file is empty; it needs at least schema_version: %d", name, SchemaVersion)
+			return nil, fmt.Errorf("%s: the file is empty; it needs at least schema_version: %d", name, schemaVersion)
 		}
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
@@ -410,11 +410,11 @@ func decodeFile(name string) (*fileConfig, error) {
 		return nil, fmt.Errorf("%s: expected a single YAML document", name)
 	}
 	switch f.SchemaVersion {
-	case SchemaVersion:
+	case schemaVersion:
 	case 0:
-		return nil, fmt.Errorf("%s: schema_version is required; use schema_version: %d", name, SchemaVersion)
+		return nil, fmt.Errorf("%s: schema_version is required; use schema_version: %d", name, schemaVersion)
 	default:
-		return nil, fmt.Errorf("%s: schema_version %d is not supported; this sftpit reads version %d", name, f.SchemaVersion, SchemaVersion)
+		return nil, fmt.Errorf("%s: schema_version %d is not supported; this sftpit reads version %d", name, f.SchemaVersion, schemaVersion)
 	}
 	return &f, nil
 }

@@ -49,8 +49,8 @@ func (s *snapshots) take(name string) (sftpproxy.Snapshot, error) {
 	snap := sftpproxy.Snapshot{Copy: s.reserve(name, info.Size())}
 	if snap.Copy == "" {
 		snap.Size, err = io.Copy(h, held)
-	} else {
-		snap.Size, err = s.copy(snap.Copy, io.TeeReader(held, h))
+	} else if snap.Size, err = s.copy(snap.Copy, io.TeeReader(held, h)); err != nil {
+		s.unreserve(info.Size())
 	}
 	if err != nil {
 		return sftpproxy.Snapshot{}, fmt.Errorf("runs: snapshot: %w", err)
@@ -71,6 +71,14 @@ func (s *snapshots) reserve(name string, size int64) string {
 	s.copied += size
 	s.count++
 	return path.Join("snapshots", strconv.Itoa(s.count), backend.StoredName(name))
+}
+
+// unreserve returns size bytes that reserve took for a copy that failed,
+// and so kept nothing.
+func (s *snapshots) unreserve(size int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.copied -= size
 }
 
 // copy writes the content r reads to name, relative to the run's directory,
