@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -46,6 +47,35 @@ func TestLoadOrCreateHostKeysCreatesThenReloads(t *testing.T) {
 	}
 	if got, want := fingerprints(reloaded), fingerprints(created); !slices.Equal(got, want) {
 		t.Errorf("reloaded fingerprints %v, want the saved %v", got, want)
+	}
+}
+
+// Two servers can share a configured host key directory and start at once.
+// Each must serve the keys that end up saved, not ones the other replaced.
+func TestLoadOrCreateHostKeysAgreesWhenCreatingAtOnce(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "identity")
+	const starts = 4
+	got := make([][]string, starts)
+	var wg sync.WaitGroup
+	for i := range starts {
+		wg.Go(func() {
+			signers, err := sshfront.LoadOrCreateHostKeys(dir)
+			if err != nil {
+				t.Errorf("start %d: %v", i, err)
+				return
+			}
+			got[i] = fingerprints(signers)
+		})
+	}
+	wg.Wait()
+	saved, err := sshfront.LoadOrCreateHostKeys(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, prints := range got {
+		if prints != nil && !slices.Equal(prints, fingerprints(saved)) {
+			t.Errorf("start %d serves %v, but %v are saved", i, prints, fingerprints(saved))
+		}
 	}
 }
 

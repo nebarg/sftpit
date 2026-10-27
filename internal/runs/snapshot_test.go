@@ -88,3 +88,49 @@ func TestSnapshotsCopyFilesWithinTheBudget(t *testing.T) {
 		t.Error("a snapshot of a missing file succeeded")
 	}
 }
+
+// A copy that fails keeps nothing, so it must not use up the budget.
+func TestSnapshotsReturnTheBudgetOfACopyThatFails(t *testing.T) {
+	w, err := OpenWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	run, err := w.NewRun(Scenario{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run.Files, "orders.csv"), []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(run.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	limits := backend.Limits{MaxFileBytes: 100, MaxTotalBytes: 100, MaxFiles: 10, MaxOpenFiles: 10}
+	embedded, err := backend.New(root, backend.Options{Limits: limits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &snapshots{run: run, embedded: embedded, logger: slog.New(slog.DiscardHandler), budget: 10}
+
+	// A file where the copies' directory belongs makes the copy fail.
+	blocker := filepath.Join(run.Dir, "snapshots")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.take("/orders.csv"); err == nil {
+		t.Fatal("a snapshot whose copy failed succeeded")
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.take("/orders.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Copy == "" {
+		t.Error("the next snapshot was not copied, as if the failed copy had used the budget")
+	}
+}

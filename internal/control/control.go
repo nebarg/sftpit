@@ -294,10 +294,12 @@ func newStatus(s runs.Status) Status {
 // 2^53 inexactly, and read from a string or a number.
 type Seed faults.Seed
 
+// MarshalJSON writes s as a decimal string.
 func (s Seed) MarshalJSON() ([]byte, error) {
 	return json.Marshal(strconv.FormatUint(uint64(s), 10))
 }
 
+// UnmarshalJSON reads a seed written as a decimal string or a number.
 func (s *Seed) UnmarshalJSON(b []byte) error {
 	text := string(b)
 	if strings.HasPrefix(text, `"`) {
