@@ -233,7 +233,7 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 						ReplyOrder: order,
 						Logger:     logs.logger(),
 					})
-					openForDownload(t, p, fb, "h")
+					openForDownload(t, p, fb)
 
 					var unchanged []read
 					for i, r := range tt.reads {
@@ -293,7 +293,7 @@ func TestCorruptDownloadIsReservedBeforeItsFirstChange(t *testing.T) {
 						Length:     length,
 						Reserve:    func() bool { calls++; return reserved },
 					})})
-					openForDownload(t, p, fb, "h")
+					openForDownload(t, p, fb)
 
 					for i, r := range []read{{0, 50}, {90, 20}, {110, 20}} {
 						id := uint32(i + 2)
@@ -385,7 +385,7 @@ func TestSplitReadJoinsWhatTheBackendReturns(t *testing.T) {
 						Faults:     on[*sftpwire.Open](sftpproxy.CorruptDownload{Corruption: sftpproxy.OmitRange, Offset: 100, Length: 50}),
 						ReplyOrder: order,
 					})
-					openForDownload(t, p, fb, "h")
+					openForDownload(t, p, fb)
 
 					p.client.send(t, 2, &sftpwire.Read{Handle: "h", Offset: 90, Length: 20})
 					reqs := []backendRequest{fb.next(t), fb.next(t)}
@@ -422,7 +422,7 @@ func TestSplitReadIsAnsweredBeforeALaterDrop(t *testing.T) {
 					},
 					ReplyOrder: order,
 				})
-				openForDownload(t, p, fb, "h")
+				openForDownload(t, p, fb)
 
 				p.client.send(t, 2, &sftpwire.Read{Handle: "h", Offset: 90, Length: 20})
 				reqs := []backendRequest{fb.next(t), fb.next(t)}

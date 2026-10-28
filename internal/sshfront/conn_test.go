@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestConnClose(t *testing.T) {
@@ -21,10 +22,10 @@ func TestConnClose(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if err := receive(t, clientDone); !errors.Is(err, io.EOF) {
+	if err := testutil.Receive(t, clientDone); !errors.Is(err, io.EOF) {
 		t.Errorf("client saw %v, want EOF from a normal close", err)
 	}
-	receive(t, returned)
+	testutil.Receive(t, returned)
 }
 
 // TestConnCloseWithDataUnread checks that a normal close reaches the client
@@ -47,13 +48,13 @@ func TestConnCloseWithDataUnread(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := receive(t, clientDone); !errors.Is(err, io.EOF) {
+	if err := testutil.Receive(t, clientDone); !errors.Is(err, io.EOF) {
 		t.Errorf("client saw %v, want EOF from a normal close", err)
 	}
 	if elapsed := time.Since(start); elapsed >= sshfront.DrainTimeout {
 		t.Errorf("client saw the close after %v, want it before the server stopped waiting", elapsed)
 	}
-	receive(t, returned)
+	testutil.Receive(t, returned)
 }
 
 // TestConnCloseStopsWaitingForTheClient checks that a normal close gives up
@@ -90,7 +91,7 @@ func TestConnCloseStopsWaitingForTheClient(t *testing.T) {
 					t.Fatalf("server Close: %v", err)
 				}
 			}
-			receive(t, returned)
+			testutil.Receive(t, returned)
 			elapsed := time.Since(start)
 			if tt.least && elapsed < tt.wait {
 				t.Errorf("handler returned after %v, want at least %v", elapsed, tt.wait)
@@ -121,7 +122,7 @@ func TestConnCloseAfterTheClientResets(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
 	}
-	receive(t, returned)
+	testutil.Receive(t, returned)
 }
 
 func TestConnReset(t *testing.T) {
@@ -132,10 +133,10 @@ func TestConnReset(t *testing.T) {
 		t.Fatalf("Reset: %v", err)
 	}
 
-	if err := receive(t, clientDone); !errors.Is(err, syscall.ECONNRESET) {
+	if err := testutil.Receive(t, clientDone); !errors.Is(err, syscall.ECONNRESET) {
 		t.Errorf("client saw %v, want a connection reset", err)
 	}
-	receive(t, returned)
+	testutil.Receive(t, returned)
 }
 
 func TestConnFreezeWithholdsKeepalives(t *testing.T) {
@@ -157,7 +158,7 @@ func TestConnFreezeWithholdsKeepalives(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := receive(t, replied); err == nil {
+	if err := testutil.Receive(t, replied); err == nil {
 		t.Error("keepalive answered once the frozen connection closed")
 	}
 }
@@ -170,11 +171,11 @@ func TestConnCloseWhileFrozen(t *testing.T) {
 	closed := make(chan error, 1)
 	go func() { closed <- conn.Close() }()
 
-	if err := receive(t, closed); err != nil {
+	if err := testutil.Receive(t, closed); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	receive(t, clientDone)
-	receive(t, returned)
+	_ = testutil.Receive(t, clientDone)
+	testutil.Receive(t, returned)
 }
 
 func connectedClient(t *testing.T) (*ssh.Client, *sshfront.Conn, <-chan struct{}) {

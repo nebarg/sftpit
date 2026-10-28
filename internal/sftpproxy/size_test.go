@@ -44,7 +44,7 @@ func TestWrongSizeMisreportsStatReplies(t *testing.T) {
 						},
 						Logger: logs.logger(),
 					})
-					openForDownload(t, p, fb, "h")
+					openForDownload(t, p, fb)
 
 					attrs := sftpwire.Attrs{Flags: sftpwire.AttrSize | sftpwire.AttrPermissions, Size: tt.actual, Permissions: 0o100644}
 					p.client.send(t, 2, request)

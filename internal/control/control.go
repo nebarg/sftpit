@@ -391,5 +391,7 @@ func writeError(w http.ResponseWriter, code int, err error) {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	// The status has gone, so a body that fails to follow cannot be
+	// reported to the client.
+	_ = json.NewEncoder(w).Encode(v)
 }

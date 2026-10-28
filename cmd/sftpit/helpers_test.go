@@ -1,27 +1,26 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const startTimeout = 10 * time.Second
 
 // running is a serve command running in the background.
 type running struct {
-	stdout, stderr *syncBuffer
+	stdout, stderr *testutil.SyncBuffer
 	addr, apiAddr  string
 	workspace      string
 	run            string
@@ -39,6 +38,7 @@ var (
 // commandContext returns a context for a command that is meant to return on
 // its own, which ends it if a regression keeps it running.
 func commandContext(t *testing.T) context.Context {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), startTimeout)
 	t.Cleanup(cancel)
 	return ctx
@@ -49,7 +49,7 @@ func commandContext(t *testing.T) context.Context {
 func startServe(t *testing.T, args ...string) *running {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &running{stdout: &syncBuffer{}, stderr: &syncBuffer{}, cancel: cancel, code: make(chan int, 1)}
+	s := &running{stdout: &testutil.SyncBuffer{}, stderr: &testutil.SyncBuffer{}, cancel: cancel, code: make(chan int, 1)}
 	args = append([]string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0"}, args...)
 	go func() { s.code <- run(ctx, args, s.stdout, s.stderr) }()
 	t.Cleanup(func() { s.stop(t) })
@@ -132,32 +132,8 @@ func fingerprints(banner string) string {
 	return strings.Join(fingerprintPattern.FindAllString(banner, -1), " ")
 }
 
-func writeTestFile(t *testing.T, name, content string) {
-	t.Helper()
-	if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // goneReadyFile returns a ready file that a serve listening at httpAddr
 // could have written before it stopped.
 func goneReadyFile(httpAddr string) string {
 	return `{"sftp_address": "127.0.0.1:1", "http_address": "` + httpAddr + `", "workspace": "/gone", "host_keys": [{"type": "ssh-ed25519", "fingerprint": "SHA256:x"}]}`
-}
-
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }

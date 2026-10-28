@@ -56,35 +56,35 @@ func BenchmarkTransfer(b *testing.B) {
 
 // transferWithPkgSFTP uploads work/orders.csv to /orders.csv, or downloads
 // it back, with pkg/sftp's client and its concurrent requests.
-func transferWithPkgSFTP(t testing.TB, srv *server, work string, upload bool) {
-	t.Helper()
-	c := pkgSFTPClient(t, srv, ssh.Password(testPassword))
+func transferWithPkgSFTP(tb testing.TB, srv *server, work string, upload bool) {
+	tb.Helper()
+	c := pkgSFTPClient(tb, srv, ssh.Password(testPassword))
 	defer c.Close()
 	if upload {
 		local, err := os.Open(filepath.Join(work, "orders.csv"))
 		if err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 		defer local.Close()
 		f, err := c.Create("/orders.csv")
 		if err != nil {
-			t.Fatalf("Create: %v", err)
+			tb.Fatalf("Create: %v", err)
 		}
 		_, err = f.ReadFrom(local)
 		if closeErr := f.Close(); err == nil {
 			err = closeErr
 		}
 		if err != nil {
-			t.Fatalf("upload: %v", err)
+			tb.Fatalf("upload: %v", err)
 		}
 		return
 	}
 	f, err := c.Open("/orders.csv")
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		tb.Fatalf("Open: %v", err)
 	}
 	defer f.Close()
 	if _, err := f.WriteTo(io.Discard); err != nil {
-		t.Fatalf("download: %v", err)
+		tb.Fatalf("download: %v", err)
 	}
 }

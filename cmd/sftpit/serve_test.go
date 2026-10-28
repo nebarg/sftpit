@@ -22,6 +22,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/control"
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestServeTransfersFilesAndCleansUp(t *testing.T) {
@@ -59,7 +60,7 @@ func TestServeTransfersFilesAndCleansUp(t *testing.T) {
 func TestServeUsesConfiguredUsersAndHostKeys(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "sftpit.yaml")
-	writeTestFile(t, config, `schema_version: 1
+	testutil.WriteFile(t, config, `schema_version: 1
 env_file: "test.env"
 server:
   host_key: "hostkeys"
@@ -68,7 +69,7 @@ users:
     password_env: "PARTNER_B_PASSWORD"
     home: "/partner-b"
 `)
-	writeTestFile(t, filepath.Join(dir, "test.env"), "PARTNER_B_PASSWORD=s3cret-value\n")
+	testutil.WriteFile(t, filepath.Join(dir, "test.env"), "PARTNER_B_PASSWORD=s3cret-value\n")
 
 	first := startServe(t, "--config", config)
 	if out := first.stdout.String(); !strings.Contains(out, "users: partner-b (password)") || strings.Contains(out, "s3cret-value") {
@@ -93,7 +94,7 @@ users:
 
 func TestServeInjectsTheSelectedScenariosFaults(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, config, `schema_version: 1
+	testutil.WriteFile(t, config, `schema_version: 1
 server:
   host_key: keys
 scenarios:
@@ -146,7 +147,7 @@ scenarios:
 
 func TestServeShowsTheScenariosChaos(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, config, `schema_version: 1
+	testutil.WriteFile(t, config, `schema_version: 1
 server:
   host_key: keys
 scenarios:
@@ -170,7 +171,7 @@ scenarios:
 
 func TestServeInjectsFaultsAtLogin(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, config, `schema_version: 1
+	testutil.WriteFile(t, config, `schema_version: 1
 scenarios:
   cut-first-login:
     faults:
@@ -197,7 +198,7 @@ scenarios:
 
 func TestServeTakesTheListenerDownAtAMomentOfTheRun(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, config, `schema_version: 1
+	testutil.WriteFile(t, config, `schema_version: 1
 scenarios:
   outage:
     faults:
@@ -225,7 +226,7 @@ func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
         match: {operation: stat}
         action: {type: delay, when: before, duration: {min: 1ms, max: 20ms}}
 `
-	writeTestFile(t, config, "schema_version: 1\nserver:\n  host_key: keys\nscenarios:\n  pinned:\n    seed: 481516\n    faults:"+slowStat+"  fresh:\n    faults:"+slowStat)
+	testutil.WriteFile(t, config, "schema_version: 1\nserver:\n  host_key: keys\nscenarios:\n  pinned:\n    seed: 481516\n    faults:"+slowStat+"  fresh:\n    faults:"+slowStat)
 	freshLine := regexp.MustCompile(`  seed: (\d+) \(fresh; --seed (\d+) repeats its decisions\)\n`)
 	tests := []struct {
 		args []string
@@ -329,8 +330,8 @@ func TestServeKeepsADataDirectory(t *testing.T) {
 
 func TestServeRefusesUnusableDataDirectories(t *testing.T) {
 	notEmpty := t.TempDir()
-	writeTestFile(t, filepath.Join(notEmpty, "notes.txt"), "keep me")
-	var stdout, stderr syncBuffer
+	testutil.WriteFile(t, filepath.Join(notEmpty, "notes.txt"), "keep me")
+	var stdout, stderr testutil.SyncBuffer
 	code := run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--data-dir", notEmpty}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "is not empty: not an sftpit workspace") {
 		t.Errorf("a directory with other files: exit %d, stderr %q", code, stderr.String())
@@ -338,7 +339,7 @@ func TestServeRefusesUnusableDataDirectories(t *testing.T) {
 
 	inUse := t.TempDir()
 	startServe(t, "--data-dir", inUse)
-	stderr = syncBuffer{}
+	stderr = testutil.SyncBuffer{}
 	code = run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--data-dir", inUse}, &stdout, &stderr)
 	if code != exitFailure || !strings.Contains(stderr.String(), "workspace in use by another sftpit process") {
 		t.Errorf("a workspace in use: exit %d, stderr %q", code, stderr.String())
@@ -350,7 +351,7 @@ func TestServeStartsEveryRunFromTheSeed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(seed, "outgoing"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(seed, "outgoing", "orders.csv"), "id,total\n1,9.99\n")
+	testutil.WriteFile(t, filepath.Join(seed, "outgoing", "orders.csv"), "id,total\n1,9.99\n")
 
 	for run := 1; run <= 2; run++ {
 		s := startServe(t, "--seed-dir", seed)
@@ -388,7 +389,7 @@ func TestServeStartsEveryRunFromTheSeed(t *testing.T) {
 
 func TestServeResetsThroughTheControlAPI(t *testing.T) {
 	seed := t.TempDir()
-	writeTestFile(t, filepath.Join(seed, "orders.csv"), "id,total\n")
+	testutil.WriteFile(t, filepath.Join(seed, "orders.csv"), "id,total\n")
 	s := startServe(t, "--seed-dir", seed)
 	c := s.dial(t, "test", "test")
 	if err := c.Remove("/orders.csv"); err != nil {
@@ -435,21 +436,21 @@ func requestJSON(t *testing.T, method, url, body string) map[string]any {
 
 func TestServeRejectsUnusableSeeds(t *testing.T) {
 	withLink := t.TempDir()
-	writeTestFile(t, filepath.Join(withLink, "orders.csv"), "data")
+	testutil.WriteFile(t, filepath.Join(withLink, "orders.csv"), "data")
 	if err := os.Symlink("orders.csv", filepath.Join(withLink, "link.csv")); err != nil {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
-	var stdout, stderr syncBuffer
+	var stdout, stderr testutil.SyncBuffer
 	code := run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--seed-dir", withLink}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "link.csv: only regular files and directories") {
 		t.Errorf("seed with a symlink: exit %d, stderr %q", code, stderr.String())
 	}
 
 	tooBig := t.TempDir()
-	writeTestFile(t, filepath.Join(tooBig, "orders.csv"), "data!")
+	testutil.WriteFile(t, filepath.Join(tooBig, "orders.csv"), "data!")
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, config, "schema_version: 1\nstorage:\n  max_file_bytes: 4\n")
-	stderr = syncBuffer{}
+	testutil.WriteFile(t, config, "schema_version: 1\nstorage:\n  max_file_bytes: 4\n")
+	stderr = testutil.SyncBuffer{}
 	code = run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--config", config, "--seed-dir", tooBig}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "orders.csv: storage limit reached: max_file_bytes is 4") {
 		t.Errorf("seed past a limit: exit %d, stderr %q", code, stderr.String())
@@ -461,7 +462,7 @@ func TestServeRejectsUnusableSeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", tmp)
-	stderr = syncBuffer{}
+	stderr = testutil.SyncBuffer{}
 	code = run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--seed-dir", holdsWorkspace}, &stdout, &stderr)
 	if code != exitUsage || !strings.Contains(stderr.String(), "overlaps the workspace") {
 		t.Errorf("seed holding the workspace: exit %d, stderr %q", code, stderr.String())
@@ -473,7 +474,7 @@ func TestServeRejectsUnusableSeeds(t *testing.T) {
 
 func TestServeRejectsInvalidSettings(t *testing.T) {
 	missingSecret := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, missingSecret, "schema_version: 1\nusers:\n  - {name: a, password_env: SFTPIT_SERVE_TEST_UNSET}\n")
+	testutil.WriteFile(t, missingSecret, "schema_version: 1\nusers:\n  - {name: a, password_env: SFTPIT_SERVE_TEST_UNSET}\n")
 
 	tests := []struct {
 		name string
@@ -492,7 +493,7 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var stdout, stderr syncBuffer
+			var stdout, stderr testutil.SyncBuffer
 			code := run(commandContext(t), append([]string{"serve"}, tt.args...), &stdout, &stderr)
 			if code != exitUsage {
 				t.Errorf("exit code = %d, want %d", code, exitUsage)
@@ -516,7 +517,7 @@ func TestServeFailsClearlyOnAnOccupiedPort(t *testing.T) {
 		// A busy port must fail before the workspace changes, so that a kept
 		// run is never pruned for a run that never served.
 		dataDir := t.TempDir()
-		var stdout, stderr syncBuffer
+		var stdout, stderr testutil.SyncBuffer
 		args := []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--data-dir", dataDir, "--" + strings.ReplaceAll(setting, "_", "-"), occupied}
 		code := run(commandContext(t), args, &stdout, &stderr)
 		if code != exitFailure {
@@ -548,7 +549,7 @@ func TestListenLoopbackRefusesAnAddressThatIsNotLoopback(t *testing.T) {
 }
 
 func TestServeHelp(t *testing.T) {
-	var stdout, stderr syncBuffer
+	var stdout, stderr testutil.SyncBuffer
 	if code := run(commandContext(t), []string{"serve", "--help"}, &stdout, &stderr); code != exitOK {
 		t.Errorf("exit code = %d, want %d", code, exitOK)
 	}

@@ -14,14 +14,15 @@ import (
 	"time"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestSnapshotSeedKeepsWhatEachRunStartsWith(t *testing.T) {
 	stamp := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	seed := t.TempDir()
 	makeSeed(t, seed, map[string]string{"outgoing/orders.csv": "id,total\n", "Notes.TXT": "notes", "empty/": ""})
-	setMetadata(t, filepath.Join(seed, "outgoing", "orders.csv"), 0o640, stamp)
-	setMetadata(t, filepath.Join(seed, "outgoing"), 0o555, stamp.Add(time.Hour))
+	testutil.SetMetadata(t, filepath.Join(seed, "outgoing", "orders.csv"), 0o640, stamp)
+	testutil.SetMetadata(t, filepath.Join(seed, "outgoing"), 0o555, stamp.Add(time.Hour))
 	w := tempWorkspace(t)
 
 	s, err := w.snapshotSeed(seed)
@@ -77,7 +78,7 @@ func TestSnapshotSeedKeepsWhatEachRunStartsWith(t *testing.T) {
 func TestSnapshotSeedReplacesTheLastSnapshot(t *testing.T) {
 	first, second := t.TempDir(), t.TempDir()
 	makeSeed(t, first, map[string]string{"locked/a.txt": "a"})
-	setMetadata(t, filepath.Join(first, "locked"), 0o555, time.Now())
+	testutil.SetMetadata(t, filepath.Join(first, "locked"), 0o555, time.Now())
 	makeSeed(t, second, map[string]string{"b.txt": "b"})
 	w := tempWorkspace(t)
 
@@ -110,27 +111,31 @@ func TestRestoreRefusesASnapshotThatHasChanged(t *testing.T) {
 		want   string
 	}{
 		{"changed content", func(t *testing.T, snapshot string) {
-			writeTestFile(t, filepath.Join(snapshot, "in", "a.txt"), "A")
+			t.Helper()
+			testutil.WriteFile(t, filepath.Join(snapshot, "in", "a.txt"), "A")
 		}, "in/a.txt has changed in the seed snapshot"},
 		{"a changed mode", func(t *testing.T, snapshot string) {
+			t.Helper()
 			if err := os.Chmod(filepath.Join(snapshot, "in"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}, "in has changed in the seed snapshot"},
 		{"a removed file", func(t *testing.T, snapshot string) {
+			t.Helper()
 			if err := os.Remove(filepath.Join(snapshot, "in", "a.txt")); err != nil {
 				t.Fatal(err)
 			}
 		}, "in/a.txt has gone from the seed snapshot"},
 		{"an added file", func(t *testing.T, snapshot string) {
-			writeTestFile(t, filepath.Join(snapshot, "in", "b.txt"), "b")
+			t.Helper()
+			testutil.WriteFile(t, filepath.Join(snapshot, "in", "b.txt"), "b")
 		}, "in/b.txt has been added to the seed snapshot"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			seed := t.TempDir()
 			makeSeed(t, seed, map[string]string{"in/a.txt": "a"})
-			setMetadata(t, filepath.Join(seed, "in"), 0o755, time.Now())
+			testutil.SetMetadata(t, filepath.Join(seed, "in"), 0o755, time.Now())
 			w := tempWorkspace(t)
 			s, err := w.snapshotSeed(seed)
 			if err != nil {
@@ -176,27 +181,20 @@ func makeSeed(t *testing.T, dir string, files map[string]string) {
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		writeTestFile(t, full, content)
+		testutil.WriteFile(t, full, content)
 	}
 	// Let TempDir's cleanup empty directories made read-only.
 	t.Cleanup(func() {
-		filepath.WalkDir(dir, func(name string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(dir, func(name string, d fs.DirEntry, err error) error {
 			if err == nil && d.IsDir() {
-				os.Chmod(name, 0o755)
+				err = os.Chmod(name, 0o755)
 			}
-			return nil
+			return err
 		})
+		if err != nil {
+			t.Error(err)
+		}
 	})
-}
-
-func setMetadata(t *testing.T, name string, mode fs.FileMode, mtime time.Time) {
-	t.Helper()
-	if err := os.Chtimes(name, mtime, mtime); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(name, mode); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // tempWorkspace returns a temporary workspace, which the test's cleanup
@@ -261,13 +259,6 @@ func listTree(t *testing.T, dir string) []string {
 		t.Fatal(err)
 	}
 	return names
-}
-
-func writeTestFile(t *testing.T, name, content string) {
-	t.Helper()
-	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestSnapshotSeedRefusesASeedThatOverlapsTheWorkspace checks seeds that

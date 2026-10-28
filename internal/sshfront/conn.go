@@ -114,7 +114,7 @@ func (g *gate) Close() error {
 	if g.isDraining() {
 		// The client closing its end, or the read deadline that
 		// closeNormally set, ends the drain.
-		io.Copy(io.Discard, g.Conn)
+		_, _ = io.Copy(io.Discard, g.Conn)
 	}
 	return g.Conn.Close()
 }
@@ -174,7 +174,7 @@ func (g *gate) endHandshake() error {
 	if g.draining {
 		return nil
 	}
-	return g.Conn.SetDeadline(time.Time{})
+	return g.SetDeadline(time.Time{})
 }
 
 func (g *gate) isDraining() bool {

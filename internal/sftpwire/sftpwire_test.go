@@ -2,13 +2,13 @@ package sftpwire_test
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"io"
 	"reflect"
 	"testing"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const maxLength = 256 * 1024
@@ -127,48 +127,48 @@ func TestWireLayout(t *testing.T) {
 	tests := []struct {
 		name   string
 		packet sftpwire.Packet
-		want   wire
+		want   testutil.Wire
 	}{
 		{
 			name:   "open",
 			packet: &sftpwire.Open{Path: "/a", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate, Attrs: sftpwire.Attrs{Flags: sftpwire.AttrPermissions, Permissions: 0o644}},
-			want:   wire{}.byte(3).u32(7).str("/a").u32(0x0a).u32(0x04).u32(0o644),
+			want:   testutil.Wire{}.Byte(3).U32(7).Str("/a").U32(0x0a).U32(0x04).U32(0o644),
 		},
 		{
 			name:   "write",
 			packet: &sftpwire.Write{Handle: "h", Offset: 1 << 32, Data: []byte("xy")},
-			want:   wire{}.byte(6).u32(7).str("h").u64(1 << 32).str("xy"),
+			want:   testutil.Wire{}.Byte(6).U32(7).Str("h").U64(1 << 32).Str("xy"),
 		},
 		{
 			name:   "read",
 			packet: &sftpwire.Read{Handle: "h", Offset: 3, Length: 9},
-			want:   wire{}.byte(5).u32(7).str("h").u64(3).u32(9),
+			want:   testutil.Wire{}.Byte(5).U32(7).Str("h").U64(3).U32(9),
 		},
 		{
 			name:   "posix-rename",
 			packet: &sftpwire.PosixRename{OldPath: "/a", NewPath: "/b"},
-			want:   wire{}.byte(200).u32(7).str("posix-rename@openssh.com").str("/a").str("/b"),
+			want:   testutil.Wire{}.Byte(200).U32(7).Str("posix-rename@openssh.com").Str("/a").Str("/b"),
 		},
 		{
 			name:   "status",
 			packet: &sftpwire.StatusReply{Code: sftpwire.StatusNoSuchFile, Message: "No such file"},
-			want:   wire{}.byte(101).u32(7).u32(2).str("No such file").str(""),
+			want:   testutil.Wire{}.Byte(101).U32(7).U32(2).Str("No such file").Str(""),
 		},
 		{
 			name: "name with every attribute",
 			packet: &sftpwire.NameReply{Entries: []sftpwire.NameEntry{
 				{Filename: "f", Longname: "l", Attrs: fullAttrs},
 			}},
-			want: wire{}.byte(104).u32(7).u32(1).str("f").str("l").
-				u32(0x8000000f).u64(1 << 40).u32(501).u32(20).u32(0o100644).u32(1_700_000_000).u32(1_700_000_001).
-				u32(1).str("acl@example.com").str("\x00\x01"),
+			want: testutil.Wire{}.Byte(104).U32(7).U32(1).Str("f").Str("l").
+				U32(0x8000000f).U64(1 << 40).U32(501).U32(20).U32(0o100644).U32(1_700_000_000).U32(1_700_000_001).
+				U32(1).Str("acl@example.com").Str("\x00\x01"),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := sftpwire.AppendPacket(nil, 7, tt.packet)
-			if want := tt.want.framed(); !bytes.Equal(got, want) {
+			if want := tt.want.Framed(); !bytes.Equal(got, want) {
 				t.Errorf("encoded\n%x\nwant\n%x", got, want)
 			}
 		})
@@ -178,22 +178,22 @@ func TestWireLayout(t *testing.T) {
 func TestDecodeRequestUnsupported(t *testing.T) {
 	tests := []struct {
 		name string
-		b    wire
+		b    testutil.Wire
 		want sftpwire.UnsupportedError
 	}{
 		{
 			name: "readlink",
-			b:    wire{}.byte(19).u32(10).str("/link"),
+			b:    testutil.Wire{}.Byte(19).U32(10).Str("/link"),
 			want: sftpwire.UnsupportedError{ID: 10, Type: sftpwire.TypeReadLink},
 		},
 		{
 			name: "symlink",
-			b:    wire{}.byte(20).u32(11).str("/a").str("/b"),
+			b:    testutil.Wire{}.Byte(20).U32(11).Str("/a").Str("/b"),
 			want: sftpwire.UnsupportedError{ID: 11, Type: sftpwire.TypeSymlink},
 		},
 		{
 			name: "hardlink extension",
-			b:    wire{}.byte(200).u32(12).str("hardlink@openssh.com").str("/a").str("/b"),
+			b:    testutil.Wire{}.Byte(200).U32(12).Str("hardlink@openssh.com").Str("/a").Str("/b"),
 			want: sftpwire.UnsupportedError{ID: 12, Type: sftpwire.TypeExtended, Extension: "hardlink@openssh.com"},
 		},
 	}
@@ -216,21 +216,21 @@ func TestDecodeRejectsMalformedPackets(t *testing.T) {
 	tests := []struct {
 		name   string
 		decode func([]byte) error
-		b      wire
+		b      testutil.Wire
 	}{
-		{name: "request without an ID", decode: decodeRequest, b: wire{}.byte(17).u32(0)[:3]},
-		{name: "truncated path", decode: decodeRequest, b: wire{}.byte(17).u32(1).u32(10).bytes("/a")},
-		{name: "open without attributes", decode: decodeRequest, b: wire{}.byte(3).u32(1).str("/a").u32(1)},
-		{name: "NUL in a path", decode: decodeRequest, b: wire{}.byte(17).u32(1).str("/a\x00b")},
-		{name: "NUL in a rename target", decode: decodeRequest, b: wire{}.byte(18).u32(1).str("/a").str("/b\x00")},
-		{name: "truncated extension name", decode: decodeRequest, b: wire{}.byte(200).u32(1).u32(30).bytes("statvfs")},
-		{name: "extension without its fields", decode: decodeRequest, b: wire{}.byte(200).u32(1).str(sftpwire.ExtStatVFS)},
-		{name: "attribute flags without their fields", decode: decodeRequest, b: wire{}.byte(9).u32(1).str("/a").u32(sftpwire.AttrSize).u32(0)},
-		{name: "extended attribute count past the end", decode: decodeRequest, b: wire{}.byte(9).u32(1).str("/a").u32(sftpwire.AttrExtended).u32(0x7fffffff)},
-		{name: "name count past the end", decode: decodeReply, b: wire{}.byte(104).u32(1).u32(0x7fffffff)},
-		{name: "status without a language tag", decode: decodeReply, b: wire{}.byte(101).u32(1).u32(0).str("Success")},
-		{name: "truncated init extension", decode: decodeInit, b: wire{}.byte(1).u32(3).str(sftpwire.ExtStatVFS)},
-		{name: "truncated version extension", decode: decodeVersion, b: wire{}.byte(2).u32(3).str(sftpwire.ExtStatVFS)},
+		{name: "request without an ID", decode: decodeRequest, b: testutil.Wire{}.Byte(17).U32(0)[:3]},
+		{name: "truncated path", decode: decodeRequest, b: testutil.Wire{}.Byte(17).U32(1).U32(10).Raw("/a")},
+		{name: "open without attributes", decode: decodeRequest, b: testutil.Wire{}.Byte(3).U32(1).Str("/a").U32(1)},
+		{name: "NUL in a path", decode: decodeRequest, b: testutil.Wire{}.Byte(17).U32(1).Str("/a\x00b")},
+		{name: "NUL in a rename target", decode: decodeRequest, b: testutil.Wire{}.Byte(18).U32(1).Str("/a").Str("/b\x00")},
+		{name: "truncated extension name", decode: decodeRequest, b: testutil.Wire{}.Byte(200).U32(1).U32(30).Raw("statvfs")},
+		{name: "extension without its fields", decode: decodeRequest, b: testutil.Wire{}.Byte(200).U32(1).Str(sftpwire.ExtStatVFS)},
+		{name: "attribute flags without their fields", decode: decodeRequest, b: testutil.Wire{}.Byte(9).U32(1).Str("/a").U32(sftpwire.AttrSize).U32(0)},
+		{name: "extended attribute count past the end", decode: decodeRequest, b: testutil.Wire{}.Byte(9).U32(1).Str("/a").U32(sftpwire.AttrExtended).U32(0x7fffffff)},
+		{name: "name count past the end", decode: decodeReply, b: testutil.Wire{}.Byte(104).U32(1).U32(0x7fffffff)},
+		{name: "status without a language tag", decode: decodeReply, b: testutil.Wire{}.Byte(101).U32(1).U32(0).Str("Success")},
+		{name: "truncated init extension", decode: decodeInit, b: testutil.Wire{}.Byte(1).U32(3).Str(sftpwire.ExtStatVFS)},
+		{name: "truncated version extension", decode: decodeVersion, b: testutil.Wire{}.Byte(2).U32(3).Str(sftpwire.ExtStatVFS)},
 	}
 
 	for _, tt := range tests {
@@ -246,12 +246,12 @@ func TestDecodeRejectsWrongPacketKind(t *testing.T) {
 	tests := []struct {
 		name   string
 		decode func([]byte) error
-		b      wire
+		b      testutil.Wire
 	}{
-		{name: "reply as a request", decode: decodeRequest, b: wire{}.byte(101).u32(1).u32(0).str("").str("")},
-		{name: "INIT as a request", decode: decodeRequest, b: wire{}.byte(1).u32(3)},
-		{name: "unknown request type", decode: decodeRequest, b: wire{}.byte(99).u32(1)},
-		{name: "request as a reply", decode: decodeReply, b: wire{}.byte(17).u32(1).str("/a")},
+		{name: "reply as a request", decode: decodeRequest, b: testutil.Wire{}.Byte(101).U32(1).U32(0).Str("").Str("")},
+		{name: "INIT as a request", decode: decodeRequest, b: testutil.Wire{}.Byte(1).U32(3)},
+		{name: "unknown request type", decode: decodeRequest, b: testutil.Wire{}.Byte(99).U32(1)},
+		{name: "request as a reply", decode: decodeReply, b: testutil.Wire{}.Byte(17).U32(1).Str("/a")},
 	}
 
 	for _, tt := range tests {
@@ -268,7 +268,7 @@ func TestDecodeRejectsWrongPacketKind(t *testing.T) {
 }
 
 func TestDecodeIgnoresTrailingBytes(t *testing.T) {
-	id, p, err := sftpwire.DecodeRequest(wire{}.byte(17).u32(5).str("/a").bytes("\x01\x02\x03"))
+	id, p, err := sftpwire.DecodeRequest(testutil.Wire{}.Byte(17).U32(5).Str("/a").Raw("\x01\x02\x03"))
 	if err != nil {
 		t.Fatalf("DecodeRequest: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestDecodeIgnoresTrailingBytes(t *testing.T) {
 }
 
 func TestDecodeKeepsUndefinedAttributeFlags(t *testing.T) {
-	_, p, err := sftpwire.DecodeRequest(wire{}.byte(9).u32(5).str("/a").u32(0x14).u32(0o600))
+	_, p, err := sftpwire.DecodeRequest(testutil.Wire{}.Byte(9).U32(5).Str("/a").U32(0x14).U32(0o600))
 	if err != nil {
 		t.Fatalf("DecodeRequest: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestStatusMessages(t *testing.T) {
 }
 
 func TestReadPacket(t *testing.T) {
-	stat := wire{}.byte(17).u32(1).str("/a")
+	stat := testutil.Wire{}.Byte(17).U32(1).Str("/a")
 
 	tests := []struct {
 		name    string
@@ -311,12 +311,12 @@ func TestReadPacket(t *testing.T) {
 		want    []byte
 		wantErr error
 	}{
-		{name: "one packet", input: stat.framed(), want: stat},
+		{name: "one packet", input: stat.Framed(), want: stat},
 		{name: "end before a packet", input: nil, wantErr: io.EOF},
 		{name: "end inside the length", input: []byte{0, 0}, wantErr: io.ErrUnexpectedEOF},
-		{name: "end after the length", input: stat.framed()[:4], wantErr: io.ErrUnexpectedEOF},
-		{name: "end inside the body", input: stat.framed()[:8], wantErr: io.ErrUnexpectedEOF},
-		{name: "empty packet", input: wire{}.u32(0), wantErr: sftpwire.ErrMalformed},
+		{name: "end after the length", input: stat.Framed()[:4], wantErr: io.ErrUnexpectedEOF},
+		{name: "end inside the body", input: stat.Framed()[:8], wantErr: io.ErrUnexpectedEOF},
+		{name: "empty packet", input: testutil.Wire{}.U32(0), wantErr: sftpwire.ErrMalformed},
 	}
 
 	for _, tt := range tests {
@@ -330,10 +330,10 @@ func TestReadPacket(t *testing.T) {
 
 	t.Run("length limit", func(t *testing.T) {
 		limit := uint32(len(stat))
-		if _, err := sftpwire.ReadPacket(bytes.NewReader(stat.framed()), limit); err != nil {
+		if _, err := sftpwire.ReadPacket(bytes.NewReader(stat.Framed()), limit); err != nil {
 			t.Errorf("ReadPacket of a packet at the limit: %v", err)
 		}
-		if b, err := sftpwire.ReadPacket(bytes.NewReader(stat.framed()), limit-1); err == nil {
+		if b, err := sftpwire.ReadPacket(bytes.NewReader(stat.Framed()), limit-1); err == nil {
 			t.Errorf("ReadPacket = %x, want a length limit error", b)
 		}
 	})
@@ -370,17 +370,4 @@ func decodeInit(b []byte) error {
 func decodeVersion(b []byte) error {
 	_, err := sftpwire.DecodeVersion(b)
 	return err
-}
-
-// wire builds packet bytes field by field, as the draft lays them out.
-type wire []byte
-
-func (w wire) byte(v byte) wire    { return append(w, v) }
-func (w wire) u32(v uint32) wire   { return binary.BigEndian.AppendUint32(w, v) }
-func (w wire) u64(v uint64) wire   { return binary.BigEndian.AppendUint64(w, v) }
-func (w wire) str(s string) wire   { return append(w.u32(uint32(len(s))), s...) }
-func (w wire) bytes(s string) wire { return append(w, s...) }
-
-func (w wire) framed() []byte {
-	return append(binary.BigEndian.AppendUint32(nil, uint32(len(w))), w...)
 }

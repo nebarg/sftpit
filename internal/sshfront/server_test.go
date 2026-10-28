@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -21,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestNewRejectsInvalidConfig(t *testing.T) {
@@ -269,7 +269,7 @@ func TestOnlySFTPSubsystemIsServed(t *testing.T) {
 		if err := session.RequestSubsystem("sftp"); err != nil {
 			t.Fatalf("first sftp subsystem request: %v", err)
 		}
-		receive(t, conns)
+		testutil.Receive(t, conns)
 		if err := session.RequestSubsystem("sftp"); err == nil {
 			t.Fatal("second sftp subsystem request accepted, want refusal")
 		}
@@ -346,7 +346,7 @@ func TestHandlerResultSetsExitStatus(t *testing.T) {
 }
 
 func TestHandlerFailuresAreLogged(t *testing.T) {
-	var logs syncBuffer
+	var logs testutil.SyncBuffer
 	stopped := make(chan struct{})
 	addr, srv := startServer(t, sshfront.Config{
 		Users: []sshfront.User{{Name: "fails", Password: testPassword}, {Name: "waits", Password: testPassword}},
@@ -389,7 +389,7 @@ func TestHandlerFailuresAreLogged(t *testing.T) {
 }
 
 func TestHandlerPanicIsContained(t *testing.T) {
-	var logs syncBuffer
+	var logs testutil.SyncBuffer
 	addr, _ := startServer(t, sshfront.Config{
 		Handler: func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error {
 			panic("proxy bug")
@@ -428,14 +428,14 @@ func TestCloseInterruptsAcceptRetry(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	for range 3 {
-		receive(t, ln.attempts)
+		testutil.Receive(t, ln.attempts)
 	}
 
 	start := time.Now()
 	if err := srv.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := receive(t, served); !errors.Is(err, sshfront.ErrServerClosed) {
+	if err := testutil.Receive(t, served); !errors.Is(err, sshfront.ErrServerClosed) {
 		t.Errorf("Serve returned %v, want ErrServerClosed", err)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
@@ -455,7 +455,7 @@ func TestServeReturnsWhenListenerClosedElsewhere(t *testing.T) {
 
 	ln.Close()
 
-	err = receive(t, served)
+	err = testutil.Receive(t, served)
 	if !errors.Is(err, net.ErrClosed) || errors.Is(err, sshfront.ErrServerClosed) {
 		t.Errorf("Serve returned %v, want the listener's close error", err)
 	}
@@ -473,7 +473,7 @@ func TestServerCloseInterruptsHandshake(t *testing.T) {
 
 	closed := make(chan error, 1)
 	go func() { closed <- srv.Close() }()
-	if err := receive(t, closed); err != nil {
+	if err := testutil.Receive(t, closed); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 }
@@ -522,23 +522,6 @@ func (l *flakyListener) Accept() (net.Conn, error) {
 		return nil, &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept", syscall.EMFILE)}
 	}
 	return l.Listener.Accept()
-}
-
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 func sftpExitStatus(t *testing.T, client *ssh.Client) int {

@@ -98,7 +98,7 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 	case rc.FailRandomly != nil:
 		err = rc.FailRandomly.expand(&rc)
 	case rc.CorruptDownload != nil:
-		err = rc.CorruptDownload.expand(&rc)
+		rc.CorruptDownload.expand(&rc)
 	}
 	if err != nil {
 		return rc, "", fmt.Errorf("%s: %w", recipe, err)
@@ -143,12 +143,11 @@ func (c failRandomlyConfig) expand(rc *ruleConfig) error {
 	return nil
 }
 
-func (c corruptDownloadConfig) expand(rc *ruleConfig) error {
+func (c corruptDownloadConfig) expand(rc *ruleConfig) {
 	rc.Match = c.match("read")
 	rc.Match.Attempt = attempts(c.Attempts)
 	rc.Decision = decision(c.Probability)
 	rc.Action = actionConfig{Type: "corrupt_download", Transform: c.Transform, Offset: c.Offset, Length: c.Length}
-	return nil
 }
 
 // attempts returns the attempt of a recipe that lists numbers, counted per

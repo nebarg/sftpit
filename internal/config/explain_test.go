@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestExplainedConfigurationsLoadTheSame(t *testing.T) {
@@ -47,7 +48,7 @@ func TestExplainedConfigurationsLoadTheSame(t *testing.T) {
 			t.Errorf("the explained configuration lists %q after %q, which is tried after it:\n%s", tried[i-1], tried[i], explained)
 		}
 	}
-	elsewhere := writeTestFile(t, filepath.Join(t.TempDir(), "explained.yaml"), string(explained))
+	elsewhere := testutil.WriteFile(t, filepath.Join(t.TempDir(), "explained.yaml"), string(explained))
 	got, err := Load(Options{ConfigFile: elsewhere, LookupEnv: opts.LookupEnv})
 	if err != nil {
 		t.Fatalf("Load of the explained configuration: %v\n%s", err, explained)
@@ -96,9 +97,9 @@ func writeEveryAction(t *testing.T) Options {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "keys", "partner-b.pub"), "")
 	writeAuthorizedKeys(t, filepath.Join(dir, "keys", "robot.pub"), "")
-	writeTestFile(t, filepath.Join(dir, ".env"), "P2=second-secret\n")
-	writeTestFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
+	testutil.WriteFile(t, filepath.Join(dir, ".env"), "P2=second-secret\n")
+	testutil.WriteFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "")
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: .env
 server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys, reply_order: completion}
 storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
@@ -159,7 +160,7 @@ scenarios:
 }
 
 func TestExplainWritesRecipesInTheLongForm(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
 scenarios:
   upload-recovery:
     seed: 481516
@@ -200,9 +201,9 @@ scenarios:
 
 func TestExplainSaysWhereEachSecretComesFrom(t *testing.T) {
 	dir := t.TempDir()
-	envFile := writeTestFile(t, filepath.Join(dir, ".env"), "FROM_FILE=x\nEMPTY=\n")
+	envFile := testutil.WriteFile(t, filepath.Join(dir, ".env"), "FROM_FILE=x\nEMPTY=\n")
 	absent := filepath.Join(dir, "absent.env")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: [.env, absent.env]
 users:
   - {name: a, password_env: FROM_ENV}
@@ -232,7 +233,7 @@ users:
 }
 
 func TestExplainStillRejectsInvalidConfigurations(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nscenarios:\n  s:\n    faults:\n      - {id: r, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n")
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nscenarios:\n  s:\n    faults:\n      - {id: r, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n")
 	if _, err := Explain(Options{ConfigFile: config, LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), `unknown operation "upload"`) {
 		t.Errorf("Explain = %v, want the unknown operation reported", err)
 	}
@@ -244,9 +245,9 @@ func TestExplainStillRejectsInvalidConfigurations(t *testing.T) {
 func TestExplainWritesAbsolutePathsForARelativeConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeAuthorizedKeys(t, "configs/keys/partner.pub", "")
-	writeTestFile(t, "configs/.env", "P=first\n")
-	writeTestFile(t, "extra.env", "Q=second\n")
-	writeTestFile(t, "configs/sftpit.yaml", `schema_version: 1
+	testutil.WriteFile(t, "configs/.env", "P=first\n")
+	testutil.WriteFile(t, "extra.env", "Q=second\n")
+	testutil.WriteFile(t, "configs/sftpit.yaml", `schema_version: 1
 env_file: .env
 server:
   host_key: ./workspace
@@ -275,7 +276,7 @@ users:
 	}
 
 	t.Chdir(t.TempDir())
-	got, err := Load(Options{ConfigFile: writeTestFile(t, "explained.yaml", string(explained)), LookupEnv: noEnv})
+	got, err := Load(Options{ConfigFile: testutil.WriteFile(t, "explained.yaml", string(explained)), LookupEnv: noEnv})
 	if err != nil {
 		t.Fatalf("Load of the explained configuration from elsewhere: %v\n%s", err, explained)
 	}

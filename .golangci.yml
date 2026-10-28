@@ -1,0 +1,46 @@
+version: "2"
+
+# make lint runs these linters at the version the Makefile pins. go vet runs
+# separately, in make vet.
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - errcheck
+    - errname
+    - errorlint
+    - gocritic
+    - ineffassign
+    - intrange
+    - makezero
+    - misspell
+    - nakedret
+    - nilerr
+    - perfsprint
+    - predeclared
+    - revive
+    - staticcheck
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+  settings:
+    errcheck:
+      exclude-functions:
+        # It never fails.
+        - (*math/rand/v2.ChaCha8).Read
+    staticcheck:
+      checks: ["all"]
+  exclusions:
+    presets:
+      # Unchecked Close, Flush, os.Remove and printing, whose errors are
+      # deliberately ignored wherever they are not checked.
+      - std-error-handling
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

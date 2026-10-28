@@ -89,6 +89,7 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var logs capturedLog
 			srv := startScenario(t, []faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, 0, logs.logger())
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestSeedCopiesFilesAndDirectories(t *testing.T) {
@@ -20,15 +21,18 @@ func TestSeedCopiesFilesAndDirectories(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(seed, "incoming"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	setMetadata(t, filepath.Join(seed, "outgoing", "orders.csv"), 0o640, stamp)
-	setMetadata(t, filepath.Join(seed, "outgoing", "2026"), 0o750, stamp)
-	setMetadata(t, filepath.Join(seed, "outgoing"), 0o555, stamp)
+	testutil.SetMetadata(t, filepath.Join(seed, "outgoing", "orders.csv"), 0o640, stamp)
+	testutil.SetMetadata(t, filepath.Join(seed, "outgoing", "2026"), 0o750, stamp)
+	testutil.SetMetadata(t, filepath.Join(seed, "outgoing"), 0o555, stamp)
 
 	dir, e := newBackend(t)
 	t.Cleanup(func() {
 		// Let TempDir's cleanup empty the read-only directories.
-		os.Chmod(filepath.Join(seed, "outgoing"), 0o755)
-		os.Chmod(filepath.Join(dir, "outgoing"), 0o755)
+		for _, root := range []string{seed, dir} {
+			if err := os.Chmod(filepath.Join(root, "outgoing"), 0o755); err != nil {
+				t.Error(err)
+			}
+		}
 	})
 	if err := e.Seed(seed); err != nil {
 		t.Fatalf("Seed: %v", err)
@@ -134,15 +138,5 @@ func TestSeedReportsAMissingDirectory(t *testing.T) {
 	_, e := newBackend(t)
 	if err := e.Seed(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Seed error = %v, want ErrNotExist", err)
-	}
-}
-
-func setMetadata(t *testing.T, name string, mode os.FileMode, mtime time.Time) {
-	t.Helper()
-	if err := os.Chmod(name, mode); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(name, mtime, mtime); err != nil {
-		t.Fatal(err)
 	}
 }

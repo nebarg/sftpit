@@ -16,6 +16,7 @@ import (
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestRulesChangeDuringARun(t *testing.T) {
@@ -86,7 +87,7 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 				t.Fatalf("Dial: %v", err)
 			}
 			defer raw.Close()
-			awaitLog(t, logs, "injected fault")
+			testutil.ReceiveUntil(t, logs, "injected fault")
 			if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil, nil); err != nil {
 				t.Fatalf("ChangeRules: %v", err)
 			}
@@ -100,7 +101,7 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 			case !tt.banner && (line != "" || !errors.Is(err, io.EOF)):
 				t.Errorf("read %q (%v), want the frozen connection closed once it is released", line, err)
 			}
-			awaitLog(t, logs, "fault released")
+			testutil.ReceiveUntil(t, logs, "fault released")
 		})
 	}
 }
@@ -192,7 +193,7 @@ func TestALiveRuleClosesConnectionsAlreadyOpenAtItsMoment(t *testing.T) {
 	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{hangUp}, nil); err != nil {
 		t.Fatalf("ChangeRules: %v", err)
 	}
-	receive(t, ended)
+	_ = testutil.Receive(t, ended)
 	if got := m.Status(); got.State != StateUp {
 		t.Errorf("the status is %+v, want the server still up", got)
 	}

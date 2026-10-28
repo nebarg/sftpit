@@ -6,7 +6,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -23,10 +22,11 @@ import (
 
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const (
-	waitTimeout = 5 * time.Second
+	waitTimeout = testutil.WaitTimeout
 	maxLength   = 256 * 1024
 )
 
@@ -61,7 +61,7 @@ func startProxy(t *testing.T, backend net.Conn, opts sftpproxy.Options) *proxy {
 	result := serveInBackground(ctx, proxyEnd, backend, opts)
 	t.Cleanup(func() {
 		clientEnd.Close()
-		result.wait(t)
+		_ = result.wait(t)
 	})
 	return &proxy{client: newRawClient(clientEnd), conn: conn, result: result, cancel: cancel}
 }
@@ -164,9 +164,9 @@ func (c *rawClient) send(t *testing.T, id uint32, p sftpwire.Packet) {
 	c.write(t, sftpwire.AppendPacket(nil, id, p))
 }
 
-func (c *rawClient) sendRaw(t *testing.T, packet wire) {
+func (c *rawClient) sendRaw(t *testing.T, packet testutil.Wire) {
 	t.Helper()
-	c.write(t, packet.framed())
+	c.write(t, packet.Framed())
 }
 
 // sendTogether writes requests with IDs 1, 2 and so on in a single write, as
@@ -418,34 +418,8 @@ func sameElements[T cmp.Ordered](got []T, want ...T) bool {
 	return slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want)))
 }
 
-// wire builds packet bytes field by field, for packets the codec does not
-// encode.
-type wire []byte
-
-func (w wire) byte(v byte) wire  { return append(w, v) }
-func (w wire) u32(v uint32) wire { return binary.BigEndian.AppendUint32(w, v) }
-func (w wire) str(s string) wire { return append(w.u32(uint32(len(s))), s...) }
-
-func (w wire) framed() []byte {
-	return append(binary.BigEndian.AppendUint32(nil, uint32(len(w))), w...)
-}
-
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+// syncBuffer collects a session's logs.
+type syncBuffer struct{ testutil.SyncBuffer }
 
 // logger returns a logger that writes text records to b.
 func (b *syncBuffer) logger() *slog.Logger { return slog.New(slog.NewTextHandler(b, nil)) }
@@ -501,10 +475,12 @@ func openForUpload(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
 	p.client.assertReplies(t, 1)
 }
 
-func openForDownload(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
+// openForDownload opens /f for reading as request 1, with the backend
+// answering handle h.
+func openForDownload(t *testing.T, p *proxy, fb *fakeBackend) {
 	t.Helper()
 	p.client.send(t, 1, &sftpwire.Open{Path: "/f", Flags: sftpwire.OpenRead})
-	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: handle})
+	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: "h"})
 	p.client.assertReplies(t, 1)
 }
 
@@ -578,9 +554,10 @@ func (s *snapshots) taken() []string {
 	return slices.Clone(s.paths)
 }
 
-// snapshotLog is the log line for snapshotOf(path), closed as closedBy says,
+// snapshotLog is the log line for snapshotOf("/f"), closed as closedBy says,
 // quoted as the log quotes it.
-func snapshotLog(path, closedBy string) string {
+func snapshotLog(closedBy string) string {
+	const path = "/f"
 	snap := snapshotOf(path)
 	return fmt.Sprintf("level=INFO msg=snapshot path=%s closed_by=%s size=%d sha256=%x", path, closedBy, snap.Size, snap.SHA256)
 }

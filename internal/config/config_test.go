@@ -10,6 +10,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestLoadWithoutAConfigFileUsesTheDefaults(t *testing.T) {
@@ -30,7 +31,7 @@ func TestLoadWithoutAConfigFileUsesTheDefaults(t *testing.T) {
 }
 
 func TestLoadReadsEachStorageLimit(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `
 schema_version: 1
 storage:
   max_file_bytes: 16777216
@@ -47,7 +48,7 @@ storage:
 		t.Errorf("Limits = %+v, want %+v", cfg.Limits, want)
 	}
 
-	config = writeTestFile(t, config, "schema_version: 1\nstorage:\n  max_files: 1\n")
+	config = testutil.WriteFile(t, config, "schema_version: 1\nstorage:\n  max_files: 1\n")
 	cfg, err = Load(Options{ConfigFile: config, LookupEnv: noEnv})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -62,8 +63,8 @@ storage:
 func TestLoadReadsAFullConfig(t *testing.T) {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "keys", "partner-b.pub"), "")
-	writeTestFile(t, filepath.Join(dir, ".env"), "SFTPIT_TEST_PASSWORD='from the env file'\n")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), `
+	testutil.WriteFile(t, filepath.Join(dir, ".env"), "SFTPIT_TEST_PASSWORD='from the env file'\n")
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `
 schema_version: 1
 env_file: ".env"
 server:
@@ -107,7 +108,7 @@ users:
 }
 
 func TestLoadAppliesTheFlagOverrides(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nserver:\n  sftp_listen: \"127.0.0.1:2200\"\n  http_listen: \"127.0.0.1:8200\"\n")
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nserver:\n  sftp_listen: \"127.0.0.1:2200\"\n  http_listen: \"127.0.0.1:8200\"\n")
 	cfg, err := Load(Options{ConfigFile: config, SFTPListen: "[::1]:0", HTTPListen: "localhost:0", LookupEnv: noEnv})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -122,7 +123,7 @@ func TestLoadResolvesTheSeedDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "fixtures", "seed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nstorage:\n  seed_dir: fixtures/seed\n")
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nstorage:\n  seed_dir: fixtures/seed\n")
 
 	cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
 	if err != nil {
@@ -143,7 +144,7 @@ func TestLoadResolvesTheSeedDirectory(t *testing.T) {
 }
 
 func TestLoadRejectsUnsuitableSeedDirectories(t *testing.T) {
-	file := writeTestFile(t, filepath.Join(t.TempDir(), "orders.csv"), "data")
+	file := testutil.WriteFile(t, filepath.Join(t.TempDir(), "orders.csv"), "data")
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skipf("no home directory: %v", err)
@@ -163,7 +164,7 @@ func TestLoadRejectsUnsuitableSeedDirectories(t *testing.T) {
 
 func TestLoadResolvesTheDataDirectory(t *testing.T) {
 	dir := t.TempDir()
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nstorage:\n  data_dir: sandbox-data\n")
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nstorage:\n  data_dir: sandbox-data\n")
 
 	cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
 	if err != nil {
@@ -237,8 +238,8 @@ func TestLoadAcceptsOnlyLoopbackAddresses(t *testing.T) {
 func TestLoadRejectsInvalidFiles(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "optioned.pub"), `from="10.0.0.1" `)
-	writeTestFile(t, filepath.Join(dir, "empty.pub"), "# no keys\n")
-	writeTestFile(t, filepath.Join(dir, "broken.pub"), "\nnot-a-key AAAA\n")
+	testutil.WriteFile(t, filepath.Join(dir, "empty.pub"), "# no keys\n")
+	testutil.WriteFile(t, filepath.Join(dir, "broken.pub"), "\nnot-a-key AAAA\n")
 
 	tests := []struct {
 		name    string
@@ -269,7 +270,7 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"), tt.content)
+			config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), tt.content)
 			_, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
@@ -280,8 +281,8 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 
 func TestLookupSecretsPrefersTheEnvironmentThenLaterFiles(t *testing.T) {
 	dir := t.TempDir()
-	first := writeTestFile(t, filepath.Join(dir, "first.env"), "FROM_ENV=file\nFIRST=first\nLATER=first\n")
-	second := writeTestFile(t, filepath.Join(dir, "second.env"), "LATER=second\nUNUSED=unused\n")
+	first := testutil.WriteFile(t, filepath.Join(dir, "first.env"), "FROM_ENV=file\nFIRST=first\nLATER=first\n")
+	second := testutil.WriteFile(t, filepath.Join(dir, "second.env"), "LATER=second\nUNUSED=unused\n")
 	env := fakeEnv{"FROM_ENV": "environment"}
 
 	names := map[string]bool{"FROM_ENV": true, "FIRST": true, "LATER": true}
@@ -303,7 +304,7 @@ func TestLookupSecretsPrefersTheEnvironmentThenLaterFiles(t *testing.T) {
 
 func TestLookupSecretsNeverSetsTheProcessEnvironment(t *testing.T) {
 	const name = "SFTPIT_CONFIG_TEST_SECRET"
-	file := writeTestFile(t, filepath.Join(t.TempDir(), "test.env"), name+"=value\n")
+	file := testutil.WriteFile(t, filepath.Join(t.TempDir(), "test.env"), name+"=value\n")
 	if _, err := lookupSecrets(map[string]bool{name: true}, []string{file}, os.LookupEnv); err != nil {
 		t.Fatalf("lookupSecrets: %v", err)
 	}
@@ -314,7 +315,7 @@ func TestLookupSecretsNeverSetsTheProcessEnvironment(t *testing.T) {
 
 func TestLookupSecretsReportsWhereItLooked(t *testing.T) {
 	dir := t.TempDir()
-	present := writeTestFile(t, filepath.Join(dir, "present.env"), "OTHER=1\n")
+	present := testutil.WriteFile(t, filepath.Join(dir, "present.env"), "OTHER=1\n")
 	absent := filepath.Join(dir, "absent.env")
 
 	l, err := lookupSecrets(map[string]bool{"SECRET": true}, []string{absent, present}, noEnv)
@@ -329,7 +330,7 @@ func TestLookupSecretsReportsWhereItLooked(t *testing.T) {
 		t.Errorf("check = %v, want %q", err, want)
 	}
 
-	empty := writeTestFile(t, filepath.Join(dir, "empty.env"), "SECRET=\n")
+	empty := testutil.WriteFile(t, filepath.Join(dir, "empty.env"), "SECRET=\n")
 	if l, err = lookupSecrets(map[string]bool{"SECRET": true}, []string{empty}, noEnv); err != nil {
 		t.Fatalf("lookupSecrets: %v", err)
 	}
@@ -339,7 +340,7 @@ func TestLookupSecretsReportsWhereItLooked(t *testing.T) {
 }
 
 func TestLookupSecretsChecksEveryDeclaredFile(t *testing.T) {
-	malformed := writeTestFile(t, filepath.Join(t.TempDir(), "bad.env"), "NOT A LINE\n")
+	malformed := testutil.WriteFile(t, filepath.Join(t.TempDir(), "bad.env"), "NOT A LINE\n")
 	_, err := lookupSecrets(map[string]bool{}, []string{malformed}, noEnv)
 	if err == nil || !strings.Contains(err.Error(), "bad.env:1: expected KEY=value") {
 		t.Errorf("error = %v, want the malformed file reported", err)
@@ -348,9 +349,9 @@ func TestLookupSecretsChecksEveryDeclaredFile(t *testing.T) {
 
 func TestLoadReadsEnvFilesFromTheCommandLineLast(t *testing.T) {
 	dir := t.TempDir()
-	writeTestFile(t, filepath.Join(dir, "config.env"), "P=from-config-env-file\n")
-	flagFile := writeTestFile(t, filepath.Join(dir, "flag.env"), "P=from-flag-env-file\n")
-	config := writeTestFile(t, filepath.Join(dir, "sftpit.yaml"),
+	testutil.WriteFile(t, filepath.Join(dir, "config.env"), "P=from-config-env-file\n")
+	flagFile := testutil.WriteFile(t, filepath.Join(dir, "flag.env"), "P=from-flag-env-file\n")
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"),
 		"schema_version: 1\nenv_file: [config.env]\nusers:\n  - {name: a, password_env: P}\n")
 
 	cfg, err := Load(Options{ConfigFile: config, EnvFiles: []string{flagFile}, LookupEnv: noEnv})
@@ -373,7 +374,7 @@ func TestLoadReadsTheReplyOrder(t *testing.T) {
 		{"server:\n  reply_order: completion\n", sftpproxy.CompletionOrder},
 	}
 	for _, tt := range tests {
-		writeTestFile(t, config, "schema_version: 1\n"+tt.setting)
+		testutil.WriteFile(t, config, "schema_version: 1\n"+tt.setting)
 		cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
 		if err != nil {
 			t.Fatalf("Load with %q: %v", tt.setting, err)
@@ -383,7 +384,7 @@ func TestLoadReadsTheReplyOrder(t *testing.T) {
 		}
 	}
 
-	writeTestFile(t, config, "schema_version: 1\nserver:\n  reply_order: random\n")
+	testutil.WriteFile(t, config, "schema_version: 1\nserver:\n  reply_order: random\n")
 	if _, err := Load(Options{ConfigFile: config, LookupEnv: noEnv}); err == nil || !strings.Contains(err.Error(), `reply_order "random" is not request or completion`) {
 		t.Errorf("Load of an unknown reply order = %v, want it refused", err)
 	}

@@ -59,6 +59,7 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 	data := []byte("id,total\n1,9.99\n")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			srv := startServer(t, proxied, sftpproxy.Options{Faults: func(r sftpproxy.Request) sftpproxy.Action {
 				if r.Target == "/in/orders.csv" {
 					return tt.action
@@ -127,6 +128,7 @@ func TestPhpseclibRenameFaults(t *testing.T) {
 	data := []byte("id,total\n1,9.99\n")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			srv := startServer(t, proxied, sftpproxy.Options{Faults: func(r sftpproxy.Request) sftpproxy.Action {
 				if r.Target == "/in/orders.csv" {
 					return tt.action

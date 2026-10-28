@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const admissionClosed = "INFO closed a connection while admission is closed"
@@ -33,9 +34,9 @@ func TestPauseEndsEveryConnectionAndAdmitsNoneUntilResume(t *testing.T) {
 	if len(returned) != 1 {
 		t.Error("Pause returned before the connection's handler")
 	}
-	receive(t, ended)
+	_ = testutil.Receive(t, ended)
 	assertClosedBeforeHandshake(t, addr)
-	awaitLog(t, logs, admissionClosed)
+	testutil.ReceiveUntil(t, logs, admissionClosed)
 
 	srv.Resume()
 	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
@@ -57,7 +58,7 @@ func TestPauseEndsAnOutage(t *testing.T) {
 	if _, down := srv.Outage(); down {
 		t.Error("the server is still down after Pause")
 	}
-	awaitLog(t, logs, listeningAgain)
+	testutil.ReceiveUntil(t, logs, listeningAgain)
 	assertClosedBeforeHandshake(t, addr)
 
 	srv.Resume()
@@ -85,7 +86,7 @@ func TestAnOutageCanBeginOnceAPauseHasReturned(t *testing.T) {
 		raw.Close()
 		t.Error("a connection was accepted during the outage")
 	}
-	awaitLog(t, logs, listeningAgain)
+	testutil.ReceiveUntil(t, logs, listeningAgain)
 	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
 }
 
@@ -123,7 +124,7 @@ func TestPauseFailsIfCloseEndsItsWait(t *testing.T) {
 	if err := srv.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := receive(t, paused); !errors.Is(err, sshfront.ErrServerClosed) {
+	if err := testutil.Receive(t, paused); !errors.Is(err, sshfront.ErrServerClosed) {
 		t.Errorf("Pause = %v, want ErrServerClosed", err)
 	}
 }
@@ -147,7 +148,7 @@ func TestPauseStopsWaitingWhenItsContextIsDone(t *testing.T) {
 	if err := session.RequestSubsystem("sftp"); err != nil {
 		t.Fatalf("RequestSubsystem(sftp): %v", err)
 	}
-	receive(t, started)
+	testutil.Receive(t, started)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -175,17 +176,17 @@ func TestPauseEndsAHandshakeHeldByAHook(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer raw.Close()
-	receive(t, entered)
+	testutil.Receive(t, entered)
 	// The client closes its end on the server's FIN, as a real one does, so
 	// that Pause need not wait out the drain.
 	go func() {
-		io.Copy(io.Discard, raw)
+		_, _ = io.Copy(io.Discard, raw)
 		raw.Close()
 	}()
 
 	paused := make(chan error, 1)
 	go func() { paused <- srv.Pause(t.Context()) }()
-	if err := receive(t, paused); err != nil {
+	if err := testutil.Receive(t, paused); err != nil {
 		t.Errorf("Pause: %v", err)
 	}
 }

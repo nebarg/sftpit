@@ -142,24 +142,59 @@ type StatVFS struct {
 	Path string
 }
 
-func (*Open) Type() PacketType        { return TypeOpen }
-func (*Close) Type() PacketType       { return TypeClose }
-func (*Read) Type() PacketType        { return TypeRead }
-func (*Write) Type() PacketType       { return TypeWrite }
-func (*LStat) Type() PacketType       { return TypeLStat }
-func (*FStat) Type() PacketType       { return TypeFStat }
-func (*SetStat) Type() PacketType     { return TypeSetStat }
-func (*FSetStat) Type() PacketType    { return TypeFSetStat }
-func (*OpenDir) Type() PacketType     { return TypeOpenDir }
-func (*ReadDir) Type() PacketType     { return TypeReadDir }
-func (*Remove) Type() PacketType      { return TypeRemove }
-func (*Mkdir) Type() PacketType       { return TypeMkdir }
-func (*Rmdir) Type() PacketType       { return TypeRmdir }
-func (*RealPath) Type() PacketType    { return TypeRealPath }
-func (*Stat) Type() PacketType        { return TypeStat }
-func (*Rename) Type() PacketType      { return TypeRename }
+// Type returns TypeOpen.
+func (*Open) Type() PacketType { return TypeOpen }
+
+// Type returns TypeClose.
+func (*Close) Type() PacketType { return TypeClose }
+
+// Type returns TypeRead.
+func (*Read) Type() PacketType { return TypeRead }
+
+// Type returns TypeWrite.
+func (*Write) Type() PacketType { return TypeWrite }
+
+// Type returns TypeLStat.
+func (*LStat) Type() PacketType { return TypeLStat }
+
+// Type returns TypeFStat.
+func (*FStat) Type() PacketType { return TypeFStat }
+
+// Type returns TypeSetStat.
+func (*SetStat) Type() PacketType { return TypeSetStat }
+
+// Type returns TypeFSetStat.
+func (*FSetStat) Type() PacketType { return TypeFSetStat }
+
+// Type returns TypeOpenDir.
+func (*OpenDir) Type() PacketType { return TypeOpenDir }
+
+// Type returns TypeReadDir.
+func (*ReadDir) Type() PacketType { return TypeReadDir }
+
+// Type returns TypeRemove.
+func (*Remove) Type() PacketType { return TypeRemove }
+
+// Type returns TypeMkdir.
+func (*Mkdir) Type() PacketType { return TypeMkdir }
+
+// Type returns TypeRmdir.
+func (*Rmdir) Type() PacketType { return TypeRmdir }
+
+// Type returns TypeRealPath.
+func (*RealPath) Type() PacketType { return TypeRealPath }
+
+// Type returns TypeStat.
+func (*Stat) Type() PacketType { return TypeStat }
+
+// Type returns TypeRename.
+func (*Rename) Type() PacketType { return TypeRename }
+
+// Type returns TypeExtended.
 func (*PosixRename) Type() PacketType { return TypeExtended }
-func (*StatVFS) Type() PacketType     { return TypeExtended }
+
+// Type returns TypeExtended.
+func (*StatVFS) Type() PacketType { return TypeExtended }
 
 func (p *Open) appendBody(b []byte) []byte {
 	b = appendString(b, p.Path)

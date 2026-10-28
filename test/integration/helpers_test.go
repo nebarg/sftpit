@@ -111,21 +111,21 @@ func (s *server) path(name string) string {
 func (s *server) waitForSessions() { s.wait() }
 
 // counts returns what the rule id has done in the server's run.
-func (s *server) counts(t testing.TB, id string) faults.Counts {
-	t.Helper()
+func (s *server) counts(tb testing.TB, id string) faults.Counts {
+	tb.Helper()
 	set, err := s.runs.Rules(s.run.ID)
 	if err != nil {
-		t.Errorf("Rules: %v", err)
+		tb.Errorf("Rules: %v", err)
 	}
 	return set.Counts[id]
 }
 
 // releaseStalls releases the stalls and freezes in progress in the server's
 // run.
-func (s *server) releaseStalls(t testing.TB) {
-	t.Helper()
+func (s *server) releaseStalls(tb testing.TB) {
+	tb.Helper()
 	if err := s.runs.ReleaseStalls(s.run.ID); err != nil {
-		t.Errorf("ReleaseStalls: %v", err)
+		tb.Errorf("ReleaseStalls: %v", err)
 	}
 }
 
@@ -134,39 +134,39 @@ func (s *server) releaseStalls(t testing.TB) {
 // direct route, or faults chosen by a Go function. A proxied session goes
 // through the same handler as sftpit serve and runs with opts, logging
 // nothing unless opts has a Logger.
-func startServer(t testing.TB, via route, opts sftpproxy.Options) *server {
-	t.Helper()
-	return startLimitedServer(t, via, opts, config.DefaultLimits())
+func startServer(tb testing.TB, via route, opts sftpproxy.Options) *server {
+	tb.Helper()
+	return startLimitedServer(tb, via, opts, config.DefaultLimits())
 }
 
 // startLimitedServer is startServer with limits on the run's files.
-func startLimitedServer(t testing.TB, via route, opts sftpproxy.Options, limits backend.Limits) *server {
-	t.Helper()
-	workspace, err := runs.OpenWorkspace(t.TempDir())
+func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits backend.Limits) *server {
+	tb.Helper()
+	workspace, err := runs.OpenWorkspace(tb.TempDir())
 	if err != nil {
-		t.Fatalf("OpenWorkspace: %v", err)
+		tb.Fatalf("OpenWorkspace: %v", err)
 	}
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		if err := workspace.Close(); err != nil {
-			t.Errorf("close the workspace: %v", err)
+			tb.Errorf("close the workspace: %v", err)
 		}
 	})
 	run, err := workspace.NewRun(runs.Scenario{})
 	if err != nil {
-		t.Fatalf("NewRun: %v", err)
+		tb.Fatalf("NewRun: %v", err)
 	}
 	root, err := os.OpenRoot(run.Files)
 	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
+		tb.Fatalf("OpenRoot: %v", err)
 	}
-	t.Cleanup(func() { root.Close() })
+	tb.Cleanup(func() { root.Close() })
 	logger := slog.New(slog.DiscardHandler)
 	embedded, err := backend.New(root, backend.Options{Limits: limits, Logger: logger})
 	if err != nil {
-		t.Fatalf("backend.New: %v", err)
+		tb.Fatalf("backend.New: %v", err)
 	}
 
-	handler := func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
+	handler := func(_ context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		return embedded.Serve(channel, conn.Home())
 	}
 	if via == proxied {
@@ -190,12 +190,12 @@ func startLimitedServer(t testing.TB, via route, opts sftpproxy.Options, limits 
 		Logger:   logger,
 	})
 	if err != nil {
-		t.Fatalf("sshfront.New: %v", err)
+		tb.Fatalf("sshfront.New: %v", err)
 	}
-	s.addr = serve(t, srv)
+	s.addr = serve(tb, srv)
 	_, s.port, err = net.SplitHostPort(s.addr)
 	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
+		tb.Fatalf("SplitHostPort: %v", err)
 	}
 	return s
 }
@@ -203,9 +203,9 @@ func startLimitedServer(t testing.TB, via route, opts sftpproxy.Options, limits 
 // startScenario starts runs, as sftpit serve does, whose first run injects
 // the faults of rules, drawing from seed, and logs to logger, or nowhere if
 // it is nil.
-func startScenario(t testing.TB, rules []faults.Rule, seed faults.Seed, logger *slog.Logger) *server {
-	t.Helper()
-	_, srv := startRuns(t, runs.Options{
+func startScenario(tb testing.TB, rules []faults.Rule, seed faults.Seed, logger *slog.Logger) *server {
+	tb.Helper()
+	_, srv := startRuns(tb, runs.Options{
 		Scenarios: map[string]config.Scenario{"test": {Rules: rules, Seed: &seed}},
 		Scenario:  "test",
 		Logger:    logger,
@@ -217,15 +217,15 @@ func startScenario(t testing.TB, rules []faults.Rule, seed faults.Seed, logger *
 // The server is the test user's, with the default storage limits, and logs
 // nowhere, unless opts says otherwise. The server it returns describes the
 // first run.
-func startRuns(t testing.TB, opts runs.Options) (*runs.Manager, *server) {
-	t.Helper()
-	workspace, err := runs.OpenWorkspace(t.TempDir())
+func startRuns(tb testing.TB, opts runs.Options) (*runs.Manager, *server) {
+	tb.Helper()
+	workspace, err := runs.OpenWorkspace(tb.TempDir())
 	if err != nil {
-		t.Fatalf("OpenWorkspace: %v", err)
+		tb.Fatalf("OpenWorkspace: %v", err)
 	}
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		if err := workspace.Close(); err != nil {
-			t.Errorf("close the workspace: %v", err)
+			tb.Errorf("close the workspace: %v", err)
 		}
 	})
 	opts.Server.HostKeys = hostKeys
@@ -240,25 +240,25 @@ func startRuns(t testing.TB, opts runs.Options) (*runs.Manager, *server) {
 	}
 	m, err := runs.Start(workspace, opts)
 	if err != nil {
-		t.Fatalf("runs.Start: %v", err)
+		tb.Fatalf("runs.Start: %v", err)
 	}
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		if err := m.Close(); err != nil {
-			t.Errorf("close the runs: %v", err)
+			tb.Errorf("close the runs: %v", err)
 		}
 	})
 	run := m.Status().Run
-	s := &server{addr: serve(t, m.Server()), files: run.Files, run: &run, runs: m}
+	s := &server{addr: serve(tb, m.Server()), files: run.Files, run: &run, runs: m}
 	// Pause waits for every connection's sessions to end, and Resume admits
 	// clients again.
 	s.wait = func() {
-		if err := m.Server().Pause(t.Context()); err != nil {
-			t.Errorf("wait for the sessions: %v", err)
+		if err := m.Server().Pause(tb.Context()); err != nil {
+			tb.Errorf("wait for the sessions: %v", err)
 		}
 		m.Server().Resume()
 	}
 	if _, s.port, err = net.SplitHostPort(s.addr); err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
+		tb.Fatalf("SplitHostPort: %v", err)
 	}
 	return m, s
 }
@@ -271,20 +271,20 @@ func testUsers() []sshfront.User {
 
 // serve serves srv on a loopback port until the test ends, and returns the
 // address.
-func serve(t testing.TB, srv *sshfront.Server) string {
-	t.Helper()
+func serve(tb testing.TB, srv *sshfront.Server) string {
+	tb.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("Listen: %v", err)
+		tb.Fatalf("Listen: %v", err)
 	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		if err := srv.Close(); err != nil {
-			t.Errorf("close the server: %v", err)
+			tb.Errorf("close the server: %v", err)
 		}
 		if err := <-served; !errors.Is(err, sshfront.ErrServerClosed) {
-			t.Errorf("Serve: %v", err)
+			tb.Errorf("Serve: %v", err)
 		}
 	})
 	return ln.Addr().String()
@@ -386,21 +386,21 @@ func assertFiles(t *testing.T, tree []treeEntry, want map[string][]byte) {
 	}
 }
 
-func writeFile(t testing.TB, name string, data []byte) {
-	t.Helper()
+func writeFile(tb testing.TB, name string, data []byte) {
+	tb.Helper()
 	if err := os.WriteFile(name, data, 0o600); err != nil {
-		t.Fatalf("write %s: %v", name, err)
+		tb.Fatalf("write %s: %v", name, err)
 	}
 }
 
-func writeClientKey(t testing.TB, dir string) string {
-	t.Helper()
+func writeClientKey(tb testing.TB, dir string) string {
+	tb.Helper()
 	block, err := ssh.MarshalPrivateKey(clientKey, "")
 	if err != nil {
-		t.Fatalf("marshal client key: %v", err)
+		tb.Fatalf("marshal client key: %v", err)
 	}
 	name := filepath.Join(dir, "id_ed25519")
-	writeFile(t, name, pem.EncodeToMemory(block))
+	writeFile(tb, name, pem.EncodeToMemory(block))
 	return name
 }
 
@@ -525,70 +525,70 @@ func (c *sshSFTPClient) Close() error {
 	return errors.Join(c.Client.Close(), c.conn.Close())
 }
 
-func transferWithOpenSSH(t testing.TB, srv *server, work string, upload bool) {
-	t.Helper()
-	sftpPath := openSSHOrSkip(t)
+func transferWithOpenSSH(tb testing.TB, srv *server, work string, upload bool) {
+	tb.Helper()
+	sftpPath := openSSHOrSkip(tb)
 	batch := "get /orders.csv orders.csv\n"
 	if upload {
 		batch = "put orders.csv /orders.csv\n"
 	}
-	if out, err := openSSH(t, sftpPath, srv, work, batch); err != nil {
-		t.Fatalf("sftp failed: %v\n%s", err, out)
+	if out, err := openSSH(tb, sftpPath, srv, work, batch); err != nil {
+		tb.Fatalf("sftp failed: %v\n%s", err, out)
 	}
 }
 
-func transferWithPhpseclib(t testing.TB, srv *server, work string, upload bool) {
-	t.Helper()
-	php := phpseclibOrSkip(t)
+func transferWithPhpseclib(tb testing.TB, srv *server, work string, upload bool) {
+	tb.Helper()
+	php := phpseclibOrSkip(tb)
 	op := "get"
 	if upload {
 		op = "put"
 	}
-	transcript := runPhpseclib(t, php, srv, "transfer.php", work, op)
-	if phpseclibResults(t, transcript)[op] != true {
-		t.Fatalf("phpseclib %s failed: %v", op, transcript)
+	transcript := runPhpseclib(tb, php, srv, "transfer.php", work, op)
+	if phpseclibResults(tb, transcript)[op] != true {
+		tb.Fatalf("phpseclib %s failed: %v", op, transcript)
 	}
 }
 
 // openSSHOrSkip returns the path of OpenSSH's sftp client, or skips the test
 // if it cannot run.
-func openSSHOrSkip(t testing.TB) string {
-	t.Helper()
+func openSSHOrSkip(tb testing.TB) string {
+	tb.Helper()
 	if testing.Short() {
-		t.Skip("runs the OpenSSH sftp client")
+		tb.Skip("runs the OpenSSH sftp client")
 	}
 	sftpPath, err := exec.LookPath("sftp")
 	if err != nil {
-		t.Skip("OpenSSH sftp client not installed")
+		tb.Skip("OpenSSH sftp client not installed")
 	}
 	return sftpPath
 }
 
 // openSSH runs batch with the OpenSSH sftp client in work, adding options to
 // its command line, and returns everything it printed.
-func openSSH(t testing.TB, sftpPath string, srv *server, work, batch string, options ...string) ([]byte, error) {
-	t.Helper()
-	return openSSHCommand(t, sftpPath, srv, work, batch, options...).CombinedOutput()
+func openSSH(tb testing.TB, sftpPath string, srv *server, work, batch string, options ...string) ([]byte, error) {
+	tb.Helper()
+	return openSSHCommand(tb, sftpPath, srv, work, batch, options...).CombinedOutput()
 }
 
 // openSSHCommand returns the command with which openSSH runs batch. Its
 // setup can fail the test, so it runs on the test's goroutine, and the
 // command can then run on another.
-func openSSHCommand(t testing.TB, sftpPath string, srv *server, work, batch string, options ...string) *exec.Cmd {
-	t.Helper()
-	dir := t.TempDir()
-	keyFile := writeClientKey(t, dir)
+func openSSHCommand(tb testing.TB, sftpPath string, srv *server, work, batch string, options ...string) *exec.Cmd {
+	tb.Helper()
+	dir := tb.TempDir()
+	keyFile := writeClientKey(tb, dir)
 	var known []string
 	for _, key := range hostKeys {
 		known = append(known, knownhosts.Line([]string{srv.addr}, key.PublicKey()))
 	}
 	knownHosts := filepath.Join(dir, "known_hosts")
-	writeFile(t, knownHosts, []byte(strings.Join(known, "\n")+"\n"))
+	writeFile(tb, knownHosts, []byte(strings.Join(known, "\n")+"\n"))
 	batchFile := filepath.Join(dir, "batch")
-	writeFile(t, batchFile, []byte(batch))
+	writeFile(tb, batchFile, []byte(batch))
 
-	ctx, cancel := context.WithTimeout(t.Context(), clientTimeout)
-	t.Cleanup(cancel)
+	ctx, cancel := context.WithTimeout(tb.Context(), clientTimeout)
+	tb.Cleanup(cancel)
 	args := []string{
 		"-b", batchFile,
 		"-P", srv.port,
@@ -611,33 +611,33 @@ func openSSHCommand(t testing.TB, sftpPath string, srv *server, work, batch stri
 
 // phpseclibOrSkip returns the path of php, or skips the test if phpseclib
 // cannot run.
-func phpseclibOrSkip(t testing.TB) string {
-	t.Helper()
+func phpseclibOrSkip(tb testing.TB) string {
+	tb.Helper()
 	if testing.Short() {
-		t.Skip("runs phpseclib")
+		tb.Skip("runs phpseclib")
 	}
 	php, err := exec.LookPath("php")
 	if err != nil {
-		t.Skip("php not installed")
+		tb.Skip("php not installed")
 	}
 	if _, err := os.Stat(filepath.Join(phpDir, "vendor", "autoload.php")); err != nil {
-		t.Skip("the PHP clients are not installed; run make integration-deps")
+		tb.Skip("the PHP clients are not installed; run make integration-deps")
 	}
 	return php
 }
 
 // runPhpseclib runs one of the phpseclib scripts against srv with work as
 // its work directory and any further arguments, and returns what it printed.
-func runPhpseclib(t testing.TB, php string, srv *server, script, work string, args ...string) []line {
-	t.Helper()
+func runPhpseclib(tb testing.TB, php string, srv *server, script, work string, args ...string) []line {
+	tb.Helper()
 	var keys bytes.Buffer
 	for _, key := range hostKeys {
 		keys.Write(ssh.MarshalAuthorizedKey(key.PublicKey()))
 	}
-	hostKeysFile := filepath.Join(t.TempDir(), "host_keys")
-	writeFile(t, hostKeysFile, keys.Bytes())
+	hostKeysFile := filepath.Join(tb.TempDir(), "host_keys")
+	writeFile(tb, hostKeysFile, keys.Bytes())
 
-	ctx, cancel := context.WithTimeout(t.Context(), clientTimeout)
+	ctx, cancel := context.WithTimeout(tb.Context(), clientTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, php, append([]string{filepath.Join(phpDir, script),
 		"127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
@@ -645,7 +645,7 @@ func runPhpseclib(t testing.TB, php string, srv *server, script, work string, ar
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil || stderr.Len() > 0 {
-		t.Fatalf("phpseclib workload: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.Bytes())
+		tb.Fatalf("phpseclib workload: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.Bytes())
 	}
 	return splitLines(out)
 }
@@ -658,13 +658,13 @@ type transcriptEntry struct {
 	Error  string `json:"error"`
 }
 
-func decodeTranscript(t testing.TB, transcript []line) []transcriptEntry {
-	t.Helper()
+func decodeTranscript(tb testing.TB, transcript []line) []transcriptEntry {
+	tb.Helper()
 	var entries []transcriptEntry
 	for _, l := range transcript {
 		var entry transcriptEntry
 		if err := json.Unmarshal([]byte(l), &entry); err != nil {
-			t.Fatalf("transcript line %q: %v", l, err)
+			tb.Fatalf("transcript line %q: %v", l, err)
 		}
 		entries = append(entries, entry)
 	}
@@ -672,10 +672,10 @@ func decodeTranscript(t testing.TB, transcript []line) []transcriptEntry {
 }
 
 // phpseclibResults maps each operation in a transcript to its JSON result.
-func phpseclibResults(t testing.TB, transcript []line) map[string]any {
-	t.Helper()
+func phpseclibResults(tb testing.TB, transcript []line) map[string]any {
+	tb.Helper()
 	byOp := make(map[string]any)
-	for _, entry := range decodeTranscript(t, transcript) {
+	for _, entry := range decodeTranscript(tb, transcript) {
 		byOp[entry.Op] = entry.Result
 	}
 	return byOp
@@ -683,10 +683,10 @@ func phpseclibResults(t testing.TB, transcript []line) map[string]any {
 
 // phpseclibFailures maps each operation in a transcript that failed to its
 // error: the SFTP error for a false result, or the exception it threw.
-func phpseclibFailures(t testing.TB, transcript []line) map[string]string {
-	t.Helper()
+func phpseclibFailures(tb testing.TB, transcript []line) map[string]string {
+	tb.Helper()
 	byOp := make(map[string]string)
-	for _, entry := range decodeTranscript(t, transcript) {
+	for _, entry := range decodeTranscript(tb, transcript) {
 		if entry.Result == false {
 			byOp[entry.Op] = entry.Error
 		} else if thrown, ok := entry.Result.(map[string]any); ok && thrown["exception"] != nil {

@@ -21,6 +21,7 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
@@ -50,7 +51,7 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	receive(t, ended)
+	_ = testutil.Receive(t, ended)
 	if next.Run.ID == first.ID || m.Status().Run != next.Run {
 		t.Errorf("Reset started run %+v after %+v, and the status has %+v", next.Run, first, m.Status().Run)
 	}
@@ -258,10 +259,10 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 				}
 				f, err := c.Open("/big.bin")
 				if err == nil {
-					io.Copy(io.Discard, f)
+					_, _ = io.Copy(io.Discard, f)
 				}
 			}()
-			awaitLog(t, injected, "injected fault")
+			testutil.ReceiveUntil(t, injected, "injected fault")
 
 			start := time.Now()
 			if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
@@ -314,7 +315,7 @@ func TestAFailedResetLeavesTheRunUnavailableUntilOneSucceeds(t *testing.T) {
 	if err := session.RequestSubsystem("sftp"); err != nil {
 		t.Fatalf("RequestSubsystem(sftp): %v", err)
 	}
-	receive(t, started)
+	testutil.Receive(t, started)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -333,7 +334,7 @@ func TestAFailedResetLeavesTheRunUnavailableUntilOneSucceeds(t *testing.T) {
 	}()
 	awaitState(t, m, StateResetting)
 	free()
-	if err := receive(t, reset); err != nil {
+	if err := testutil.Receive(t, reset); err != nil {
 		t.Fatalf("Reset once the session has finished: %v", err)
 	}
 	if s := m.Status(); s.State != StateUp || s.Err != nil || s.Run.ID == first.ID {
@@ -351,7 +352,7 @@ func TestCloseEndsTheRun(t *testing.T) {
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	receive(t, ended)
+	_ = testutil.Receive(t, ended)
 	if _, err := m.current.root.Stat("."); err == nil {
 		t.Error("the run's files are still open after Close")
 	}
@@ -370,13 +371,13 @@ func TestCloseStopsTheRunsTimers(t *testing.T) {
 	})
 }
 
-func awaitState(t *testing.T, m *Manager, want State) Status {
+func awaitState(t *testing.T, m *Manager, want State) {
 	t.Helper()
 	deadline := time.Now().Add(waitTimeout)
 	for {
 		s := m.Status()
 		if s.State == want {
-			return s
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the status is %+v, want %s", s, want)
@@ -455,7 +456,7 @@ func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
 	if err := session.RequestSubsystem("sftp"); err != nil {
 		t.Fatalf("RequestSubsystem(sftp): %v", err)
 	}
-	receive(t, started)
+	testutil.Receive(t, started)
 
 	reset := make(chan error, 1)
 	go func() {
@@ -470,10 +471,10 @@ func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
 	awaitRefused(t, addr)
 	free()
 
-	if err := receive(t, reset); !errors.Is(err, sshfront.ErrServerClosed) {
+	if err := testutil.Receive(t, reset); !errors.Is(err, sshfront.ErrServerClosed) {
 		t.Errorf("Reset = %v, want ErrServerClosed", err)
 	}
-	if err := receive(t, closed); err != nil {
+	if err := testutil.Receive(t, closed); err != nil {
 		t.Errorf("Close: %v", err)
 	}
 	if runs, err := os.ReadDir(filepath.Join(m.workspace.Dir(), runsDir)); err != nil || len(runs) != 1 {

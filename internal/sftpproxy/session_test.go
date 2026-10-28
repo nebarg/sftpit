@@ -12,6 +12,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestExtensionsOffered(t *testing.T) {
@@ -108,7 +109,7 @@ func TestRepliesFollowRequestOrder(t *testing.T) {
 	client := p.client
 
 	client.send(t, 1, &sftpwire.Stat{Path: "/a"})
-	client.sendRaw(t, wire{}.byte(byte(sftpwire.TypeReadLink)).u32(2).str("/link"))
+	client.sendRaw(t, testutil.Wire{}.Byte(byte(sftpwire.TypeReadLink)).U32(2).Str("/link"))
 	client.send(t, 3, &sftpwire.Stat{Path: "/b"})
 	a, b := fb.next(t), fb.next(t)
 
@@ -130,32 +131,32 @@ func TestRepliesFollowRequestOrder(t *testing.T) {
 func TestProxyAnswersWithoutTheBackend(t *testing.T) {
 	tests := []struct {
 		name    string
-		request wire
+		request testutil.Wire
 		want    sftpwire.StatusReply
 	}{
 		{
 			name:    "empty path",
-			request: wire{}.byte(byte(sftpwire.TypeStat)).u32(9).str(""),
+			request: testutil.Wire{}.Byte(byte(sftpwire.TypeStat)).U32(9).Str(""),
 			want:    sftpwire.StatusReply{Code: sftpwire.StatusNoSuchFile, Message: "No such file"},
 		},
 		{
 			name:    "symlink",
-			request: wire{}.byte(byte(sftpwire.TypeSymlink)).u32(9).str("/a").str("/b"),
+			request: testutil.Wire{}.Byte(byte(sftpwire.TypeSymlink)).U32(9).Str("/a").Str("/b"),
 			want:    sftpwire.StatusReply{Code: sftpwire.StatusOpUnsupported, Message: "Operation unsupported"},
 		},
 		{
 			name:    "readlink",
-			request: wire{}.byte(byte(sftpwire.TypeReadLink)).u32(9).str("/a"),
+			request: testutil.Wire{}.Byte(byte(sftpwire.TypeReadLink)).U32(9).Str("/a"),
 			want:    sftpwire.StatusReply{Code: sftpwire.StatusOpUnsupported, Message: "Operation unsupported"},
 		},
 		{
 			name:    "hardlink extension",
-			request: wire{}.byte(byte(sftpwire.TypeExtended)).u32(9).str("hardlink@openssh.com").str("/a").str("/b"),
+			request: testutil.Wire{}.Byte(byte(sftpwire.TypeExtended)).U32(9).Str("hardlink@openssh.com").Str("/a").Str("/b"),
 			want:    sftpwire.StatusReply{Code: sftpwire.StatusOpUnsupported, Message: "Operation unsupported"},
 		},
 		{
 			name:    "statvfs the backend lacks",
-			request: wire{}.byte(byte(sftpwire.TypeExtended)).u32(9).str(sftpwire.ExtStatVFS).str("/"),
+			request: testutil.Wire{}.Byte(byte(sftpwire.TypeExtended)).U32(9).Str(sftpwire.ExtStatVFS).Str("/"),
 			want:    sftpwire.StatusReply{Code: sftpwire.StatusOpUnsupported, Message: "Operation unsupported"},
 		},
 	}
@@ -192,7 +193,7 @@ func TestRepeatedInitIsAnsweredAgain(t *testing.T) {
 }
 
 func TestMalformedClientInputEndsSession(t *testing.T) {
-	stat := wire{}.byte(byte(sftpwire.TypeStat)).u32(1)
+	stat := testutil.Wire{}.Byte(byte(sftpwire.TypeStat)).U32(1)
 
 	tests := []struct {
 		name      string
@@ -201,13 +202,13 @@ func TestMalformedClientInputEndsSession(t *testing.T) {
 		thenClose bool
 		wantErr   string
 	}{
-		{name: "request before INIT", skipInit: true, input: stat.str("/a").framed(), wantErr: "want SSH_FXP_INIT"},
-		{name: "truncated field", input: stat.u32(10).framed(), wantErr: "malformed"},
-		{name: "NUL in a path", input: stat.str("/a\x00").framed(), wantErr: "malformed"},
-		{name: "unknown packet type", input: wire{}.byte(99).u32(1).framed(), wantErr: "not a request"},
-		{name: "reply type", input: wire{}.byte(byte(sftpwire.TypeStatus)).u32(1).u32(0).str("").str("").framed(), wantErr: "not a request"},
-		{name: "packet over 256 KiB", input: wire{}.u32(maxLength + 1), wantErr: "exceeds"},
-		{name: "end inside a packet", input: stat.framed()[:7], thenClose: true, wantErr: io.ErrUnexpectedEOF.Error()},
+		{name: "request before INIT", skipInit: true, input: stat.Str("/a").Framed(), wantErr: "want SSH_FXP_INIT"},
+		{name: "truncated field", input: stat.U32(10).Framed(), wantErr: "malformed"},
+		{name: "NUL in a path", input: stat.Str("/a\x00").Framed(), wantErr: "malformed"},
+		{name: "unknown packet type", input: testutil.Wire{}.Byte(99).U32(1).Framed(), wantErr: "not a request"},
+		{name: "reply type", input: testutil.Wire{}.Byte(byte(sftpwire.TypeStatus)).U32(1).U32(0).Str("").Str("").Framed(), wantErr: "not a request"},
+		{name: "packet over 256 KiB", input: testutil.Wire{}.U32(maxLength + 1), wantErr: "exceeds"},
+		{name: "end inside a packet", input: stat.Framed()[:7], thenClose: true, wantErr: io.ErrUnexpectedEOF.Error()},
 	}
 
 	for _, tt := range tests {
@@ -254,7 +255,7 @@ func TestBackendViolationsEndSession(t *testing.T) {
 		{
 			name: "malformed reply",
 			reply: func(proxyID uint32) []byte {
-				return wire{}.byte(byte(sftpwire.TypeStatus)).u32(proxyID).u32(0).framed()
+				return testutil.Wire{}.Byte(byte(sftpwire.TypeStatus)).U32(proxyID).U32(0).Framed()
 			},
 			wantErr: "malformed",
 		},

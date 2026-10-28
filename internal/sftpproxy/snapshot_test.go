@@ -26,7 +26,7 @@ func TestSnapshotAtCloseHoldsBackTheReplyAndTheFile(t *testing.T) {
 					Logger:     logs.logger(),
 				})
 				openForUpload(t, p, fb, "h")
-				cutWrite(t, p, fb, "h")
+				cutWrite(t, p, fb)
 
 				start := time.Now()
 				// The client retries at once, truncating the file.
@@ -51,7 +51,7 @@ func TestSnapshotAtCloseHoldsBackTheReplyAndTheFile(t *testing.T) {
 				if got := snaps.taken(); !slices.Equal(got, []string{"/f"}) {
 					t.Errorf("snapshots of %v, want one of /f", got)
 				}
-				assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "client"))
+				assertSnapshotsLogged(t, logs.String(), snapshotLog("client"))
 			})
 		})
 	}
@@ -71,7 +71,7 @@ func TestSnapshotHoldsBackOtherFilesInRequestOrderOnly(t *testing.T) {
 					Snapshot:   snaps.take,
 				})
 				openForUpload(t, p, fb, "h")
-				cutWrite(t, p, fb, "h")
+				cutWrite(t, p, fb)
 
 				start := time.Now()
 				p.client.send(t, 1, &sftpwire.Close{Handle: "h"})
@@ -116,7 +116,7 @@ func TestSnapshotOnceWhenTheClientClosesTwice(t *testing.T) {
 				fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 				fb.reply(t, fb.next(t).id, status(sftpwire.StatusFailure))
 				p.client.assertReplies(t, 1, 2, 3)
-				assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "client"))
+				assertSnapshotsLogged(t, logs.String(), snapshotLog("client"))
 			})
 		})
 	}
@@ -165,7 +165,7 @@ func TestSnapshotComesBeforeTheDrop(t *testing.T) {
 					if got := p.conn.events(); !slices.Equal(got, r.events) {
 						t.Errorf("connection events = %v, want %v", got, r.events)
 					}
-					assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "fault"))
+					assertSnapshotsLogged(t, logs.String(), snapshotLog("fault"))
 				})
 			})
 		}
@@ -179,11 +179,12 @@ func TestSnapshotWhenTheSessionEnds(t *testing.T) {
 	}{
 		{
 			name: "client disconnects",
-			end:  func(t *testing.T, p *proxy, fb *fakeBackend) { p.client.conn.Close() },
+			end:  func(_ *testing.T, p *proxy, _ *fakeBackend) { p.client.conn.Close() },
 		},
 		{
 			name: "cancelled before the backend closes the handle",
 			end: func(t *testing.T, p *proxy, fb *fakeBackend) {
+				t.Helper()
 				p.client.send(t, 1, &sftpwire.Close{Handle: "h"})
 				fb.next(t)
 				p.cancel()
@@ -204,11 +205,11 @@ func TestSnapshotWhenTheSessionEnds(t *testing.T) {
 						Logger:     logs.logger(),
 					})
 					openForUpload(t, p, fb, "h")
-					cutWrite(t, p, fb, "h")
+					cutWrite(t, p, fb)
 
 					tt.end(t, p, fb)
-					p.result.wait(t)
-					assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", `"session end"`))
+					_ = p.result.wait(t)
+					assertSnapshotsLogged(t, logs.String(), snapshotLog(`"session end"`))
 				})
 			})
 		}
@@ -312,11 +313,11 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 					p.client.assertReplies(t, uint32(i))
 				}
 				p.client.conn.Close()
-				p.result.wait(t)
+				_ = p.result.wait(t)
 
 				var want []string
 				for _, by := range tt.closedBy {
-					want = append(want, snapshotLog("/f", by))
+					want = append(want, snapshotLog(by))
 				}
 				assertSnapshotsLogged(t, logs.String(), want...)
 			})
@@ -335,7 +336,7 @@ func TestSnapshotFailureIsLoggedAndTheCloseSucceeds(t *testing.T) {
 			Logger: logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
-		cutWrite(t, p, fb, "h")
+		cutWrite(t, p, fb)
 
 		p.client.send(t, 1, &sftpwire.Close{Handle: "h"})
 		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
@@ -358,19 +359,20 @@ func TestSnapshotLogsWhereItsCopyIs(t *testing.T) {
 			Logger: logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
-		cutWrite(t, p, fb, "h")
+		cutWrite(t, p, fb)
 
 		p.client.send(t, 1, &sftpwire.Close{Handle: "h"})
 		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 		p.client.assertStatus(t, 1, sftpwire.StatusOK, "Success")
-		assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "client")+" copy=snapshots/1/f")
+		assertSnapshotsLogged(t, logs.String(), snapshotLog("client")+" copy=snapshots/1/f")
 	})
 }
 
-// cutWrite sends a write on handle that crosses the cutoff as request 2,
+// cutWrite sends a write on handle h that crosses the cutoff as request 2,
 // and has the backend store what reaches it.
-func cutWrite(t *testing.T, p *proxy, fb *fakeBackend, handle string) {
+func cutWrite(t *testing.T, p *proxy, fb *fakeBackend) {
 	t.Helper()
+	const handle = "h"
 	p.client.send(t, 2, write(handle, 50, 60))
 	fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 	p.client.assertStatus(t, 2, sftpwire.StatusFailure, "Failure")

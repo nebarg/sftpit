@@ -12,6 +12,7 @@ import (
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
@@ -207,7 +208,7 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 // option, which a run puts in place of its scenario's own, is kept as given,
 // beside the scenario's seed.
 func TestLoadKeepsTheSeedOptionApartFromTheScenariosSeed(t *testing.T) {
-	config := writeTestFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
 scenarios:
   pinned:
     seed: 0
@@ -256,7 +257,7 @@ func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
 		t.Errorf("Load chose scenario %q with %d rules, want none without --scenario", cfg.Scenario, len(cfg.Rules()))
 	}
 
-	broken := writeTestFile(t, filepath.Join(dir, "broken.yaml"), withScenarios+valid+`  broken:
+	broken := testutil.WriteFile(t, filepath.Join(dir, "broken.yaml"), withScenarios+valid+`  broken:
     faults:
       - id: deny
         match: {operation: upload}
