@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nebarg/sftpit/internal/control"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestResetStartsTheNextRun(t *testing.T) {
@@ -24,7 +25,7 @@ func TestResetStartsTheNextRun(t *testing.T) {
 	}
 	var last string
 	for _, tt := range tests {
-		var stdout, stderr syncBuffer
+		var stdout, stderr testutil.SyncBuffer
 		code := run(commandContext(t), append([]string{"reset", "--ready-file", ready}, tt.args...), &stdout, &stderr)
 		m := regexp.MustCompile(`^run (\S+): (` + tt.want + `)\n$`).FindStringSubmatch(stdout.String())
 		if code != exitOK || m == nil || m[1] == last {
@@ -38,13 +39,13 @@ func TestResetFailsClearly(t *testing.T) {
 	ready := serveWithScenarios(t)
 	dir := t.TempDir()
 	notReady := filepath.Join(dir, "notes.txt")
-	writeTestFile(t, notReady, "notes")
+	testutil.WriteFile(t, notReady, "notes")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	gone := filepath.Join(dir, "gone.json")
-	writeTestFile(t, gone, goneReadyFile(ln.Addr().String()))
+	testutil.WriteFile(t, gone, goneReadyFile(ln.Addr().String()))
 	ln.Close()
 
 	tests := []struct {
@@ -65,7 +66,7 @@ func TestResetFailsClearly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var stdout, stderr syncBuffer
+			var stdout, stderr testutil.SyncBuffer
 			code := run(commandContext(t), append([]string{"reset"}, tt.args...), &stdout, &stderr)
 			if code != tt.code || !strings.HasPrefix(stderr.String(), "sftpit reset: ") || !strings.Contains(stderr.String(), tt.want) {
 				t.Errorf("exit %d, stderr %q, want %d and %q", code, stderr.String(), tt.code, tt.want)
@@ -91,7 +92,7 @@ func TestDescribeRun(t *testing.T) {
 }
 
 func TestResetHelp(t *testing.T) {
-	var stdout, stderr syncBuffer
+	var stdout, stderr testutil.SyncBuffer
 	if code := run(commandContext(t), []string{"reset", "--help"}, &stdout, &stderr); code != exitOK || !strings.Contains(stdout.String(), "Usage: sftpit reset") {
 		t.Errorf("exit %d, stdout %q, want the reset usage", code, stdout.String())
 	}
@@ -104,7 +105,7 @@ func serveWithScenarios(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	config := filepath.Join(dir, "sftpit.yaml")
-	writeTestFile(t, config, "schema_version: 1\nscenarios:\n  chaos: {faults: []}\n  own: {seed: 9, faults: []}\n")
+	testutil.WriteFile(t, config, "schema_version: 1\nscenarios:\n  chaos: {faults: []}\n  own: {seed: 9, faults: []}\n")
 	ready := filepath.Join(dir, "ready.json")
 	startServe(t, "--config", config, "--scenario", "chaos", "--seed", "7", "--ready-file", ready)
 	return ready

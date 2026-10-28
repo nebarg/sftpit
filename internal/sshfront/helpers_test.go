@@ -18,11 +18,12 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const (
 	testPassword   = "test-password"
-	waitTimeout    = 5 * time.Second
+	waitTimeout    = testutil.WaitTimeout
 	listeningAgain = "INFO listening again after an outage"
 )
 
@@ -167,19 +168,7 @@ func openSFTP(t *testing.T, client *ssh.Client, conns <-chan *sshfront.Conn) *ss
 	if err := session.RequestSubsystem("sftp"); err != nil {
 		t.Fatalf("RequestSubsystem(sftp): %v", err)
 	}
-	return receive(t, conns)
-}
-
-func receive[T any](t *testing.T, ch <-chan T) T {
-	t.Helper()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting")
-		var zero T
-		return zero
-	}
+	return testutil.Receive(t, conns)
 }
 
 // messages is a slog handler that sends the level and message of each
@@ -200,13 +189,6 @@ func waitForClient(client *ssh.Client) <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- client.Wait() }()
 	return done
-}
-
-// awaitLog waits until the server logs want, whatever it logs before.
-func awaitLog(t *testing.T, logs messages, want string) {
-	t.Helper()
-	for receive(t, logs) != want {
-	}
 }
 
 // awaitServing waits until the server at addr sends its SSH version, which

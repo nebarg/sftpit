@@ -344,8 +344,10 @@ func (s *Server) Down(d time.Duration, closeExisting bool) {
 		o.until = until
 	}
 	if closeExisting {
+		// Down acts on every connection it can, and has no caller to tell
+		// of one it could not close.
 		for g := range s.conns {
-			g.closeNormally()
+			_ = g.closeNormally()
 		}
 	}
 }
@@ -399,7 +401,7 @@ func (s *Server) Pause(ctx context.Context) error {
 	}
 	ended := make([]chan struct{}, 0, len(s.conns))
 	for g, done := range s.conns {
-		g.closeNormally()
+		_ = g.closeNormally()
 		ended = append(ended, done)
 	}
 	s.mu.Unlock()
@@ -460,7 +462,7 @@ func (s *Server) Close() error {
 		}
 	}
 	for g := range s.conns {
-		g.abort()
+		_ = g.abort()
 	}
 	if s.outage != nil {
 		s.outage.timer.Stop()

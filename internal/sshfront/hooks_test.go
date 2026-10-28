@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 // hookCall records what a hook saw of its connection.
@@ -40,7 +41,7 @@ func TestHooksRunBeforeTheHandshakeAndBeforeTheClientIsLoggedIn(t *testing.T) {
 			},
 		},
 	})
-	keyboardInteractive := ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+	keyboardInteractive := ssh.KeyboardInteractive(func(_, _ string, _ []string, _ []bool) ([]string, error) {
 		return []string{testPassword}, nil
 	})
 
@@ -64,11 +65,11 @@ func TestHooksRunBeforeTheHandshakeAndBeforeTheClientIsLoggedIn(t *testing.T) {
 				dialed <- client
 			}()
 
-			connected := receive(t, calls)
+			connected := testutil.Receive(t, calls)
 			if connected.hook != "connect" || connected.user != "" || connected.fingerprint != "" {
 				t.Errorf("first hook = %+v, want connect with no user or key", connected)
 			}
-			authenticated := receive(t, calls)
+			authenticated := testutil.Receive(t, calls)
 			want := hookCall{"authenticate", connected.id, "test", tt.wantFingerprint}
 			if authenticated != want {
 				t.Errorf("second hook = %+v, want %+v", authenticated, want)
@@ -81,7 +82,7 @@ func TestHooksRunBeforeTheHandshakeAndBeforeTheClientIsLoggedIn(t *testing.T) {
 			released := time.Now()
 			release <- struct{}{}
 
-			client := receive(t, dialed)
+			client := testutil.Receive(t, dialed)
 			if client == nil {
 				return
 			}
@@ -99,7 +100,7 @@ func TestHooksRunBeforeTheHandshakeAndBeforeTheClientIsLoggedIn(t *testing.T) {
 
 func TestHooksCanEndTheHandshake(t *testing.T) {
 	closeConn := func(_ context.Context, conn *sshfront.Conn) { conn.Close() }
-	resetConn := func(_ context.Context, conn *sshfront.Conn) { conn.Reset() }
+	resetConn := func(_ context.Context, conn *sshfront.Conn) { _ = conn.Reset() }
 	tests := []struct {
 		name  string
 		hooks sshfront.Hooks
@@ -123,7 +124,7 @@ func TestHooksCanEndTheHandshake(t *testing.T) {
 				client.Close()
 				t.Fatal("login succeeded, want the hook to end it")
 			}
-			if msg := receive(t, logs); msg != "DEBUG ssh handshake ended by the server" {
+			if msg := testutil.Receive(t, logs); msg != "DEBUG ssh handshake ended by the server" {
 				t.Errorf("the server logged %q, want the handshake ended, not failed", msg)
 			}
 			select {
@@ -149,7 +150,7 @@ func TestHandshakeFailureIsLogged(t *testing.T) {
 	if err := raw.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatalf("CloseWrite: %v", err)
 	}
-	if msg := receive(t, logs); msg != "INFO ssh handshake failed" {
+	if msg := testutil.Receive(t, logs); msg != "INFO ssh handshake failed" {
 		t.Errorf("the server logged %q, want the handshake failure", msg)
 	}
 }
@@ -167,12 +168,12 @@ func TestServerCloseEndsHandshakesWithoutFailures(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer raw.Close()
-	receive(t, entered)
+	testutil.Receive(t, entered)
 
 	if err := srv.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if msg := receive(t, logs); msg != "DEBUG ssh handshake ended by the server" {
+	if msg := testutil.Receive(t, logs); msg != "DEBUG ssh handshake ended by the server" {
 		t.Errorf("the server logged %q, want the handshake ended, not failed", msg)
 	}
 }
@@ -195,13 +196,14 @@ func TestHookContextEnds(t *testing.T) {
 		},
 		{
 			name:    "when the connection closes",
-			connect: func(ctx context.Context, conn *sshfront.Conn) { conn.Reset(); <-ctx.Done() },
+			connect: func(ctx context.Context, conn *sshfront.Conn) { _ = conn.Reset(); <-ctx.Done() },
 			want:    context.Canceled,
 		},
 		{
 			name:    "when the server closes",
 			connect: func(ctx context.Context, _ *sshfront.Conn) { <-ctx.Done() },
 			end: func(t *testing.T, srv *sshfront.Server) {
+				t.Helper()
 				if err := srv.Close(); err != nil {
 					t.Errorf("Close: %v", err)
 				}
@@ -227,11 +229,11 @@ func TestHookContextEnds(t *testing.T) {
 				defer raw.Close()
 			}
 
-			receive(t, entered)
+			testutil.Receive(t, entered)
 			if tt.end != nil {
 				tt.end(t, srv)
 			}
-			if err := receive(t, ended); !errors.Is(err, tt.want) {
+			if err := testutil.Receive(t, ended); !errors.Is(err, tt.want) {
 				t.Errorf("hook's ctx.Err() = %v, want %v", err, tt.want)
 			}
 		})

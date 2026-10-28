@@ -98,7 +98,7 @@ func (s *snapshots) copy(name string, r io.Reader) (int64, error) {
 	}
 	n, err := io.Copy(f, r)
 	if err = errors.Join(err, f.Close()); err != nil {
-		root.Remove(name)
+		_ = root.Remove(name)
 		return 0, err
 	}
 	return n, nil

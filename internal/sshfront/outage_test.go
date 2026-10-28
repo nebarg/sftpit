@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestDownRefusesConnectionsUntilItEnds(t *testing.T) {
@@ -32,7 +33,7 @@ func TestDownRefusesConnectionsUntilItEnds(t *testing.T) {
 		}
 		t.Fatalf("Dial during the outage = %v, want the connection refused", err)
 	}
-	awaitLog(t, logs, listeningAgain)
+	testutil.ReceiveUntil(t, logs, listeningAgain)
 	if took := time.Since(start); took < 300*time.Millisecond {
 		t.Errorf("the outage lasted %v, want 300ms", took)
 	}
@@ -50,9 +51,9 @@ func TestDownClosesExistingConnectionsIfAsked(t *testing.T) {
 
 			srv.Down(time.Minute, closeExisting)
 			select {
-			case <-waitForClient(client):
+			case err := <-waitForClient(client):
 				if !closeExisting {
-					t.Error("without close_existing, the outage closed an existing connection")
+					t.Errorf("without close_existing, the outage closed an existing connection: %v", err)
 				}
 			case <-time.After(200 * time.Millisecond):
 				if closeExisting {
@@ -60,7 +61,7 @@ func TestDownClosesExistingConnectionsIfAsked(t *testing.T) {
 				}
 			}
 			if closeExisting {
-				receive(t, returned)
+				testutil.Receive(t, returned)
 			}
 		})
 	}
@@ -76,7 +77,7 @@ func TestDownExtendsAnOutageThatWouldEndSooner(t *testing.T) {
 	srv.Down(200*time.Millisecond, false)
 	srv.Down(600*time.Millisecond, false)
 	srv.Down(100*time.Millisecond, false)
-	awaitLog(t, logs, listeningAgain)
+	testutil.ReceiveUntil(t, logs, listeningAgain)
 	if took := time.Since(start); took < 600*time.Millisecond {
 		t.Errorf("the outage lasted %v, want the longest one asked for, 600ms", took)
 	}
@@ -88,7 +89,7 @@ func TestCloseEndsAnOutage(t *testing.T) {
 
 	closed := make(chan error, 1)
 	go func() { closed <- srv.Close() }()
-	if err := receive(t, closed); err != nil {
+	if err := testutil.Receive(t, closed); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 }
@@ -107,9 +108,9 @@ func TestServeListensAgainOnceItCan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen during the outage: %v", err)
 	}
-	awaitLog(t, logs, "WARN listening again after an outage failed; retrying")
+	testutil.ReceiveUntil(t, logs, "WARN listening again after an outage failed; retrying")
 	squatter.Close()
-	awaitLog(t, logs, listeningAgain)
+	testutil.ReceiveUntil(t, logs, listeningAgain)
 	client := mustDial(t, addr, "test", ssh.Password(testPassword))
 	openSFTP(t, client, conns)
 }
@@ -126,7 +127,7 @@ func TestAConnectionAcceptedAsAnOutageBeginsIsClosed(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer raw.Close()
-	receive(t, held.accepted)
+	testutil.Receive(t, held.accepted)
 
 	srv.Down(time.Minute, false)
 	close(held.release)

@@ -27,7 +27,7 @@ func TestANormallyClosedGateHandsOnNothing(t *testing.T) {
 		t.Fatal("Accept failed")
 	}
 	g := newGate(server)
-	defer g.abort()
+	defer func() { _ = g.abort() }()
 
 	if err := g.closeNormally(); err != nil {
 		t.Fatalf("closeNormally: %v", err)

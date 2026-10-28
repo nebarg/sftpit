@@ -86,6 +86,7 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 		for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
 			for _, r := range results {
 				t.Run(c.name+"/"+order.String()+"/"+r.name, func(t *testing.T) {
+					t.Parallel()
 					var logs capturedLog
 					srv := startServer(t, proxied, sftpproxy.Options{
 						Faults:     onFirstUpload(sftpproxy.PartialUpload{Cutoff: uploadCutoff, Result: r.result}),
@@ -129,6 +130,7 @@ func TestRetryLeavesThePartialUploadsSnapshot(t *testing.T) {
 	for _, c := range uploadClients {
 		for _, r := range results {
 			t.Run(c.name+"/"+r.name, func(t *testing.T) {
+				t.Parallel()
 				var logs capturedLog
 				srv := startServer(t, proxied, sftpproxy.Options{
 					Faults: onFirstUpload(sftpproxy.PartialUpload{Cutoff: uploadCutoff, Result: r.result}),

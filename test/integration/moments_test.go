@@ -55,6 +55,7 @@ func TestOpenSSHMoments(t *testing.T) {
 	data := randomBytes(2 << 20)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var logs capturedLog
 			srv := startScenario(t, []faults.Rule{slow, tt.rule}, 0, logs.logger())
 			work := t.TempDir()

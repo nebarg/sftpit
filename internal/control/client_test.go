@@ -57,7 +57,7 @@ func TestClientReportsAServerItCannotUse(t *testing.T) {
 			http.Error(w, "upstream gone", http.StatusBadGateway)
 		}, "502 Bad Gateway", http.StatusBadGateway},
 		{"a reply that is not JSON", func(w http.ResponseWriter, _ *http.Request) {
-			w.Write([]byte("<html>"))
+			_, _ = w.Write([]byte("<html>"))
 		}, "control: read the reply to POST /api/v1/reset: ", 0},
 	}
 	for _, tt := range tests {

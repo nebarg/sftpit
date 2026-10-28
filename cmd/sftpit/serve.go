@@ -207,11 +207,17 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 		}
 	}
 	err = errors.Join(err, api.Close(), srv.Close())
+	// Once closed, each server returns that it was closed; any other error
+	// is one it failed with.
 	if sftpServed != nil {
-		<-sftpServed
+		if serveErr := <-sftpServed; !errors.Is(serveErr, sshfront.ErrServerClosed) {
+			err = errors.Join(err, serveErr)
+		}
 	}
 	if apiServed != nil {
-		<-apiServed
+		if serveErr := <-apiServed; !errors.Is(serveErr, http.ErrServerClosed) {
+			err = errors.Join(err, serveErr)
+		}
 	}
 	return err
 }

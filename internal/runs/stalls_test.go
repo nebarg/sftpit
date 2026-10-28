@@ -14,6 +14,7 @@ import (
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestReleaseStallsLetsAStalledRequestGoOn(t *testing.T) {
@@ -36,7 +37,7 @@ func TestReleaseStallsLetsAStalledRequestGoOn(t *testing.T) {
 		if err := m.ReleaseStalls(run); err != nil {
 			t.Fatalf("ReleaseStalls: %v", err)
 		}
-		if err := receive(t, done); err != nil {
+		if err := testutil.Receive(t, done); err != nil {
 			t.Errorf("stat %d after the release = %v", stat, err)
 		}
 	}
@@ -66,7 +67,7 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 				t.Fatalf("Dial: %v", err)
 			}
 			defer raw.Close()
-			awaitLog(t, logs, "injected fault")
+			testutil.ReceiveUntil(t, logs, "injected fault")
 			if err := m.ReleaseStalls(m.Status().Run.ID); err != nil {
 				t.Fatalf("ReleaseStalls: %v", err)
 			}
@@ -85,14 +86,14 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 				t.Errorf("read %q (%v), want the delay to go on", line, err)
 			}
 			if tt.closed {
-				awaitLog(t, logs, "fault released")
+				testutil.ReceiveUntil(t, logs, "fault released")
 			}
 		})
 	}
 }
 
 func TestResetStartsAnInlineScenario(t *testing.T) {
-	var logs syncBuffer
+	var logs testutil.SyncBuffer
 	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"chaos": {}}, Scenario: "chaos", Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	inline := &InlineScenario{Rules: []faults.Rule{denyStats}}
 	status, err := m.Reset(t.Context(), ResetRequest{Inline: inline, Seed: new(faults.Seed(7))})

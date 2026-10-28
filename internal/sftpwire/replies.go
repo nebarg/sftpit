@@ -75,11 +75,22 @@ type ExtendedReply struct {
 	Data []byte
 }
 
-func (*StatusReply) Type() PacketType   { return TypeStatus }
-func (*HandleReply) Type() PacketType   { return TypeHandle }
-func (*DataReply) Type() PacketType     { return TypeData }
-func (*NameReply) Type() PacketType     { return TypeName }
-func (*AttrsReply) Type() PacketType    { return TypeAttrs }
+// Type returns TypeStatus.
+func (*StatusReply) Type() PacketType { return TypeStatus }
+
+// Type returns TypeHandle.
+func (*HandleReply) Type() PacketType { return TypeHandle }
+
+// Type returns TypeData.
+func (*DataReply) Type() PacketType { return TypeData }
+
+// Type returns TypeName.
+func (*NameReply) Type() PacketType { return TypeName }
+
+// Type returns TypeAttrs.
+func (*AttrsReply) Type() PacketType { return TypeAttrs }
+
+// Type returns TypeExtendedReply.
 func (*ExtendedReply) Type() PacketType { return TypeExtendedReply }
 
 func (p *StatusReply) appendBody(b []byte) []byte {

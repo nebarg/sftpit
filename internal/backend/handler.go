@@ -234,7 +234,9 @@ func (h *handler) rename(from, to string) error {
 		err := h.root.Link(from, to)
 		if err == nil {
 			if err := h.root.Remove(from); err != nil {
-				h.root.Remove(to)
+				// The client hears why the rename failed, not whether
+				// undoing its link did.
+				_ = h.root.Remove(to)
 				return statusError(err)
 			}
 			return nil

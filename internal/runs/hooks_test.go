@@ -14,6 +14,7 @@ import (
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestFaultsAtConnectEndWithTheHandshake(t *testing.T) {
@@ -58,11 +59,11 @@ func TestShutdownDuringAFreezeIsNoFailure(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer raw.Close()
-	awaitLog(t, logs, "injected fault")
+	testutil.ReceiveUntil(t, logs, "injected fault")
 
 	closed := make(chan error, 1)
 	go func() { closed <- m.Close() }()
-	if err := receive(t, closed); err != nil {
+	if err := testutil.Receive(t, closed); err != nil {
 		t.Errorf("Close: %v", err)
 	}
 	for len(logs) > 0 {

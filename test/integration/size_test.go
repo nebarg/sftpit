@@ -43,6 +43,7 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 
 	for _, tt := range sizes {
 		t.Run("OpenSSH/"+tt.name, func(t *testing.T) {
+			t.Parallel()
 			sftpPath := openSSHOrSkip(t)
 			srv := startServer(t, proxied, sftpproxy.Options{Faults: misreportSizeOf("/orders.csv", tt.wrongSize)})
 			writeFile(t, srv.path("/orders.csv"), data)
@@ -79,6 +80,7 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 		})
 
 		t.Run("phpseclib/"+tt.name, func(t *testing.T) {
+			t.Parallel()
 			php := phpseclibOrSkip(t)
 			srv := startServer(t, proxied, sftpproxy.Options{Faults: misreportSizeOf("/orders.csv", tt.wrongSize)})
 			writeFile(t, srv.path("/orders.csv"), data)

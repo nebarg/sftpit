@@ -1,14 +1,12 @@
 package runs
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"log/slog"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -20,12 +18,13 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 	"github.com/nebarg/sftpit/internal/sshfront"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const (
 	testUser     = "test"
 	testPassword = "test-password"
-	waitTimeout  = 5 * time.Second
+	waitTimeout  = testutil.WaitTimeout
 )
 
 // newManager starts runs in a new workspace with opts, for testUser, and
@@ -128,18 +127,6 @@ func dialSSH(t *testing.T, addr string) *ssh.Client {
 	return conn
 }
 
-func receive[T any](t *testing.T, ch <-chan T) T {
-	t.Helper()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting")
-		var zero T
-		return zero
-	}
-}
-
 // messages is a slog handler that sends the message of each record to it,
 // dropping those that do not fit.
 type messages chan string
@@ -156,25 +143,6 @@ func (m messages) Handle(_ context.Context, r slog.Record) error {
 
 func (m messages) WithAttrs([]slog.Attr) slog.Handler { return m }
 func (m messages) WithGroup(string) slog.Handler      { return m }
-
-// syncBuffer is a bytes.Buffer that is safe for concurrent use, for logs
-// that a run's sessions write.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
 
 // connectRule is a rule, held, that gives action to every connection as it
 // is accepted.
@@ -193,14 +161,6 @@ func outageAt(moment time.Duration) faults.Rule {
 }
 
 var denyStats = faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}
-
-// awaitLog waits until the logs carry the message want, whatever they carry
-// before it.
-func awaitLog(t *testing.T, logs messages, want string) {
-	t.Helper()
-	for receive(t, logs) != want {
-	}
-}
 
 // awaitRefused waits until nothing listens at addr.
 func awaitRefused(t *testing.T, addr string) {

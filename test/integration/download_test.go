@@ -55,6 +55,7 @@ func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
 		for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
 			for _, tt := range corruptions {
 				t.Run(c.name+"/"+order.String()+"/"+tt.corruption.Corruption.String(), func(t *testing.T) {
+					t.Parallel()
 					srv := startServer(t, proxied, sftpproxy.Options{
 						Faults: func(r sftpproxy.Request) sftpproxy.Action {
 							if open, ok := r.Packet.(*sftpwire.Open); ok && r.Path == "/orders.csv" && open.Flags&sftpwire.OpenWrite == 0 {

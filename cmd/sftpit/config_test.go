@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 const validConfig = `schema_version: 1
@@ -31,8 +33,8 @@ func TestConfigValidateChecksWithoutStarting(t *testing.T) {
 	t.Setenv("SFTPIT_CONFIG_TEST_PASSWORD", "secret")
 	dir := t.TempDir()
 	config := filepath.Join(dir, "sftpit.yaml")
-	writeTestFile(t, config, validConfig)
-	writeTestFile(t, filepath.Join(dir, ".env"), "SFTPIT_CONFIG_TEST_OTHER=other\n")
+	testutil.WriteFile(t, config, validConfig)
+	testutil.WriteFile(t, filepath.Join(dir, ".env"), "SFTPIT_CONFIG_TEST_OTHER=other\n")
 
 	code, stdout, stderr := runConfig(t, "validate", "--config", config)
 	if code != exitOK || stdout != config+" is valid: 2 users and 1 scenario\n" || stderr != "" {
@@ -57,7 +59,7 @@ func TestConfigValidateChecksWithoutStarting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			writeTestFile(t, config, tt.config)
+			testutil.WriteFile(t, config, tt.config)
 			code, stdout, stderr := runConfig(t, "validate", "--config", config)
 			if code != exitUsage || stdout != "" || !strings.Contains(stderr, tt.want) {
 				t.Errorf("validate = %d with stdout %q and stderr %q, want %d and %q", code, stdout, stderr, exitUsage, tt.want)
@@ -69,9 +71,9 @@ func TestConfigValidateChecksWithoutStarting(t *testing.T) {
 func TestConfigExplainPrintsTheConfigurationAsRead(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "sftpit.yaml")
-	writeTestFile(t, config, validConfig)
+	testutil.WriteFile(t, config, validConfig)
 	extra := filepath.Join(dir, "extra.env")
-	writeTestFile(t, extra, "SFTPIT_CONFIG_TEST_PASSWORD=secret\n")
+	testutil.WriteFile(t, extra, "SFTPIT_CONFIG_TEST_PASSWORD=secret\n")
 
 	// A missing secret is shown, not refused.
 	code, stdout, stderr := runConfig(t, "explain", "--config", config, "--env-file", extra)
@@ -93,7 +95,7 @@ func TestConfigExplainPrintsTheConfigurationAsRead(t *testing.T) {
 		t.Errorf("explain printed a secret:\n%s", stdout)
 	}
 
-	writeTestFile(t, config, validConfig+"      - {id: bad, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n")
+	testutil.WriteFile(t, config, validConfig+"      - {id: bad, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n")
 	if code, stdout, stderr := runConfig(t, "explain", "--config", config); code != exitUsage || stdout != "" || !strings.Contains(stderr, `sftpit config explain: scenarios.upload-recovery: faults: rule "bad": unknown operation "upload"`) {
 		t.Errorf("explain = %d with stdout %q and stderr %q, want the invalid rule reported", code, stdout, stderr)
 	}
@@ -101,7 +103,7 @@ func TestConfigExplainPrintsTheConfigurationAsRead(t *testing.T) {
 
 func TestConfigRejectsBadCommandLines(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeTestFile(t, config, "schema_version: 1\n")
+	testutil.WriteFile(t, config, "schema_version: 1\n")
 	tests := []struct {
 		name string
 		args []string

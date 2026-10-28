@@ -12,13 +12,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestServeWritesAReadyFileWhileItRuns(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ready.json")
 	// An earlier serve's ready file is replaced.
-	writeTestFile(t, path, goneReadyFile("127.0.0.1:2"))
+	testutil.WriteFile(t, path, goneReadyFile("127.0.0.1:2"))
 
 	s := startServe(t, "--ready-file", path)
 	b, err := os.ReadFile(path)
@@ -89,9 +91,9 @@ func TestServeRemovesAStaleReadyFileEvenIfItCannotStart(t *testing.T) {
 	}
 	defer ln.Close()
 	path := filepath.Join(t.TempDir(), "ready.json")
-	writeTestFile(t, path, goneReadyFile("127.0.0.1:2"))
+	testutil.WriteFile(t, path, goneReadyFile("127.0.0.1:2"))
 
-	var stdout, stderr syncBuffer
+	var stdout, stderr testutil.SyncBuffer
 	if code := run(commandContext(t), []string{"serve", "--sftp-listen", ln.Addr().String(), "--http-listen", "127.0.0.1:0", "--ready-file", path}, &stdout, &stderr); code != exitFailure {
 		t.Fatalf("serve on an occupied port exited with %d, want %d\n%s", code, exitFailure, stderr.String())
 	}
@@ -110,13 +112,17 @@ func TestServeRefusesAReadyFileItCannotWrite(t *testing.T) {
 		"notes.json":   goneReadyFile("127.0.0.1:8122") + "\nnotes\n",
 	}
 	for name, content := range others {
-		writeTestFile(t, filepath.Join(dir, name), content)
+		testutil.WriteFile(t, filepath.Join(dir, name), content)
 	}
 	readOnly := filepath.Join(dir, "read-only")
 	if err := os.Mkdir(readOnly, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(readOnly, 0o700) })
+	t.Cleanup(func() {
+		if err := os.Chmod(readOnly, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
 	tests := []struct {
 		name, path, want string
 	}{
@@ -137,7 +143,7 @@ func TestServeRefusesAReadyFileItCannotWrite(t *testing.T) {
 			// A serve that took the file would run until the deadline.
 			ctx, cancel := context.WithTimeout(t.Context(), startTimeout)
 			defer cancel()
-			var stdout, stderr syncBuffer
+			var stdout, stderr testutil.SyncBuffer
 			code := run(ctx, []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "--ready-file", tt.path}, &stdout, &stderr)
 			if code != exitUsage || !strings.Contains(stderr.String(), "--ready-file: ") || !strings.Contains(stderr.String(), tt.want) {
 				t.Errorf("exit %d, stderr %q, want %d and %q", code, stderr.String(), exitUsage, tt.want)

@@ -3,6 +3,7 @@ package sftpproxy_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -75,7 +76,7 @@ func runWorkload(t *testing.T, c *sftp.Client, upload []byte) []string {
 		}
 		h := sha256.New()
 		n, err := f.WriteTo(h)
-		record("download "+name, err, n, " ", fmt.Sprintf("%x", h.Sum(nil)))
+		record("download "+name, err, n, " ", hex.EncodeToString(h.Sum(nil)))
 		record("close "+name, f.Close())
 	}
 	list := func(dir string) {

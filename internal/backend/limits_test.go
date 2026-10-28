@@ -274,14 +274,14 @@ func TestLimitsStayExactAcrossSessions(t *testing.T) {
 				// Refusals at the limits are expected, and leave partial files.
 				name := fmt.Sprintf("/s%d-%d", i, j%5)
 				if f, err := c.Create(name); err == nil {
-					f.ReadFrom(bytes.NewReader(data))
+					_, _ = f.ReadFrom(bytes.NewReader(data))
 					f.Close()
 				}
 				if j%3 == 0 {
-					c.PosixRename(name, fmt.Sprintf("/s%d-renamed", i))
+					_ = c.PosixRename(name, fmt.Sprintf("/s%d-renamed", i))
 				}
 				if j%4 == 0 {
-					c.Remove(fmt.Sprintf("/s%d-%d", i, (j+1)%5))
+					_ = c.Remove(fmt.Sprintf("/s%d-%d", i, (j+1)%5))
 				}
 			}
 		})

@@ -433,7 +433,7 @@ sftpit runs on Linux and macOS, and building it requires Go 1.26 or later.
 make check
 ```
 
-`make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, staticcheck with all its checks and the tests with the race detector. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
+`make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, golangci-lint with the linters in `.golangci.yml`, staticcheck's full checks among them, and the tests with the race detector. `make lint` builds the version of golangci-lint that the Makefile pins, so it needs no install. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
 
 The integration tests in `test/integration` drive the OpenSSH `sftp` client, phpseclib, and a Laravel application that publishes through Laravel's filesystem against sftpit, and are skipped when a client is missing. The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there. The PHP clients need PHP 8.3 or later and Composer:
 

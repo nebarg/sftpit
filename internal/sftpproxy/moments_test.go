@@ -170,7 +170,7 @@ func TestTimedFaultsCountFromTheHandlesOpen(t *testing.T) {
 				if got := p.conn.events(); !slices.Equal(got, []string{"reset"}) {
 					t.Errorf("connection events = %v, want [reset]", got)
 				}
-				assertSnapshotsLogged(t, logs.String(), snapshotLog("/f", "fault"))
+				assertSnapshotsLogged(t, logs.String(), snapshotLog("fault"))
 				logs.assertLogged(t, `level=INFO msg="injected fault" path=/f fault=close_connection when=timer mode=rst`)
 			})
 		})

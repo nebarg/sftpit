@@ -1,5 +1,9 @@
 .PHONY: build test vet lint vuln fmt-check fix-check tidy-check check linux-check integration-deps
 
+# golangci-lint is run at this version, built in isolation rather than
+# added to go.mod, as its authors advise.
+GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+
 build:
 	go build -o bin/sftpit ./cmd/sftpit
 
@@ -10,7 +14,7 @@ vet:
 	go vet ./...
 
 lint:
-	go tool staticcheck ./...
+	$(GOLANGCI_LINT) run ./...
 
 vuln:
 	go tool govulncheck ./...

@@ -34,6 +34,7 @@ func TestOpenSSHUntilAStallIsReleased(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var logs capturedLog
 			srv := startScenario(t, []faults.Rule{{ID: "held", Match: list, Action: tt.action}}, 0, logs.logger())
 			writeFile(t, srv.path("/orders.csv"), []byte("id,total\n"))
