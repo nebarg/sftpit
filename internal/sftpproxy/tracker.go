@@ -44,8 +44,14 @@ type request struct {
 	// cutoff the handle it opens will have.
 	upload *upload
 
-	// cut is set when the cutoff decided the request, rather than Faults.
-	cut bool
+	// partial is the cutoff on the handle a READ uses or, for an OPEN, the
+	// cutoff the handle it opens will have.
+	partial *partial
+
+	// cut is set when a cutoff decided the request, rather than Faults, and
+	// cutoff is that cutoff.
+	cut    bool
+	cutoff uint64
 
 	// download is the corruption on the handle a request uses or, for an
 	// OPEN, the corruption the handle it opens will have.
@@ -102,6 +108,7 @@ type tracker struct {
 type handle struct {
 	path     string
 	upload   *upload
+	partial  *partial
 	download *download
 	stored   *stored
 
@@ -206,7 +213,8 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 // use attributes req to the open handle id, if the proxy knows it.
 func (t *tracker) use(req *request, id string) {
 	if h := t.handles[id]; h != nil {
-		req.handle, req.path, req.upload, req.download, req.stored = h, h.path, h.upload, h.download, h.stored
+		req.handle, req.path = h, h.path
+		req.upload, req.partial, req.download, req.stored = h.upload, h.partial, h.download, h.stored
 	}
 }
 
@@ -370,7 +378,7 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
 		_, file := req.packet.(*sftpwire.Open)
-		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
+		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
 	}
 	return req, nil
 }

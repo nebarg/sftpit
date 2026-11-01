@@ -46,6 +46,10 @@ type failUploadConfig struct {
 	MaxFreeze   string              `yaml:"max_freeze,omitempty" json:"max_freeze,omitempty"`
 }
 
+// failDownloadConfig cuts off downloads as failUploadConfig cuts off
+// uploads.
+type failDownloadConfig failUploadConfig
+
 // failRandomlyConfig fails a share of the requests of some operations
 // before the server acts, with failure unless a status is set.
 type failRandomlyConfig struct {
@@ -101,6 +105,7 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 	var recipes []string
 	for name, set := range map[string]bool{
 		"fail_upload":          rc.FailUpload != nil,
+		"fail_download":        rc.FailDownload != nil,
 		"fail_randomly":        rc.FailRandomly != nil,
 		"corrupt_download":     rc.CorruptDownload != nil,
 		"corrupt_upload":       rc.CorruptUpload != nil,
@@ -126,7 +131,9 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 	var err error
 	switch {
 	case rc.FailUpload != nil:
-		err = rc.FailUpload.expand(&rc)
+		err = rc.FailUpload.cut(&rc, "write", "partial_upload")
+	case rc.FailDownload != nil:
+		err = failUploadConfig(*rc.FailDownload).cut(&rc, "read", "partial_download")
 	case rc.FailRandomly != nil:
 		err = rc.FailRandomly.expand(&rc)
 	case rc.CorruptDownload != nil:
@@ -144,18 +151,20 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 	return rc, recipe, nil
 }
 
-func (c failUploadConfig) expand(rc *ruleConfig) error {
+// cut sets rc to the action, partial_upload or partial_download, that cuts
+// off the transfers of operation, write or read, as c says.
+func (c failUploadConfig) cut(rc *ruleConfig, operation, action string) error {
 	if c.AfterBytes == nil {
 		return errors.New("after_bytes is required")
 	}
 	if c.AfterBytes.Min > c.AfterBytes.Max {
 		return fmt.Errorf("the after_bytes range's min %d is above its max %d", c.AfterBytes.Min, c.AfterBytes.Max)
 	}
-	rc.Match = c.match("write")
+	rc.Match = c.match(operation)
 	rc.Match.Attempt = attempts(c.Attempts)
 	rc.Decision = decision(c.Probability)
 	rc.Action = actionConfig{
-		Type:         "partial_upload",
+		Type:         action,
 		CutoffOffset: c.AfterBytes,
 		Result:       cmp.Or(c.Result, "status"),
 		Status:       c.Status,

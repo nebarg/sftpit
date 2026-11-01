@@ -414,6 +414,11 @@ func (e *Engine) drawn(r *rule, k Key) (sftpproxy.Action, []any) {
 			a.Cutoff = drawFrom(e, k, "cutoff", *r.Cutoff)
 			return r.released(a), []any{"cutoff", a.Cutoff}
 		}
+	case sftpproxy.PartialDownload:
+		if r.Cutoff != nil {
+			a.Cutoff = drawFrom(e, k, "cutoff", *r.Cutoff)
+			return r.released(a), []any{"cutoff", a.Cutoff}
+		}
 	}
 	return r.released(r.Action), nil
 }
@@ -432,6 +437,9 @@ func (r *rule) released(a sftpproxy.Action) sftpproxy.Action {
 		a.Release = r.removed
 		return a
 	case sftpproxy.PartialUpload:
+		a.Result = r.released(a.Result)
+		return a
+	case sftpproxy.PartialDownload:
 		a.Result = r.released(a.Result)
 		return a
 	}

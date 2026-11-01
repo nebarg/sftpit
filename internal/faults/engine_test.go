@@ -281,6 +281,26 @@ func TestDownloadsAreSelectedAtTheirOpenForReading(t *testing.T) {
 	}
 }
 
+func TestDownloadCutoffsAreSelectedAtTheirOpenForReading(t *testing.T) {
+	e := newEngine(t, faults.Rule{
+		ID:     "cut",
+		Match:  faults.Match{Operations: ops(faults.Read)},
+		Cutoff: &faults.Range[uint64]{Min: 100, Max: 200},
+		Action: sftpproxy.PartialDownload{Result: sftpproxy.Freeze{Limit: time.Minute}},
+	})
+	decide := session(e, "test", "")
+	if decide(openFor("/f", sftpwire.OpenWrite)) != nil {
+		t.Error("an open for writing was given a download's cutoff")
+	}
+	a, ok := decide(openFor("/f", sftpwire.OpenRead)).(sftpproxy.PartialDownload)
+	if !ok || a.Reserve == nil || a.Cutoff < 100 || a.Cutoff > 200 {
+		t.Fatalf("open for reading got %#v, want the cutoff drawn from 100 to 200, with a Reserve", a)
+	}
+	if freeze, ok := a.Result.(sftpproxy.Freeze); !ok || freeze.Release == nil {
+		t.Errorf("result = %#v, want a freeze that a change of rules releases", a.Result)
+	}
+}
+
 func TestUploadCorruptionsAreSelectedAtTheirOpenForWriting(t *testing.T) {
 	corrupt := sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: 1024}
 	e := newEngine(t, faults.Rule{ID: "short", MaxTriggers: 1, Match: faults.Match{Operations: ops(faults.Write)}, Action: corrupt})
@@ -525,6 +545,8 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"a cutoff off writes", []faults.Rule{{ID: "r", Match: read, Action: cutOff}}, "match the write operation only"},
 		{"a cutoff that delays", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Write)}, Action: sftpproxy.PartialUpload{Result: sftpproxy.Delay{}}}}, "cannot end with sftpproxy.Delay"},
 		{"an upload corruption off writes", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.OpenWrite)}, Action: sftpproxy.CorruptUpload{}}}, "match the write operation only"},
+		{"a download cutoff off reads", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.OpenRead)}, Action: sftpproxy.PartialDownload{Result: failure}}}, "a partial download needs the rule to match the read operation only"},
+		{"a download cutoff that delays", []faults.Rule{{ID: "r", Match: read, Action: sftpproxy.PartialDownload{Result: sftpproxy.Delay{}}}}, "a partial download cannot end with sftpproxy.Delay"},
 		{"a corruption off reads", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Read, faults.Stat)}, Action: sftpproxy.CorruptDownload{}}}, "match the read operation only"},
 		{"a hide on an open for writing", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Stat, faults.OpenWrite)}, Action: sftpproxy.Hide{}}}, "a hide applies to open_read, stat, lstat, list, remove and rename, not open_write"},
 		{"a hide on any operation", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Any)}, Action: sftpproxy.Hide{}}}, "not any"},

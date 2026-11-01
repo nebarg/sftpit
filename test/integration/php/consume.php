@@ -9,9 +9,11 @@
 //
 // <work-dir> is unused. <consumer> is what the application does with a file
 // it has processed before:
-//   naive       processes it again;
-//   idempotent  remembers each file it processed by name and SHA-256, and
-//               only deletes it again.
+//   naive        processes it again;
+//   idempotent   remembers each file it processed by name and SHA-256, and
+//                only deletes it again;
+//   verify-size  processes it again, and leaves a download whose length
+//                differs from the file's size for the next poll.
 
 declare(strict_types=1);
 
@@ -25,7 +27,12 @@ for ($poll = 1; $poll <= (int) $polls; $poll++) {
     $files = $disk->files('outgoing');
     outcome("poll $poll list", $files);
     foreach ($files as $file) {
-        $digest = digest($disk->get($file) ?? false);
+        $content = $disk->get($file) ?? false;
+        $digest = digest($content);
+        if ($consumer === 'verify-size' && strlen((string) $content) !== $disk->size($file)) {
+            outcome("poll $poll short $file", $digest);
+            continue;
+        }
         if ($consumer === 'idempotent' && ($processed[$file] ?? null) === $digest) {
             outcome("poll $poll skip $file", $digest);
         } else {

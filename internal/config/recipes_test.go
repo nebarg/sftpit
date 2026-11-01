@@ -88,6 +88,19 @@ func TestRecipesCompileToTheirLongForm(t *testing.T) {
         action: {type: corrupt_download, transform: truncate, offset: 100}`,
 		},
 		{
+			"a download cut off at its first attempt",
+			`fail_download: {path_glob: /outgoing/*.csv, attempts: [1], after_bytes: 1048576}`,
+			`match: {operation: read, path_glob: /outgoing/*.csv, attempt: {numbers: [1]}}
+        action: {type: partial_download, cutoff_offset: 1048576, result: status, status: failure}`,
+		},
+		{
+			"a random download reset at a random offset",
+			`fail_download: {filename: orders.csv, probability: 0.25, after_bytes: {min: 65536, max: 1048576}, result: close_connection, mode: rst}`,
+			`match: {operation: read, filename: orders.csv}
+        decision: {probability: 0.25}
+        action: {type: partial_download, cutoff_offset: {min: 65536, max: 1048576}, result: close_connection, mode: rst}`,
+		},
+		{
 			"an upload cut short",
 			`corrupt_upload: {path: /incoming/orders.csv.part, attempts: [1], transform: truncate, offset: 3145728}`,
 			`match: {operation: write, path: /incoming/orders.csv.part, attempt: {numbers: [1]}}
@@ -189,6 +202,8 @@ func TestLoadRejectsInvalidRecipes(t *testing.T) {
 		{"a missing file on writes", "missing_file: {operations: [stat, open_write]}", "a hide applies to open_read, stat, lstat, list, remove and rename, not open_write"},
 		{"a missing file with a status", "missing_file: {status: no_such_file}", "field status not found"},
 		{"a hide with a status", "match: {operation: stat}\n        action: {type: hide, status: failure}", "status does not apply to a hide"},
+		{"a download without its cutoff", "fail_download: {path: /a}", "fail_download: after_bytes is required"},
+		{"a download freeze without a bound", "fail_download: {after_bytes: 1, result: freeze_connection}", "max_freeze is required"},
 		{"an upload corruption without an offset", "corrupt_upload: {transform: flip_bytes, length: 1}", "corrupt_upload: action: offset is required"},
 		{"an upload flip without a length", "corrupt_upload: {transform: flip_bytes, offset: 0}", "flip_bytes needs a length of at least 1"},
 		{"a truncation with a length", "corrupt_download: {transform: truncate, offset: 0, length: 1}", "length does not apply to truncate"},

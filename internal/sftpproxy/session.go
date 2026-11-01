@@ -447,7 +447,7 @@ func (s *session) decide(req *request) error {
 	if s.faults == nil {
 		return nil
 	}
-	if !s.cut(req) && !s.corrupt(req) && !s.corruptStored(req) {
+	if !s.cut(req) && !s.cutRead(req) && !s.corrupt(req) && !s.corruptStored(req) {
 		req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
 		if err := s.checkFault(req.packet, req.action); err != nil {
 			return err
@@ -455,6 +455,8 @@ func (s *session) decide(req *request) error {
 		switch a := req.action.(type) {
 		case PartialUpload:
 			req.action, req.upload = nil, &upload{PartialUpload: a}
+		case PartialDownload:
+			req.action, req.partial = nil, &partial{PartialDownload: a}
 		case CorruptDownload:
 			req.action, req.download = nil, &download{CorruptDownload: a}
 		case CorruptUpload:
@@ -465,7 +467,9 @@ func (s *session) decide(req *request) error {
 			req.action, req.wrongSize = nil, &a
 		}
 	}
-	if req.action != nil {
+	// A download's cutoff changes no file, so, like a corruption, it leaves
+	// nothing to snapshot.
+	if _, read := req.packet.(*sftpwire.Read); req.action != nil && !(req.cut && read) {
 		s.tracker.fault(req)
 	}
 	return nil
@@ -485,6 +489,15 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 			return s.checkFault(p, a.Result)
 		}
 		return fmt.Errorf("sftpproxy: a PartialUpload result must be a Fail, Drop or Freeze, not %T", a.Result)
+	case PartialDownload:
+		if _, ok := p.(*sftpwire.Open); !ok {
+			return fmt.Errorf("sftpproxy: a PartialDownload fault is for OPEN, not %v", operation(p))
+		}
+		switch a.Result.(type) {
+		case Fail, Drop, Freeze:
+			return s.checkFault(p, a.Result)
+		}
+		return fmt.Errorf("sftpproxy: a PartialDownload result must be a Fail, Drop or Freeze, not %T", a.Result)
 	case Timed:
 		if _, ok := p.(*sftpwire.Open); !ok {
 			return fmt.Errorf("sftpproxy: a Timed fault is for OPEN, not %v", operation(p))
@@ -906,7 +919,13 @@ func (s *session) faultAttrs(req *request) []any {
 	}
 	attrs = append(attrs, FaultAttrs(req.action, when)...)
 	if req.cut {
-		attrs = append(attrs, "cutoff", req.upload.Cutoff, "offset", req.packet.(*sftpwire.Write).Offset)
+		attrs = append(attrs, "cutoff", req.cutoff)
+		switch p := req.packet.(type) {
+		case *sftpwire.Write:
+			attrs = append(attrs, "offset", p.Offset)
+		case *sftpwire.Read:
+			attrs = append(attrs, "offset", p.Offset)
+		}
 	}
 	return attrs
 }

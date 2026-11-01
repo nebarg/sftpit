@@ -138,6 +138,8 @@ scenarios:
       - {id: empty-size, match: {operation: fstat}, action: {type: wrong_size, size: 0}}
       - {id: short-size, match: {operation: [stat, list], path_glob: /out/*.csv}, action: {type: wrong_size, size_delta: -1024}}
       - {id: gone, match: {operation: [open_read, list], filename: gone.csv}, action: {type: hide}}
+      - {id: download-cut, match: {operation: read, filename: orders.csv}, decision: {probability: 0.5}, action: {type: partial_download, cutoff_offset: {min: 1, max: 9}, result: freeze_connection, max_freeze: 30s}}
+      - {id: download-failed, match: {operation: read, path: /out/a.csv, attempt: {numbers: [1]}}, action: {type: partial_download, cutoff_offset: 0, result: status, status: eof}}
       - {id: stored-short, match: {operation: write, path: /in/a.csv}, action: {type: corrupt_upload, transform: truncate, offset: 3}}
       - {id: stored-flipped, match: {operation: write}, decision: {probability: 0.5}, action: {type: corrupt_upload, transform: flip_bytes, offset: 0, length: 8}}
       - {id: renames, match: {operation: rename, source_glob: /in/*.part, target_prefix: /in}, action: {type: fail, when: before, status: no_such_file}}

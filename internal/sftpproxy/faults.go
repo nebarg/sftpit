@@ -50,8 +50,8 @@ func (w When) String() string {
 }
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze,
-// EndSession or ListenerDown, for an OPEN, a PartialUpload, CorruptDownload,
-// CorruptUpload or Timed, for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize, or for
+// EndSession or ListenerDown, for an OPEN, a PartialUpload, PartialDownload,
+// CorruptDownload, CorruptUpload or Timed, for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize, or for
 // an OPEN, STAT, LSTAT, REMOVE, rename or READDIR entry, a Hide. What else an
 // action holds back depends on the session's ReplyOrder.
 type Action interface {
@@ -142,6 +142,25 @@ type PartialUpload struct {
 	// Reserve, if set, is called when a write on the handle first reaches
 	// Cutoff, before anything is cut. If it returns false, the handle
 	// carries on as if no PartialUpload had been chosen for it.
+	Reserve func() bool
+}
+
+// PartialDownload is chosen for an OPEN to cut off downloads through the
+// handle it opens at Cutoff, so that no read on the handle returns a byte at
+// or beyond it. Each read is decided by its offset and length alone. A read
+// below Cutoff goes through. A read that crosses Cutoff is shortened to end
+// there, so the client gets short data. A read at or beyond Cutoff gets
+// Result without reaching the backend. Result is a Fail, Drop or Freeze,
+// and its When is ignored. A client that reads in offset order therefore
+// receives exactly the bytes below Cutoff before Result, and the file
+// itself is unchanged.
+type PartialDownload struct {
+	Cutoff uint64
+	Result Action
+
+	// Reserve, if set, is called when a read on the handle first reaches
+	// Cutoff, before anything is cut. If it returns false, the handle
+	// carries on as if no PartialDownload had been chosen for it.
 	Reserve func() bool
 }
 
@@ -291,9 +310,11 @@ func (a EndSession) when() When   { return a.When }
 func (a ListenerDown) when() When { return a.When }
 func (a Hide) when() When         { return Before }
 
-// A session takes a PartialUpload, CorruptDownload, CorruptUpload, Timed or WrongSize off
+// A session takes a PartialUpload, PartialDownload, CorruptDownload,
+// CorruptUpload, Timed or WrongSize off
 // its request before acting on any, so their when is never asked.
 func (a PartialUpload) when() When   { return Before }
+func (a PartialDownload) when() When { return Before }
 func (a CorruptDownload) when() When { return Before }
 func (a CorruptUpload) when() When   { return Before }
 func (a Timed) when() When           { return Before }

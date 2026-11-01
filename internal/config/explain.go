@@ -260,19 +260,9 @@ func longAction(r faults.Rule) actionConfig {
 	case sftpproxy.ListenerDown:
 		return actionConfig{Type: "listener_down", When: connectionWhen(r, a.When), Duration: longDuration(r, a.Duration), CloseExisting: &a.CloseExisting}
 	case sftpproxy.PartialUpload:
-		ac := actionConfig{Type: "partial_upload", CutoffOffset: &valueRange[uint64]{Min: a.Cutoff, Max: a.Cutoff}}
-		if c := r.Cutoff; c != nil {
-			ac.CutoffOffset = &valueRange[uint64]{Min: c.Min, Max: c.Max, ranged: true}
-		}
-		switch result := a.Result.(type) {
-		case sftpproxy.Fail:
-			ac.Result, ac.Status = "status", statusName(result.Status)
-		case sftpproxy.Drop:
-			ac.Result, ac.Mode = "close_connection", dropMode(result)
-		case sftpproxy.Freeze:
-			ac.Result, ac.MaxFreeze = "freeze_connection", result.Limit.String()
-		}
-		return ac
+		return cutoffAction("partial_upload", r, a.Cutoff, a.Result)
+	case sftpproxy.PartialDownload:
+		return cutoffAction("partial_download", r, a.Cutoff, a.Result)
 	case sftpproxy.CorruptDownload:
 		return corruptionAction("corrupt_download", a.Corruption, a.Offset, a.Length)
 	case sftpproxy.CorruptUpload:
@@ -288,6 +278,25 @@ func longAction(r faults.Rule) actionConfig {
 	// The configuration makes no other action, and faults.Check refuses any
 	// other.
 	panic(fmt.Sprintf("config: no long form for %T", r.Action))
+}
+
+// cutoffAction returns the long form of r's partial_upload or
+// partial_download, which cuts off at offset, or at the range r draws it
+// from, with result.
+func cutoffAction(typ string, r faults.Rule, offset uint64, result sftpproxy.Action) actionConfig {
+	ac := actionConfig{Type: typ, CutoffOffset: &valueRange[uint64]{Min: offset, Max: offset}}
+	if c := r.Cutoff; c != nil {
+		ac.CutoffOffset = &valueRange[uint64]{Min: c.Min, Max: c.Max, ranged: true}
+	}
+	switch result := result.(type) {
+	case sftpproxy.Fail:
+		ac.Result, ac.Status = "status", statusName(result.Status)
+	case sftpproxy.Drop:
+		ac.Result, ac.Mode = "close_connection", dropMode(result)
+	case sftpproxy.Freeze:
+		ac.Result, ac.MaxFreeze = "freeze_connection", result.Limit.String()
+	}
+	return ac
 }
 
 // corruptionAction returns the long form of a corrupt_download or

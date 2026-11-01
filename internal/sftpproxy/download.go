@@ -148,3 +148,51 @@ func flipBytes(req *request, p sftpwire.Packet) {
 		}
 	}
 }
+
+// partial is a PartialDownload on an open handle.
+type partial struct {
+	PartialDownload
+
+	// reached is set once a read on the handle has reached the cutoff, and
+	// declined if Reserve then refused the cutoff. shortened is set once the
+	// cutoff has shortened a read, and ended once a read has got its result.
+	reached, declined, shortened, ended bool
+}
+
+// cutRead applies the cutoff on req's handle if req is a read that reaches
+// it, and reports whether it did. The first read the cutoff shortens and
+// the first that gets its result are each logged as the fault; the reads it
+// cuts off after that are its effects.
+func (s *session) cutRead(req *request) bool {
+	r, ok := req.packet.(*sftpwire.Read)
+	if !ok || req.partial == nil || req.partial.declined {
+		return false
+	}
+	p := req.partial
+	if r.Offset < p.Cutoff && uint64(r.Length) <= p.Cutoff-r.Offset {
+		return false
+	}
+	if !p.reached {
+		p.reached = true
+		if p.Reserve != nil && !p.Reserve() {
+			p.declined = true
+			return false
+		}
+	}
+	if r.Offset < p.Cutoff {
+		level := slog.LevelDebug
+		if !p.shortened {
+			p.shortened, level = true, slog.LevelInfo
+		}
+		s.logger.Log(context.Background(), level, "injected fault", "request", operation(r), "path", req.path, "fault", "partial_download", "cutoff", p.Cutoff, "offset", r.Offset, "length", r.Length)
+		r.Length = uint32(p.Cutoff - r.Offset)
+		return true
+	}
+	level := slog.LevelDebug
+	if !p.ended {
+		p.ended, level = true, slog.LevelInfo
+	}
+	req.action, req.cut, req.cutoff = withWhen(p.Result, Before), true, p.Cutoff
+	s.logger.Log(context.Background(), level, "injected fault", s.faultAttrs(req)...)
+	return true
+}

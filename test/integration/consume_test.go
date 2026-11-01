@@ -86,3 +86,65 @@ func step(t testing.TB, op string, result any) line {
 	}
 	return line(out)
 }
+
+// TestLaravelConsumerOfACutOffDownload cuts off the first download of a
+// file with a status failure, and checks what each consumer processes.
+// phpseclib's get() returns what it read before the failure as if it were
+// the whole file, so Laravel's get() gives the naive consumer a short file,
+// which it processes and deletes. The consumer that compares the length
+// with the file's size leaves it for the next poll, which downloads it
+// whole.
+func TestLaravelConsumerOfACutOffDownload(t *testing.T) {
+	t.Parallel()
+	php := phpseclibOrSkip(t)
+
+	seed := t.TempDir()
+	data := randomBytes(4<<20 + 321)
+	if err := os.Mkdir(filepath.Join(seed, "outgoing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seed, "outgoing", "orders.csv"), data)
+	const file = "outgoing/orders.csv"
+	whole := strconv.Itoa(len(data)) + " " + digest(data)
+	short := strconv.Itoa(uploadCutoff) + " " + digest(data[:uploadCutoff])
+	tests := []struct {
+		consumer string
+		want     []line
+	}{
+		{"naive", []line{
+			step(t, "poll 1 list", []string{file}),
+			step(t, "poll 1 process "+file, short),
+			step(t, "poll 1 delete "+file, true),
+			step(t, "poll 2 list", []string{}),
+		}},
+		{"verify-size", []line{
+			step(t, "poll 1 list", []string{file}),
+			step(t, "poll 1 short "+file, short),
+			step(t, "poll 2 list", []string{file}),
+			step(t, "poll 2 process "+file, whole),
+			step(t, "poll 2 delete "+file, true),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.consumer, func(t *testing.T) {
+			t.Parallel()
+			opts := scenarioOptions(t, `  cut-off-download:
+    faults:
+      - id: cut-off-download
+        fail_download: {path: /`+file+`, attempts: [1], after_bytes: `+strconv.Itoa(uploadCutoff)+`}
+`, "cut-off-download")
+			opts.SeedDir = seed
+			_, srv := startRuns(t, opts)
+
+			transcript := runPhpseclib(t, php, srv, "consume.php", t.TempDir(), tt.consumer, "2")
+			srv.waitForSessions()
+
+			if got, want := lines(transcript), lines(tt.want); got != want {
+				t.Errorf("consume.php printed\n%swant\n%s", got, want)
+			}
+			if got := srv.counts(t, "cut-off-download"); got.Fired != 1 {
+				t.Errorf("counts = %+v, want the first download cut off", got)
+			}
+		})
+	}
+}

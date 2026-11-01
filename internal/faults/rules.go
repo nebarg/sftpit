@@ -43,19 +43,20 @@ type Rule struct {
 	// Duration from each time the rule fires, in place of its own.
 	Duration *Range[time.Duration]
 
-	// Cutoff, if set, is the range that a PartialUpload draws its Cutoff
-	// from for each transfer the rule selects, in place of its own.
+	// Cutoff, if set, is the range that a PartialUpload or PartialDownload
+	// draws its Cutoff from for each transfer the rule selects, in place of
+	// its own.
 	Cutoff *Range[uint64]
 
 	// Action is what the rule does to a request it selects: a Delay, Stall
 	// or Fail; a Drop, Freeze, EndSession or ListenerDown, which are
 	// connection actions; a PartialUpload or CorruptUpload for the write
-	// operation or a CorruptDownload for the read operation, chosen when
-	// the transfer's file is opened; a WrongSize for the stat, lstat, fstat
+	// operation or a PartialDownload or CorruptDownload for the read
+	// operation, chosen when the transfer's file is opened; a WrongSize for the stat, lstat, fstat
 	// and list operations; or a Hide for the open_read, stat, lstat, list,
 	// remove and rename operations. A WrongSize or Hide for list applies to
 	// the entries of a listing, not to the listing itself. The engine sets
-	// the Reserve of a PartialUpload, CorruptDownload or CorruptUpload, and
+	// the Reserve of a transfer's action, and
 	// the Release of a Delay, Stall or Freeze. A connection action can also
 	// fire at a moment, as Trigger says, whatever the client is doing then.
 	Action sftpproxy.Action
@@ -422,6 +423,15 @@ func (r Rule) checkAction() error {
 		default:
 			return fmt.Errorf("a partial upload cannot end with %T", a.Result)
 		}
+	case sftpproxy.PartialDownload:
+		if !slices.Equal(ops, []Operation{Read}) {
+			return errors.New("a partial download needs the rule to match the read operation only")
+		}
+		switch a.Result.(type) {
+		case sftpproxy.Fail, sftpproxy.Drop, sftpproxy.Freeze:
+		default:
+			return fmt.Errorf("a partial download cannot end with %T", a.Result)
+		}
 	case sftpproxy.CorruptDownload:
 		if !slices.Equal(ops, []Operation{Read}) {
 			return errors.New("a corrupt download needs the rule to match the read operation only")
@@ -456,8 +466,12 @@ func (r Rule) checkRanges() error {
 			return errors.New("a duration range needs a delay or listener_down")
 		}
 	}
-	if _, ok := r.Action.(sftpproxy.PartialUpload); r.Cutoff != nil && !ok {
-		return errors.New("a cutoff range needs a partial upload")
+	switch r.Action.(type) {
+	case sftpproxy.PartialUpload, sftpproxy.PartialDownload:
+	default:
+		if r.Cutoff != nil {
+			return errors.New("a cutoff range needs a partial upload or download")
+		}
 	}
 	if err := r.Duration.check("duration"); err != nil {
 		return err
@@ -549,7 +563,7 @@ func checkNumbers(name string, numbers []uint64) error {
 // so is chosen when the file is opened.
 func (r Rule) IsTransfer() bool {
 	switch r.Action.(type) {
-	case sftpproxy.PartialUpload, sftpproxy.CorruptDownload, sftpproxy.CorruptUpload:
+	case sftpproxy.PartialUpload, sftpproxy.PartialDownload, sftpproxy.CorruptDownload, sftpproxy.CorruptUpload:
 		return true
 	}
 	return r.timedByTransfer()
@@ -595,7 +609,7 @@ func (r Rule) selectedAt() []Operation {
 	switch r.Action.(type) {
 	case sftpproxy.PartialUpload, sftpproxy.CorruptUpload:
 		return []Operation{OpenWrite}
-	case sftpproxy.CorruptDownload:
+	case sftpproxy.PartialDownload, sftpproxy.CorruptDownload:
 		return []Operation{OpenRead}
 	}
 	if r.timedByTransfer() {

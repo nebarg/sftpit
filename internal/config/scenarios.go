@@ -41,6 +41,7 @@ type ruleConfig struct {
 
 	// A rule gives either a match and an action, or one recipe.
 	FailUpload          *failUploadConfig          `yaml:"fail_upload,omitempty" json:"fail_upload,omitempty"`
+	FailDownload        *failDownloadConfig        `yaml:"fail_download,omitempty" json:"fail_download,omitempty"`
 	FailRandomly        *failRandomlyConfig        `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
 	CorruptDownload     *corruptDownloadConfig     `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
 	CorruptUpload       *corruptUploadConfig       `yaml:"corrupt_upload,omitempty" json:"corrupt_upload,omitempty"`
@@ -338,11 +339,11 @@ func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 }
 
 // checkScope reports a decision scope that the rule cannot have. A partial
-// upload or a corrupt download or upload is decided once for each transfer,
-// at its open, and any other fault for each request, which for an open is the same
+// or corrupt upload or download is decided once for each transfer, at its
+// open, and any other fault for each request, which for an open is the same
 // as for its transfer. The scope defaults to the one the action has.
 func (rc ruleConfig) checkScope(scope string) error {
-	transfer := slices.Contains([]string{"partial_upload", "corrupt_download", "corrupt_upload"}, rc.Action.Type) ||
+	transfer := slices.Contains([]string{"partial_upload", "partial_download", "corrupt_download", "corrupt_upload"}, rc.Action.Type) ||
 		(rc.atMoment() && rc.Trigger.Anchor == "transfer")
 	switch scope {
 	case "":
@@ -351,7 +352,7 @@ func (rc ruleConfig) checkScope(scope string) error {
 			return op != string(faults.OpenRead) && op != string(faults.OpenWrite)
 		})
 		if !transfer && !opens {
-			return fmt.Errorf("scope transfer needs a partial_upload, corrupt_download, corrupt_upload or the open_read and open_write operations; a %s on every request of a chosen transfer is not supported", rc.Action.Type)
+			return fmt.Errorf("scope transfer needs a partial_upload, partial_download, corrupt_upload or corrupt_download, or the open_read and open_write operations; a %s on every request of a chosen transfer is not supported", rc.Action.Type)
 		}
 	case "operation":
 		if transfer {
@@ -553,6 +554,7 @@ var actionFields = map[string][]string{
 	"close_subsystem":   {"when"},
 	"listener_down":     {"when", "duration", "close_existing"},
 	"partial_upload":    {"cutoff_offset", "result", "status", "mode", "max_freeze"},
+	"partial_download":  {"cutoff_offset", "result", "status", "mode", "max_freeze"},
 	"corrupt_download":  {"transform", "offset", "length"},
 	"corrupt_upload":    {"transform", "offset", "length"},
 	"wrong_size":        {"size", "size_delta"},
@@ -600,7 +602,15 @@ func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 	case "listener_down":
 		r.Action, r.Duration, err = ac.listenerDown(noWhen)
 	case "partial_upload":
-		r.Action, r.Cutoff, err = ac.partialUpload()
+		var c cutoff
+		if c, err = ac.cutoff(); err == nil {
+			r.Action, r.Cutoff = sftpproxy.PartialUpload{Cutoff: c.offset, Result: c.result}, c.ranged
+		}
+	case "partial_download":
+		var c cutoff
+		if c, err = ac.cutoff(); err == nil {
+			r.Action, r.Cutoff = sftpproxy.PartialDownload{Cutoff: c.offset, Result: c.result}, c.ranged
+		}
 	case "corrupt_download":
 		var c corruption
 		if c, err = ac.corruption(); err == nil {
@@ -783,29 +793,32 @@ func (ac actionConfig) freezeConnection(noWhen string) (sftpproxy.Action, error)
 	return sftpproxy.Freeze{When: when, Limit: limit}, nil
 }
 
-// partialUpload returns the partial upload of ac, and the range it draws
-// its cutoff from if ac gives one.
-func (ac actionConfig) partialUpload() (sftpproxy.Action, *faults.Range[uint64], error) {
-	if ac.CutoffOffset == nil {
-		return nil, nil, errors.New("cutoff_offset is required")
-	}
-	var u sftpproxy.PartialUpload
-	var cutoffs *faults.Range[uint64]
-	if ac.CutoffOffset.ranged {
-		cutoffs = &faults.Range[uint64]{Min: ac.CutoffOffset.Min, Max: ac.CutoffOffset.Max}
-	} else {
-		u.Cutoff = ac.CutoffOffset.Min
-	}
-	result, err := ac.uploadResult()
-	if err != nil {
-		return nil, nil, err
-	}
-	u.Result = result
-	return u, cutoffs, nil
+// cutoff is the cutoff of a partial_upload or partial_download, and the
+// range it draws its cutoff from if it gives one.
+type cutoff struct {
+	offset uint64
+	ranged *faults.Range[uint64]
+	result sftpproxy.Action
 }
 
-// uploadResult returns what a partial upload of ac does at its cutoff.
-func (ac actionConfig) uploadResult() (sftpproxy.Action, error) {
+func (ac actionConfig) cutoff() (cutoff, error) {
+	if ac.CutoffOffset == nil {
+		return cutoff{}, errors.New("cutoff_offset is required")
+	}
+	var c cutoff
+	if ac.CutoffOffset.ranged {
+		c.ranged = &faults.Range[uint64]{Min: ac.CutoffOffset.Min, Max: ac.CutoffOffset.Max}
+	} else {
+		c.offset = ac.CutoffOffset.Min
+	}
+	var err error
+	c.result, err = ac.cutoffResult()
+	return c, err
+}
+
+// cutoffResult returns what a partial upload or download of ac does at its
+// cutoff.
+func (ac actionConfig) cutoffResult() (sftpproxy.Action, error) {
 	if ac.Status != "" && ac.Result != "status" {
 		return nil, errors.New("status applies only to result status")
 	}

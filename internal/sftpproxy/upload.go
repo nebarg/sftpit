@@ -43,12 +43,13 @@ func (s *session) cut(req *request) bool {
 		w.Data = w.Data[:u.Cutoff-w.Offset]
 		when = After
 	}
-	req.action, req.cut = withWhen(u.Result, when), true
+	req.action, req.cut, req.cutoff = withWhen(u.Result, when), true, u.Cutoff
 	s.logger.Log(context.Background(), level, "injected fault", s.faultAttrs(req)...)
 	return true
 }
 
-// withWhen returns a, the result of a PartialUpload, taking effect when.
+// withWhen returns a, the result of a PartialUpload or PartialDownload,
+// taking effect when.
 func withWhen(a Action, when When) Action {
 	switch a := a.(type) {
 	case Fail:

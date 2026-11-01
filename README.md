@@ -155,6 +155,7 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 | `close_subsystem` | Ends the SFTP session where the reply would be, closing its channel but leaving the connection open, as a server ending an idle session does | `when` |
 | `listener_down` | Takes the server down for `duration` where the reply would be: new connections are refused until it is over. With `close_existing: true`, every connection is closed too, the client's own included; otherwise the client carries on | `when`, `duration`, `close_existing` |
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
+| `partial_download` | For `read`: serves the bytes below `cutoff_offset`, shortening the read that crosses it, then answers a read at or beyond it with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it. The file is unchanged | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
 | `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
 | `corrupt_upload` | For `write`: stores the upload `truncate`d at `offset`, without the `length` bytes at `offset` (`omit_range`), with every later byte moved down to fill the gap, or with them changed (`flip_bytes`). Every write is answered with success | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
@@ -169,6 +170,11 @@ faults:
   - id: "first-upload-cutoff"
     fail_upload:
       path: "/incoming/orders.csv.part"
+      attempts: [1]
+      after_bytes: 1048576
+  - id: "first-download-cutoff"
+    fail_download:
+      path: "/outgoing/orders.csv"
       attempts: [1]
       after_bytes: 1048576
   - id: "random-failures"
@@ -201,6 +207,7 @@ faults:
 | Recipe | Long form | Fields |
 |---|---|---|
 | `fail_upload` | A `partial_upload` cut off at `after_bytes`, whose `result` is `status` and `status` is `failure` unless set | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
+| `fail_download` | A `partial_download` cut off at `after_bytes`, with the same defaults as `fail_upload` | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
 | `fail_randomly` | A `fail` of `operations` with `probability`, `when` `before` and `status` `failure` unless set | `operations`, `probability`, `status`, `when` |
 | `corrupt_download` | A `corrupt_download` | `attempts`, `probability`, `transform`, `offset`, `length` |
 | `corrupt_upload` | A `corrupt_upload` | `attempts`, `probability`, `transform`, `offset`, `length` |
@@ -208,6 +215,11 @@ faults:
 | `missing_file` | A `hide` of `operations`, by default `open_read`, `stat`, `lstat`, `list`, `remove` and `rename` | `operations`, `probability` |
 
 `attempts` lists the opens a recipe selects, counted per user and path, and `occurrences` the matching requests, counting from 1. `sftpit config explain` shows the long form of each recipe.
+
+`fail_download` cuts a download off part way, as a dropped connection or a partner's failing server does. A client that reads in order receives exactly the bytes below `after_bytes` before the result, and keeps what it saved: neither OpenSSH's `sftp` nor phpseclib deletes a partial download. They differ in what they report:
+- With a status, OpenSSH prints `read remote "/orders.csv" : Failure` and exits 1, but phpseclib's `get()` returns `true`, so Laravel's `Storage::get()` hands the application the bytes below the cutoff as if they were the whole file. Only an application that compares the length with `Storage::size()` notices.
+- With a FIN close, phpseclib throws `ConnectionClosedException`, having saved every byte below the cutoff. OpenSSH reports the close but may save fewer bytes than it was sent: of the 1 MiB below the cutoff, 576 KiB in every run on macOS, and from 960 KiB to all of it on Linux.
+- With a reset, what either client saves and reports varies from run to run.
 
 `corrupt_upload` changes what is stored while the client is told every write succeeded, as a partner's system that loses or damages part of a file does. Each write is judged by its own offset and length, so the stored file is the same however a client splits, orders or pipelines its writes. Only an application that checks what it stored, by its size, a checksum or reading it back, can tell: Laravel's `writeStream()` returns `true`, and an uploader that then compares `Storage::size()` with the local file's size catches the truncation and uploads again. The handle's snapshot records the corrupted file.
 
@@ -217,7 +229,7 @@ faults:
 
 Publishing over an existing file needs no recipe. A standard rename never replaces its target, so Flysystem's `move()` deletes the published file and renames again, and a `fail` on that second rename (`occurrence: [2]`) leaves no published file at all.
 
-A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload, corrupt download or corrupt upload is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
+A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial or corrupt upload or download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
 
 Rules can also fire at random, and draw a `duration` or a partial upload's `cutoff_offset` from a range:
 
