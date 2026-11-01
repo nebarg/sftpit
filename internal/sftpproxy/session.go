@@ -496,6 +496,12 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 		default:
 			return fmt.Errorf("sftpproxy: a WrongSize fault is for STAT, LSTAT, FSTAT or a READDIR entry, not %v", operation(p))
 		}
+	case Hide:
+		switch p.(type) {
+		case *sftpwire.Open, *sftpwire.Stat, *sftpwire.LStat, *sftpwire.Remove, *sftpwire.Rename, *sftpwire.PosixRename:
+		default:
+			return fmt.Errorf("sftpproxy: a Hide fault is for OPEN, STAT, LSTAT, REMOVE, a rename or a READDIR entry, not %v", operation(p))
+		}
 	}
 	return nil
 }
@@ -538,6 +544,9 @@ func (s *session) process(req *request) error {
 			}
 		case Fail:
 			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
+			return nil
+		case Hide:
+			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(sftpwire.StatusNoSuchFile))})
 			return nil
 		case ListenerDown:
 			s.listener.Down(a.Duration, false)
@@ -712,8 +721,8 @@ func (s *session) answer(reply slot, out outcome) {
 }
 
 // relayReplies hands each backend reply to the slot of its request, with
-// any corruption or wrong sizes applied, re-encoded with the client's
-// request ID.
+// any corruption, wrong sizes or hidden entries applied, re-encoded with the
+// client's request ID.
 func (s *session) relayReplies() error {
 	for {
 		b, err := s.readBackend()
@@ -734,11 +743,17 @@ func (s *session) relayReplies() error {
 		s.logRequest(req, p)
 		if req, p = joinReads(req, p); req != nil {
 			flipBytes(req, p)
-			if err := s.misreport(req, p); err != nil {
+			s.misreport(req, p)
+			emptied, err := s.rewriteEntries(req, p)
+			if err != nil {
 				return err
 			}
-			s.snapshotClosed(req)
-			s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
+			if emptied {
+				s.readOn(req)
+			} else {
+				s.snapshotClosed(req)
+				s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
+			}
 		}
 		s.answered()
 	}

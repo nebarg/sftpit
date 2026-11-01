@@ -1,39 +1,18 @@
 package sftpproxy
 
 import (
-	"fmt"
-	"path"
 	"strconv"
 	"strings"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-// misreport rewrites the sizes in p, the backend's reply to req, that a
-// WrongSize chosen for req, or for an entry of a READDIR reply, misreports.
-func (s *session) misreport(req *request, p sftpwire.Packet) error {
-	switch p := p.(type) {
-	case *sftpwire.AttrsReply:
-		if req.wrongSize != nil {
-			s.resize(req, req.path, *req.wrongSize, &p.Attrs, nil)
-		}
-	case *sftpwire.NameReply:
-		if _, ok := req.packet.(*sftpwire.ReadDir); !ok || s.faults == nil || req.path == "" {
-			return nil
-		}
-		for i := range p.Entries {
-			e := &p.Entries[i]
-			name := path.Join(req.path, e.Filename)
-			switch a := s.faults(Request{Packet: req.packet, Path: name, Entry: true}).(type) {
-			case nil:
-			case WrongSize:
-				s.resize(req, name, a, &e.Attrs, &e.Longname)
-			default:
-				return fmt.Errorf("sftpproxy: a %T fault cannot apply to a READDIR entry", a)
-			}
-		}
+// misreport rewrites the size in p, the backend's reply to req, if a
+// WrongSize was chosen for req.
+func (s *session) misreport(req *request, p sftpwire.Packet) {
+	if a, ok := p.(*sftpwire.AttrsReply); ok && req.wrongSize != nil {
+		s.resize(req, req.path, *req.wrongSize, &a.Attrs, nil)
 	}
-	return nil
 }
 
 // resize misreports the size in attrs, and in longname if there is one, as

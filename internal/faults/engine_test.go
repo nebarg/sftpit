@@ -304,6 +304,32 @@ func TestWrongSizesApplyToListingEntries(t *testing.T) {
 	}
 }
 
+func TestHidesApplyToListingEntriesAndNamedRequests(t *testing.T) {
+	e := newEngine(t,
+		faults.Rule{ID: "gone", Priority: 1, Match: faults.Match{Operations: ops(faults.OpenRead, faults.Stat, faults.LStat, faults.List, faults.Remove, faults.Rename)}, Action: sftpproxy.Hide{}},
+		faults.Rule{ID: "slow", Priority: 2, Match: faults.Match{Operations: ops(faults.List)}, Action: sftpproxy.Delay{Duration: time.Second}},
+	)
+	decide := session(e, "test", "")
+	for _, r := range []sftpproxy.Request{
+		{Packet: &sftpwire.ReadDir{}, Path: "/d/a.csv", Entry: true},
+		openFor("/d/a.csv", sftpwire.OpenRead),
+		on(&sftpwire.Stat{}, "/d/a.csv"),
+		on(&sftpwire.LStat{}, "/d/a.csv"),
+		on(&sftpwire.Remove{}, "/d/a.csv"),
+		on(&sftpwire.Rename{}, "/d/a.csv"),
+	} {
+		if got := decide(r); got != (sftpproxy.Hide{}) {
+			t.Errorf("%T of %s got %#v, want the hide", r.Packet, r.Path, got)
+		}
+	}
+	if _, ok := decide(on(&sftpwire.OpenDir{}, "/d")).(sftpproxy.Delay); !ok {
+		t.Error("an OPENDIR was not left to the listing's delay")
+	}
+	if _, ok := decide(on(&sftpwire.ReadDir{}, "/d")).(sftpproxy.Delay); !ok {
+		t.Error("a READDIR request was not left to the listing's delay")
+	}
+}
+
 func TestARandomRuleDrawsFromTheKeyOfEachRequest(t *testing.T) {
 	const write = sftpwire.OpenWrite | sftpwire.OpenCreate
 	opens := faults.Match{Operations: ops(faults.OpenWrite)}
@@ -468,6 +494,8 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"a cutoff off writes", []faults.Rule{{ID: "r", Match: read, Action: cutOff}}, "match the write operation only"},
 		{"a cutoff that delays", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Write)}, Action: sftpproxy.PartialUpload{Result: sftpproxy.Delay{}}}}, "cannot end with sftpproxy.Delay"},
 		{"a corruption off reads", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Read, faults.Stat)}, Action: sftpproxy.CorruptDownload{}}}, "match the read operation only"},
+		{"a hide on an open for writing", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Stat, faults.OpenWrite)}, Action: sftpproxy.Hide{}}}, "a hide applies to open_read, stat, lstat, list, remove and rename, not open_write"},
+		{"a hide on any operation", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Any)}, Action: sftpproxy.Hide{}}}, "not any"},
 		{"a wrong size on a rename", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Stat, faults.Rename)}, Action: sftpproxy.WrongSize{}}}, "not rename"},
 		{"an action the engine makes itself", []faults.Rule{{ID: "r", Match: read, Action: sftpproxy.Timed{Action: sftpproxy.Drop{}}}}, "unsupported action sftpproxy.Timed"},
 		{"attempts of renames", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Rename), Attempt: &faults.Attempt{Numbers: []uint64{1}}})}, "attempts count opens"},

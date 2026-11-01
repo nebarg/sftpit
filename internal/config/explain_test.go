@@ -133,6 +133,7 @@ scenarios:
       - {id: flipped, match: {operation: read, filename: b.csv}, action: {type: corrupt_download, transform: flip_bytes, offset: 7, length: 1}}
       - {id: empty-size, match: {operation: fstat}, action: {type: wrong_size, size: 0}}
       - {id: short-size, match: {operation: [stat, list], path_glob: /out/*.csv}, action: {type: wrong_size, size_delta: -1024}}
+      - {id: gone, match: {operation: [open_read, list], filename: gone.csv}, action: {type: hide}}
       - {id: renames, match: {operation: rename, source_glob: /in/*.part, target_prefix: /in}, action: {type: fail, when: before, status: no_such_file}}
       - {id: named-renames, match: {operation: rename, source_filename: a.part, target_filename_glob: "*.csv"}, action: {type: fail, when: before, status: op_unsupported}}
       - {id: random-opens, match: {operation: [open_read, open_write]}, decision: {scope: transfer, probability: 1}, action: {type: fail, when: before, status: eof}}

@@ -51,8 +51,10 @@ type Rule struct {
 	// or Fail; a Drop, Freeze, EndSession or ListenerDown, which are
 	// connection actions; a PartialUpload for the write operation or a
 	// CorruptDownload for the read operation, chosen when the transfer's
-	// file is opened; or a WrongSize for the stat, lstat, fstat and list
-	// operations. The engine sets the Reserve of a PartialUpload or
+	// file is opened; a WrongSize for the stat, lstat, fstat and list
+	// operations; or a Hide for the open_read, stat, lstat, list, remove and
+	// rename operations. A WrongSize or Hide for list applies to the entries
+	// of a listing, not to the listing itself. The engine sets the Reserve of a PartialUpload or
 	// CorruptDownload, and the Release of a Delay, Stall or Freeze. A
 	// connection action can also fire at a moment, as Trigger says, whatever
 	// the client is doing then.
@@ -188,7 +190,7 @@ var operations = []Operation{OpenRead, OpenWrite, Read, Write, Close, Stat, LSta
 func (op Operation) IsEvent() bool { return op == Connect || op == Authenticate }
 
 // listEntry is the operation of one entry of a list's reply, which only a
-// WrongSize applies to.
+// WrongSize or Hide applies to.
 const listEntry Operation = "list entry"
 
 // operationOf returns the operation of r, or "" for a request that no
@@ -430,6 +432,12 @@ func (r Rule) checkAction() error {
 				return fmt.Errorf("a wrong size applies to stat, lstat, fstat and list, not %s", op)
 			}
 		}
+	case sftpproxy.Hide:
+		for _, op := range ops {
+			if !slices.Contains([]Operation{OpenRead, Stat, LStat, List, Remove, Rename}, op) {
+				return fmt.Errorf("a hide applies to open_read, stat, lstat, list, remove and rename, not %s", op)
+			}
+		}
 	default:
 		return fmt.Errorf("unsupported action %T", r.Action)
 	}
@@ -577,8 +585,8 @@ func (r Rule) timedByTransfer() bool {
 }
 
 // selectedAt returns the operations whose requests the rule is decided at:
-// the open of a transfer, the entries of a list for a WrongSize, and
-// otherwise the requests of its operations.
+// the open of a transfer, the entries of a list for a WrongSize or Hide,
+// and otherwise the requests of its operations.
 func (r Rule) selectedAt() []Operation {
 	switch r.Action.(type) {
 	case sftpproxy.PartialUpload:
@@ -604,7 +612,7 @@ func (r Rule) selectedAt() []Operation {
 		switch {
 		case op == Any:
 			ops = append(ops, operations...)
-		case op == List && r.isWrongSize():
+		case op == List && r.isEntryAction():
 			ops = append(ops, listEntry)
 		default:
 			ops = append(ops, op)
@@ -613,7 +621,12 @@ func (r Rule) selectedAt() []Operation {
 	return ops
 }
 
-func (r Rule) isWrongSize() bool {
-	_, ok := r.Action.(sftpproxy.WrongSize)
-	return ok
+// isEntryAction reports whether the rule's action applies to the entries of
+// a list rather than to the list itself.
+func (r Rule) isEntryAction() bool {
+	switch r.Action.(type) {
+	case sftpproxy.WrongSize, sftpproxy.Hide:
+		return true
+	}
+	return false
 }

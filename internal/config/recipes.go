@@ -76,6 +76,15 @@ type denyAcknowledgementConfig struct {
 	Status      string   `yaml:"status,omitempty" json:"status,omitempty"`
 }
 
+// missingFileConfig makes files seem absent to some operations, by
+// default every one a hide applies to: listings leave them out, and opens
+// for reading, stats, removes and renames of them answer no_such_file.
+type missingFileConfig struct {
+	scopeConfig `yaml:",inline"`
+	Operations  stringList `yaml:"operations,omitempty" json:"operations,omitempty"`
+	Probability *float64   `yaml:"probability,omitempty" json:"probability,omitempty"`
+}
+
 // expand returns rc with its recipe, if it has one, written in the long
 // form, and the recipe's name.
 func (rc ruleConfig) expand() (ruleConfig, string, error) {
@@ -85,6 +94,7 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 		"fail_randomly":        rc.FailRandomly != nil,
 		"corrupt_download":     rc.CorruptDownload != nil,
 		"deny_acknowledgement": rc.DenyAcknowledgement != nil,
+		"missing_file":         rc.MissingFile != nil,
 	} {
 		if set {
 			recipes = append(recipes, name)
@@ -112,6 +122,8 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 		rc.CorruptDownload.expand(&rc)
 	case rc.DenyAcknowledgement != nil:
 		rc.DenyAcknowledgement.expand(&rc)
+	case rc.MissingFile != nil:
+		rc.MissingFile.expand(&rc)
 	}
 	if err != nil {
 		return rc, "", fmt.Errorf("%s: %w", recipe, err)
@@ -168,6 +180,16 @@ func (c denyAcknowledgementConfig) expand(rc *ruleConfig) {
 	rc.Match.Occurrence = c.Occurrences
 	rc.Decision = decision(c.Probability)
 	rc.Action = actionConfig{Type: "fail", When: "before", Status: cmp.Or(c.Status, "permission_denied")}
+}
+
+func (c missingFileConfig) expand(rc *ruleConfig) {
+	ops := c.Operations
+	if ops == nil {
+		ops = stringList{"open_read", "stat", "lstat", "list", "remove", "rename"}
+	}
+	rc.Match = c.match(ops...)
+	rc.Decision = decision(c.Probability)
+	rc.Action = actionConfig{Type: "hide"}
 }
 
 // attempts returns the attempt of a recipe that lists numbers, counted per

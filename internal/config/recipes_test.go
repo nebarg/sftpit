@@ -100,6 +100,19 @@ func TestRecipesCompileToTheirLongForm(t *testing.T) {
         decision: {probability: 0.5}
         action: {type: fail, when: before, status: failure}`,
 		},
+		{
+			"a missing file",
+			`missing_file: {path: /outgoing/orders.csv}`,
+			`match: {operation: [open_read, stat, lstat, list, remove, rename], path: /outgoing/orders.csv}
+        action: {type: hide}`,
+		},
+		{
+			"a file gone after its listing",
+			`missing_file: {user: partner-b, filename_glob: "*.csv", operations: [open_read, stat], probability: 0.5}`,
+			`match: {operation: [open_read, stat], user: partner-b, filename_glob: "*.csv"}
+        decision: {probability: 0.5}
+        action: {type: hide}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -158,6 +171,11 @@ func TestLoadRejectsInvalidRecipes(t *testing.T) {
 		{"a zero occurrence", "deny_acknowledgement: {occurrences: [0]}", "occurrence numbers count from 1"},
 		{"an acknowledgement denied with an unknown status", "deny_acknowledgement: {status: oops}", `deny_acknowledgement: action: status "oops" is not one of`},
 		{"an acknowledgement with a when", "deny_acknowledgement: {when: after}", "field when not found"},
+		{"a missing file with an action", "missing_file: {}\n        action: {type: hide}", "a rule with the missing_file recipe has no match, decision or action"},
+		{"a missing file of no operations", "missing_file: {operations: []}", "missing_file: match: operation is required"},
+		{"a missing file on writes", "missing_file: {operations: [stat, open_write]}", "a hide applies to open_read, stat, lstat, list, remove and rename, not open_write"},
+		{"a missing file with a status", "missing_file: {status: no_such_file}", "field status not found"},
+		{"a hide with a status", "match: {operation: stat}\n        action: {type: hide, status: failure}", "status does not apply to a hide"},
 		{"a truncation with a length", "corrupt_download: {transform: truncate, offset: 0, length: 1}", "length does not apply to truncate"},
 	}
 	for _, tt := range tests {

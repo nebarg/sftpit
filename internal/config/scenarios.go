@@ -44,6 +44,7 @@ type ruleConfig struct {
 	FailRandomly        *failRandomlyConfig        `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
 	CorruptDownload     *corruptDownloadConfig     `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
 	DenyAcknowledgement *denyAcknowledgementConfig `yaml:"deny_acknowledgement,omitempty" json:"deny_acknowledgement,omitempty"`
+	MissingFile         *missingFileConfig         `yaml:"missing_file,omitempty" json:"missing_file,omitempty"`
 }
 
 type triggerConfig struct {
@@ -553,6 +554,7 @@ var actionFields = map[string][]string{
 	"partial_upload":    {"cutoff_offset", "result", "status", "mode", "max_freeze"},
 	"corrupt_download":  {"transform", "offset", "length"},
 	"wrong_size":        {"size", "size_delta"},
+	"hide":              {},
 }
 
 // checkType reports a missing or unknown action type.
@@ -601,6 +603,8 @@ func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 		r.Action, err = ac.corruptDownload()
 	case "wrong_size":
 		r.Action, err = ac.wrongSize()
+	case "hide":
+		r.Action = sftpproxy.Hide{}
 	}
 	return err
 }

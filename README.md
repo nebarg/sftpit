@@ -149,6 +149,7 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
 | `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
+| `hide` | Makes a file seem absent, while it stays on the server. For `list`, leaves it out of listings; for `open_read`, `stat`, `lstat`, `remove` and `rename`, answers `no_such_file` before the server acts | |
 
 A `listener_down` closes the listening socket, so connecting clients see a refusal, and the port is free during the outage. Should another process take it, sftpit warns and keeps trying to listen again.
 
@@ -177,6 +178,9 @@ faults:
     deny_acknowledgement:
       path_glob: "/outgoing/*.csv"
       occurrences: [1]
+  - id: "gone"
+    missing_file:
+      path: "/outgoing/orders.csv"
 ```
 
 | Recipe | Long form | Fields |
@@ -185,10 +189,13 @@ faults:
 | `fail_randomly` | A `fail` of `operations` with `probability`, `when` `before` and `status` `failure` unless set | `operations`, `probability`, `status`, `when` |
 | `corrupt_download` | A `corrupt_download` | `attempts`, `probability`, `transform`, `offset`, `length` |
 | `deny_acknowledgement` | A `fail` of `remove` and `rename` before the server acts, with `permission_denied` unless `status` is set | `occurrences`, `probability`, `status` |
+| `missing_file` | A `hide` of `operations`, by default `open_read`, `stat`, `lstat`, `list`, `remove` and `rename` | `operations`, `probability` |
 
 `attempts` lists the opens a recipe selects, counted per user and path, and `occurrences` the matching requests, counting from 1. `sftpit config explain` shows the long form of each recipe.
 
 `deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. Laravel's sftp disk never hears of it: Flysystem's SFTP adapter ignores a failed remove, so `Storage::delete()` returns `true`, and only a consumer that remembers what it has processed avoids processing the file twice.
+
+`missing_file` makes a file vanish for the operations that would find it, so a consumer can be tested against a file that a partner removed. With `operations: [open_read, stat]`, the file is still listed but cannot be fetched, as when it goes between a poll's listing and its download. A hidden file is still there for the operations that create or change files: an open for writing, a `mkdir` of its name or a rename onto it acts on the real file, so a rename only hides its source. A hidden directory is left out of its parent's listing, but can still be listed by name. A listing never shows a hidden file, however many there are, and `.` and `..` are never hidden.
 
 Publishing over an existing file needs no recipe. A standard rename never replaces its target, so Flysystem's `move()` deletes the published file and renames again, and a `fail` on that second rename (`occurrence: [2]`) leaves no published file at all.
 

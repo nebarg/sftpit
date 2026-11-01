@@ -282,6 +282,8 @@ func longAction(r faults.Rule) actionConfig {
 			return actionConfig{Type: "wrong_size", SizeDelta: &a.Delta}
 		}
 		return actionConfig{Type: "wrong_size", Size: &a.Size}
+	case sftpproxy.Hide:
+		return actionConfig{Type: "hide"}
 	}
 	// The configuration makes no other action, and faults.Check refuses any
 	// other.

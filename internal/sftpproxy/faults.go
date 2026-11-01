@@ -24,7 +24,7 @@ type Request struct {
 
 	// Entry is set when Faults is asked about one entry of a READDIR reply
 	// rather than about a request: Packet is then the READDIR, and Path is
-	// the entry's path. Only a WrongSize applies to an entry.
+	// the entry's path. Only a WrongSize or Hide applies to an entry.
 	Entry bool
 }
 
@@ -51,8 +51,9 @@ func (w When) String() string {
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze,
 // EndSession or ListenerDown, for an OPEN, a PartialUpload, CorruptDownload
-// or Timed, or for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize. What
-// else an action holds back depends on the session's ReplyOrder.
+// or Timed, for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize, or for
+// an OPEN, STAT, LSTAT, REMOVE, rename or READDIR entry, a Hide. What else an
+// action holds back depends on the session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -227,6 +228,12 @@ type WrongSize struct {
 	Delta int64
 }
 
+// Hide makes a file seem absent, while the file itself is unchanged. Chosen
+// for an entry of a READDIR reply, it leaves the entry out. Chosen for an
+// OPEN, STAT, LSTAT, REMOVE or rename of the file, it answers
+// SSH_FX_NO_SUCH_FILE without the backend seeing the request.
+type Hide struct{}
+
 // reported returns the size to report for a file of size actual.
 func (a WrongSize) reported(actual uint64) uint64 {
 	switch {
@@ -246,6 +253,7 @@ func (a Drop) when() When         { return a.When }
 func (a Freeze) when() When       { return a.When }
 func (a EndSession) when() When   { return a.When }
 func (a ListenerDown) when() When { return a.When }
+func (a Hide) when() When         { return Before }
 
 // A session takes a PartialUpload, CorruptDownload, Timed or WrongSize off
 // its request before acting on any, so their when is never asked.
@@ -279,6 +287,8 @@ func FaultAttrs(a Action, when string) []any {
 		name = "close_subsystem"
 	case ListenerDown:
 		name, settings = "listener_down", []any{"duration", a.Duration, "close_existing", a.CloseExisting}
+	case Hide:
+		name = "hide"
 	default:
 		return nil
 	}
