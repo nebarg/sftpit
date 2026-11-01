@@ -156,6 +156,7 @@ Of the requests it matches, a rule selects those whose `attempt` (the open of a 
 | `listener_down` | Takes the server down for `duration` where the reply would be: new connections are refused until it is over. With `close_existing: true`, every connection is closed too, the client's own included; otherwise the client carries on | `when`, `duration`, `close_existing` |
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
 | `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
+| `corrupt_upload` | For `write`: stores the upload `truncate`d at `offset`, without the `length` bytes at `offset` (`omit_range`), with every later byte moved down to fill the gap, or with them changed (`flip_bytes`). Every write is answered with success | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
 | `hide` | Makes a file seem absent, while it stays on the server. For `list`, leaves it out of listings; for `open_read`, `stat`, `lstat`, `remove` and `rename`, answers `no_such_file` before the server acts | |
 
@@ -182,6 +183,12 @@ faults:
       transform: "omit_range"
       offset: 1048576
       length: 4096
+  - id: "silent-truncate"
+    corrupt_upload:
+      path: "/incoming/orders.csv.part"
+      attempts: [1]
+      transform: "truncate"
+      offset: 3145728
   - id: "deny-ack"
     deny_acknowledgement:
       path_glob: "/outgoing/*.csv"
@@ -196,10 +203,13 @@ faults:
 | `fail_upload` | A `partial_upload` cut off at `after_bytes`, whose `result` is `status` and `status` is `failure` unless set | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
 | `fail_randomly` | A `fail` of `operations` with `probability`, `when` `before` and `status` `failure` unless set | `operations`, `probability`, `status`, `when` |
 | `corrupt_download` | A `corrupt_download` | `attempts`, `probability`, `transform`, `offset`, `length` |
+| `corrupt_upload` | A `corrupt_upload` | `attempts`, `probability`, `transform`, `offset`, `length` |
 | `deny_acknowledgement` | A `fail` of `remove` and `rename` before the server acts, with `permission_denied` unless `status` is set | `occurrences`, `probability`, `status` |
 | `missing_file` | A `hide` of `operations`, by default `open_read`, `stat`, `lstat`, `list`, `remove` and `rename` | `operations`, `probability` |
 
 `attempts` lists the opens a recipe selects, counted per user and path, and `occurrences` the matching requests, counting from 1. `sftpit config explain` shows the long form of each recipe.
+
+`corrupt_upload` changes what is stored while the client is told every write succeeded, as a partner's system that loses or damages part of a file does. Each write is judged by its own offset and length, so the stored file is the same however a client splits, orders or pipelines its writes. Only an application that checks what it stored, by its size, a checksum or reading it back, can tell: Laravel's `writeStream()` returns `true`, and an uploader that then compares `Storage::size()` with the local file's size catches the truncation and uploads again. The handle's snapshot records the corrupted file.
 
 `deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. Laravel's sftp disk never hears of it: Flysystem's SFTP adapter ignores a failed remove, so `Storage::delete()` returns `true`, and only a consumer that remembers what it has processed avoids processing the file twice.
 
@@ -207,7 +217,7 @@ faults:
 
 Publishing over an existing file needs no recipe. A standard rename never replaces its target, so Flysystem's `move()` deletes the published file and renames again, and a `fail` on that second rename (`occurrence: [2]`) leaves no published file at all.
 
-A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
+A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload, corrupt download or corrupt upload is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
 
 Rules can also fire at random, and draw a `duration` or a partial upload's `cutoff_offset` from a range:
 

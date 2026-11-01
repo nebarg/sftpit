@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"path"
 	"slices"
 	"sync"
@@ -426,10 +425,9 @@ func (s *session) handleRequest(b []byte) error {
 	if err := s.decide(req); err != nil {
 		return err
 	}
-	if req.eof {
-		eof := status(sftpwire.StatusEOF)
-		s.logRequest(req, eof)
-		return s.replyNow(sftpwire.AppendPacket(nil, clientID, eof))
+	if req.own != nil {
+		s.logRequest(req, req.own)
+		return s.replyNow(sftpwire.AppendPacket(nil, clientID, req.own))
 	}
 	s.prepareSnapshot(req)
 	req.reply = make(slot, 1)
@@ -449,7 +447,7 @@ func (s *session) decide(req *request) error {
 	if s.faults == nil {
 		return nil
 	}
-	if !s.cut(req) && !s.corrupt(req) {
+	if !s.cut(req) && !s.corrupt(req) && !s.corruptStored(req) {
 		req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
 		if err := s.checkFault(req.packet, req.action); err != nil {
 			return err
@@ -459,6 +457,8 @@ func (s *session) decide(req *request) error {
 			req.action, req.upload = nil, &upload{PartialUpload: a}
 		case CorruptDownload:
 			req.action, req.download = nil, &download{CorruptDownload: a}
+		case CorruptUpload:
+			req.action, req.stored = nil, &stored{CorruptUpload: a}
 		case Timed:
 			req.action, req.timed = nil, &a
 		case WrongSize:
@@ -494,15 +494,12 @@ func (s *session) checkFault(p sftpwire.Packet, a Action) error {
 		if _, ok := p.(*sftpwire.Open); !ok {
 			return fmt.Errorf("sftpproxy: a CorruptDownload fault is for OPEN, not %v", operation(p))
 		}
-		switch a.Corruption {
-		case Truncate:
-		case OmitRange, FlipBytes:
-			if a.Length == 0 || a.Length > math.MaxUint64-a.Offset {
-				return fmt.Errorf("sftpproxy: a CorruptDownload %v of %d bytes at %d does not fit a file", a.Corruption, a.Length, a.Offset)
-			}
-		default:
-			return fmt.Errorf("sftpproxy: unknown CorruptDownload corruption %v", a.Corruption)
+		return checkCorruption("CorruptDownload", a.Corruption, a.Offset, a.Length)
+	case CorruptUpload:
+		if open, ok := p.(*sftpwire.Open); !ok || open.Flags&sftpwire.OpenWrite == 0 {
+			return fmt.Errorf("sftpproxy: a CorruptUpload fault is for an OPEN for writing, not %v", operation(p))
 		}
+		return checkCorruption("CorruptUpload", a.Corruption, a.Offset, a.Length)
 	case WrongSize:
 		switch p.(type) {
 		case *sftpwire.Stat, *sftpwire.LStat, *sftpwire.FStat:

@@ -216,6 +216,10 @@ func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
 		a.Reserve = e.reserveTransfer(chosen, fired)
 		e.logger.Debug("rule selected", fired...)
 		return a
+	case sftpproxy.CorruptUpload:
+		a.Reserve = e.reserveTransfer(chosen, fired)
+		e.logger.Debug("rule selected", fired...)
+		return a
 	case sftpproxy.Timed:
 		a.Reserve = e.reserveMoment(chosen, fired, nil)
 		e.logger.Debug("rule selected", fired...)

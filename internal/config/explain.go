@@ -274,12 +274,9 @@ func longAction(r faults.Rule) actionConfig {
 		}
 		return ac
 	case sftpproxy.CorruptDownload:
-		ac := actionConfig{Type: "corrupt_download", Offset: &a.Offset}
-		ac.Transform = a.Corruption.String()
-		if a.Corruption != sftpproxy.Truncate {
-			ac.Length = &a.Length
-		}
-		return ac
+		return corruptionAction("corrupt_download", a.Corruption, a.Offset, a.Length)
+	case sftpproxy.CorruptUpload:
+		return corruptionAction("corrupt_upload", a.Corruption, a.Offset, a.Length)
 	case sftpproxy.WrongSize:
 		if a.Delta != 0 {
 			return actionConfig{Type: "wrong_size", SizeDelta: &a.Delta}
@@ -291,6 +288,16 @@ func longAction(r faults.Rule) actionConfig {
 	// The configuration makes no other action, and faults.Check refuses any
 	// other.
 	panic(fmt.Sprintf("config: no long form for %T", r.Action))
+}
+
+// corruptionAction returns the long form of a corrupt_download or
+// corrupt_upload.
+func corruptionAction(typ string, c sftpproxy.Corruption, offset, length uint64) actionConfig {
+	ac := actionConfig{Type: typ, Transform: c.String(), Offset: &offset}
+	if c != sftpproxy.Truncate {
+		ac.Length = &length
+	}
+	return ac
 }
 
 // longDuration returns d, or the range that r draws a duration from.

@@ -183,3 +183,69 @@ func onFirstUpload(action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Ac
 		return nil
 	}
 }
+
+// TestCorruptedUploadsAreTheSameForEveryClient uploads a file through each
+// corruption with each client, in both reply orders, and checks that the
+// client reports success while the server stores exactly the corrupted file,
+// and that the snapshot records it.
+func TestCorruptedUploadsAreTheSameForEveryClient(t *testing.T) {
+	t.Parallel()
+	data := randomBytes(4<<20 + 321)
+	flipped := slices.Clone(data)
+	for i := range 64 {
+		flipped[corruptAt+i] ^= 1
+	}
+	corruptions := []struct {
+		corruption sftpproxy.CorruptUpload
+		want       []byte
+	}{
+		{
+			corruption: sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: corruptAt},
+			want:       data[:corruptAt],
+		},
+		{
+			corruption: sftpproxy.CorruptUpload{Corruption: sftpproxy.OmitRange, Offset: corruptAt, Length: 40_000},
+			want:       slices.Concat(data[:corruptAt], data[corruptAt+40_000:]),
+		},
+		{
+			corruption: sftpproxy.CorruptUpload{Corruption: sftpproxy.FlipBytes, Offset: corruptAt, Length: 64},
+			want:       flipped,
+		},
+	}
+	clients := []struct {
+		name     string
+		transfer func(t testing.TB, srv *server, work string, upload bool)
+		closedBy []string
+	}{
+		{name: "OpenSSH", transfer: transferWithOpenSSH, closedBy: []string{"client"}},
+		{name: "phpseclib", transfer: transferWithPhpseclib, closedBy: phpseclibClosedBy},
+	}
+
+	for _, c := range clients {
+		for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
+			for _, tt := range corruptions {
+				t.Run(c.name+"/"+order.String()+"/"+tt.corruption.Corruption.String(), func(t *testing.T) {
+					var logs capturedLog
+					srv := startServer(t, proxied, sftpproxy.Options{
+						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+							if open, ok := r.Packet.(*sftpwire.Open); ok && r.Path == "/orders.csv" && open.Flags&sftpwire.OpenWrite != 0 {
+								return tt.corruption
+							}
+							return nil
+						},
+						ReplyOrder: order,
+						Logger:     logs.logger(),
+					})
+					work := t.TempDir()
+					writeFile(t, filepath.Join(work, "orders.csv"), data)
+
+					c.transfer(t, srv, work, true)
+					srv.waitForSessions()
+
+					assertHolds(t, srv, "/orders.csv", tt.want)
+					logs.assertSnapshot(t, srv, "/orders.csv", tt.want, c.closedBy...)
+				})
+			}
+		}
+	}
+}

@@ -13,7 +13,9 @@
 //   recover          retries on a new connection, and moves only an upload
 //                    that succeeded;
 //   ignore-result    moves the upload without checking that it succeeded;
-//   same-connection  retries on the disk whose upload failed.
+//   same-connection  retries on the disk whose upload failed;
+//   verify-size      recovers, and also treats an upload whose stored size
+//                    differs from the local file's as failed.
 
 declare(strict_types=1);
 
@@ -35,6 +37,11 @@ for ($attempt = 1; $attempt <= ATTEMPTS; $attempt++) {
     $uploaded = $disk->writeStream(TEMPORARY, $source);
     fclose($source);
     outcome("upload $attempt", $uploaded);
+    if ($uploaded && $uploader === 'verify-size') {
+        $size = $disk->size(TEMPORARY);
+        outcome("size $attempt", $size);
+        $uploaded = $size === filesize("$workDir/orders.csv");
+    }
     if ($uploaded || $uploader === 'ignore-result') {
         outcome('move', $disk->move(TEMPORARY, PUBLISHED));
         break;
@@ -42,7 +49,7 @@ for ($attempt = 1; $attempt <= ATTEMPTS; $attempt++) {
     // phpseclib stops reading the replies to a failed upload's writes at
     // the first failure, so on the same connection every later request
     // reads an earlier request's reply.
-    if ($uploader === 'recover') {
+    if ($uploader === 'recover' || $uploader === 'verify-size') {
         $disk = $connect();
     }
     usleep(100_000);

@@ -49,15 +49,15 @@ type Rule struct {
 
 	// Action is what the rule does to a request it selects: a Delay, Stall
 	// or Fail; a Drop, Freeze, EndSession or ListenerDown, which are
-	// connection actions; a PartialUpload for the write operation or a
-	// CorruptDownload for the read operation, chosen when the transfer's
-	// file is opened; a WrongSize for the stat, lstat, fstat and list
-	// operations; or a Hide for the open_read, stat, lstat, list, remove and
-	// rename operations. A WrongSize or Hide for list applies to the entries
-	// of a listing, not to the listing itself. The engine sets the Reserve of a PartialUpload or
-	// CorruptDownload, and the Release of a Delay, Stall or Freeze. A
-	// connection action can also fire at a moment, as Trigger says, whatever
-	// the client is doing then.
+	// connection actions; a PartialUpload or CorruptUpload for the write
+	// operation or a CorruptDownload for the read operation, chosen when
+	// the transfer's file is opened; a WrongSize for the stat, lstat, fstat
+	// and list operations; or a Hide for the open_read, stat, lstat, list,
+	// remove and rename operations. A WrongSize or Hide for list applies to
+	// the entries of a listing, not to the listing itself. The engine sets
+	// the Reserve of a PartialUpload, CorruptDownload or CorruptUpload, and
+	// the Release of a Delay, Stall or Freeze. A connection action can also
+	// fire at a moment, as Trigger says, whatever the client is doing then.
 	Action sftpproxy.Action
 }
 
@@ -426,6 +426,10 @@ func (r Rule) checkAction() error {
 		if !slices.Equal(ops, []Operation{Read}) {
 			return errors.New("a corrupt download needs the rule to match the read operation only")
 		}
+	case sftpproxy.CorruptUpload:
+		if !slices.Equal(ops, []Operation{Write}) {
+			return errors.New("a corrupt upload needs the rule to match the write operation only")
+		}
 	case sftpproxy.WrongSize:
 		for _, op := range ops {
 			if !slices.Contains([]Operation{Stat, LStat, FStat, List}, op) {
@@ -545,7 +549,7 @@ func checkNumbers(name string, numbers []uint64) error {
 // so is chosen when the file is opened.
 func (r Rule) IsTransfer() bool {
 	switch r.Action.(type) {
-	case sftpproxy.PartialUpload, sftpproxy.CorruptDownload:
+	case sftpproxy.PartialUpload, sftpproxy.CorruptDownload, sftpproxy.CorruptUpload:
 		return true
 	}
 	return r.timedByTransfer()
@@ -589,7 +593,7 @@ func (r Rule) timedByTransfer() bool {
 // and otherwise the requests of its operations.
 func (r Rule) selectedAt() []Operation {
 	switch r.Action.(type) {
-	case sftpproxy.PartialUpload:
+	case sftpproxy.PartialUpload, sftpproxy.CorruptUpload:
 		return []Operation{OpenWrite}
 	case sftpproxy.CorruptDownload:
 		return []Operation{OpenRead}

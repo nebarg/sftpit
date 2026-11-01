@@ -53,7 +53,7 @@ func (s *session) corrupt(req *request) bool {
 	switch d.Corruption {
 	case Truncate:
 		if r.Offset >= d.Offset {
-			req.eof = true
+			req.own = status(sftpwire.StatusEOF)
 		} else {
 			r.Length = uint32(d.Offset - r.Offset)
 		}
@@ -61,7 +61,7 @@ func (s *session) corrupt(req *request) bool {
 		switch {
 		case r.Offset > math.MaxUint64-d.Length:
 			// No file reaches this far.
-			req.eof = true
+			req.own = status(sftpwire.StatusEOF)
 		case r.Offset >= d.Offset:
 			r.Offset += d.Length
 		default:

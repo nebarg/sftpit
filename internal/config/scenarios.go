@@ -43,6 +43,7 @@ type ruleConfig struct {
 	FailUpload          *failUploadConfig          `yaml:"fail_upload,omitempty" json:"fail_upload,omitempty"`
 	FailRandomly        *failRandomlyConfig        `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
 	CorruptDownload     *corruptDownloadConfig     `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
+	CorruptUpload       *corruptUploadConfig       `yaml:"corrupt_upload,omitempty" json:"corrupt_upload,omitempty"`
 	DenyAcknowledgement *denyAcknowledgementConfig `yaml:"deny_acknowledgement,omitempty" json:"deny_acknowledgement,omitempty"`
 	MissingFile         *missingFileConfig         `yaml:"missing_file,omitempty" json:"missing_file,omitempty"`
 }
@@ -337,11 +338,11 @@ func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
 }
 
 // checkScope reports a decision scope that the rule cannot have. A partial
-// upload or corrupt download is decided once for each transfer, at its
-// open, and any other fault for each request, which for an open is the same
+// upload or a corrupt download or upload is decided once for each transfer,
+// at its open, and any other fault for each request, which for an open is the same
 // as for its transfer. The scope defaults to the one the action has.
 func (rc ruleConfig) checkScope(scope string) error {
-	transfer := rc.Action.Type == "partial_upload" || rc.Action.Type == "corrupt_download" ||
+	transfer := slices.Contains([]string{"partial_upload", "corrupt_download", "corrupt_upload"}, rc.Action.Type) ||
 		(rc.atMoment() && rc.Trigger.Anchor == "transfer")
 	switch scope {
 	case "":
@@ -350,7 +351,7 @@ func (rc ruleConfig) checkScope(scope string) error {
 			return op != string(faults.OpenRead) && op != string(faults.OpenWrite)
 		})
 		if !transfer && !opens {
-			return fmt.Errorf("scope transfer needs a partial_upload, a corrupt_download or the open_read and open_write operations; a %s on every request of a chosen transfer is not supported", rc.Action.Type)
+			return fmt.Errorf("scope transfer needs a partial_upload, corrupt_download, corrupt_upload or the open_read and open_write operations; a %s on every request of a chosen transfer is not supported", rc.Action.Type)
 		}
 	case "operation":
 		if transfer {
@@ -553,6 +554,7 @@ var actionFields = map[string][]string{
 	"listener_down":     {"when", "duration", "close_existing"},
 	"partial_upload":    {"cutoff_offset", "result", "status", "mode", "max_freeze"},
 	"corrupt_download":  {"transform", "offset", "length"},
+	"corrupt_upload":    {"transform", "offset", "length"},
 	"wrong_size":        {"size", "size_delta"},
 	"hide":              {},
 }
@@ -600,7 +602,15 @@ func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
 	case "partial_upload":
 		r.Action, r.Cutoff, err = ac.partialUpload()
 	case "corrupt_download":
-		r.Action, err = ac.corruptDownload()
+		var c corruption
+		if c, err = ac.corruption(); err == nil {
+			r.Action = sftpproxy.CorruptDownload{Corruption: c.kind, Offset: c.offset, Length: c.length}
+		}
+	case "corrupt_upload":
+		var c corruption
+		if c, err = ac.corruption(); err == nil {
+			r.Action = sftpproxy.CorruptUpload{Corruption: c.kind, Offset: c.offset, Length: c.length}
+		}
 	case "wrong_size":
 		r.Action, err = ac.wrongSize()
 	case "hide":
@@ -833,28 +843,34 @@ func (ac actionConfig) uploadResult() (sftpproxy.Action, error) {
 	return nil, fmt.Errorf("result %q is not status, close_connection or freeze_connection", ac.Result)
 }
 
-func (ac actionConfig) corruptDownload() (sftpproxy.Action, error) {
+// corruption is the transform of a corrupt_download or corrupt_upload.
+type corruption struct {
+	kind           sftpproxy.Corruption
+	offset, length uint64
+}
+
+func (ac actionConfig) corruption() (corruption, error) {
 	names := strings.Join(slices.Sorted(maps.Keys(corruptions)), ", ")
-	corruption, ok := corruptions[ac.Transform]
+	kind, ok := corruptions[ac.Transform]
 	switch {
 	case ac.Transform == "":
-		return nil, fmt.Errorf("transform is required: one of %s", names)
+		return corruption{}, fmt.Errorf("transform is required: one of %s", names)
 	case !ok:
-		return nil, fmt.Errorf("transform %q is not one of %s", ac.Transform, names)
+		return corruption{}, fmt.Errorf("transform %q is not one of %s", ac.Transform, names)
 	}
 	if ac.Offset == nil {
-		return nil, errors.New("offset is required")
+		return corruption{}, errors.New("offset is required")
 	}
-	d := sftpproxy.CorruptDownload{Corruption: corruption, Offset: *ac.Offset}
+	c := corruption{kind: kind, offset: *ac.Offset}
 	switch {
-	case corruption == sftpproxy.Truncate && ac.Length != nil:
-		return nil, errors.New("length does not apply to truncate")
-	case corruption != sftpproxy.Truncate && (ac.Length == nil || *ac.Length == 0):
-		return nil, fmt.Errorf("%s needs a length of at least 1", ac.Transform)
-	case corruption != sftpproxy.Truncate:
-		d.Length = *ac.Length
+	case kind == sftpproxy.Truncate && ac.Length != nil:
+		return corruption{}, errors.New("length does not apply to truncate")
+	case kind != sftpproxy.Truncate && (ac.Length == nil || *ac.Length == 0):
+		return corruption{}, fmt.Errorf("%s needs a length of at least 1", ac.Transform)
+	case kind != sftpproxy.Truncate:
+		c.length = *ac.Length
 	}
-	return d, nil
+	return c, nil
 }
 
 func (ac actionConfig) wrongSize() (sftpproxy.Action, error) {

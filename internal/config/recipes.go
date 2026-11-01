@@ -85,6 +85,16 @@ type missingFileConfig struct {
 	Probability *float64   `yaml:"probability,omitempty" json:"probability,omitempty"`
 }
 
+// corruptUploadConfig changes the bytes that uploads store.
+type corruptUploadConfig struct {
+	scopeConfig `yaml:",inline"`
+	Attempts    []uint64 `yaml:"attempts,flow,omitempty" json:"attempts,omitempty"`
+	Probability *float64 `yaml:"probability,omitempty" json:"probability,omitempty"`
+	Transform   string   `yaml:"transform,omitempty" json:"transform,omitempty"`
+	Offset      *uint64  `yaml:"offset,omitempty" json:"offset,omitempty"`
+	Length      *uint64  `yaml:"length,omitempty" json:"length,omitempty"`
+}
+
 // expand returns rc with its recipe, if it has one, written in the long
 // form, and the recipe's name.
 func (rc ruleConfig) expand() (ruleConfig, string, error) {
@@ -93,6 +103,7 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 		"fail_upload":          rc.FailUpload != nil,
 		"fail_randomly":        rc.FailRandomly != nil,
 		"corrupt_download":     rc.CorruptDownload != nil,
+		"corrupt_upload":       rc.CorruptUpload != nil,
 		"deny_acknowledgement": rc.DenyAcknowledgement != nil,
 		"missing_file":         rc.MissingFile != nil,
 	} {
@@ -120,6 +131,8 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 		err = rc.FailRandomly.expand(&rc)
 	case rc.CorruptDownload != nil:
 		rc.CorruptDownload.expand(&rc)
+	case rc.CorruptUpload != nil:
+		rc.CorruptUpload.expand(&rc)
 	case rc.DenyAcknowledgement != nil:
 		rc.DenyAcknowledgement.expand(&rc)
 	case rc.MissingFile != nil:
@@ -173,6 +186,13 @@ func (c corruptDownloadConfig) expand(rc *ruleConfig) {
 	rc.Match.Attempt = attempts(c.Attempts)
 	rc.Decision = decision(c.Probability)
 	rc.Action = actionConfig{Type: "corrupt_download", Transform: c.Transform, Offset: c.Offset, Length: c.Length}
+}
+
+func (c corruptUploadConfig) expand(rc *ruleConfig) {
+	rc.Match = c.match("write")
+	rc.Match.Attempt = attempts(c.Attempts)
+	rc.Decision = decision(c.Probability)
+	rc.Action = actionConfig{Type: "corrupt_upload", Transform: c.Transform, Offset: c.Offset, Length: c.Length}
 }
 
 func (c denyAcknowledgementConfig) expand(rc *ruleConfig) {

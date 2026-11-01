@@ -208,6 +208,67 @@ func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
 	}
 }
 
+// TestLaravelUploadRecoveryFromASilentlyTruncatedUpload truncates the first
+// upload at 3 MiB, while every write succeeds, and checks what each
+// uploader publishes. One that trusts the replies publishes the truncated
+// file; one that checks the stored size uploads again and publishes the
+// whole file.
+func TestLaravelUploadRecoveryFromASilentlyTruncatedUpload(t *testing.T) {
+	t.Parallel()
+	php := phpseclibOrSkip(t)
+
+	const truncateAt = 3 << 20
+	data := randomBytes(4<<20 + 321)
+	tests := []struct {
+		uploader  string
+		outcomes  map[string]any
+		published []byte
+	}{
+		{
+			uploader:  "recover",
+			outcomes:  map[string]any{"upload 1": true, "move": true},
+			published: data[:truncateAt],
+		},
+		{
+			uploader:  "verify-size",
+			outcomes:  map[string]any{"upload 1": true, "size 1": float64(truncateAt), "upload 2": true, "size 2": float64(len(data)), "move": true},
+			published: data,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.uploader, func(t *testing.T) {
+			t.Parallel()
+			opts := scenarioOptions(t, `  silent-truncate:
+    faults:
+      - id: silent-truncate
+        corrupt_upload:
+          path: `+temporaryPath+`
+          attempts: [1]
+          transform: truncate
+          offset: `+strconv.Itoa(truncateAt)+`
+`, "silent-truncate")
+			var logs capturedLog
+			opts.Logger = logs.logger()
+			_, srv := startRuns(t, opts)
+			work := t.TempDir()
+			writeFile(t, filepath.Join(work, "orders.csv"), data)
+
+			outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, tt.uploader))
+			srv.waitForSessions()
+
+			if !maps.Equal(outcomes, tt.outcomes) {
+				t.Errorf("publish.php gave %v, want %v", outcomes, tt.outcomes)
+			}
+			assertHolds(t, srv, publishedPath, tt.published)
+			assertHolds(t, srv, temporaryPath, nil)
+			if got := srv.counts(t, "silent-truncate"); got.Fired != 1 {
+				t.Errorf("counts = %+v, want the first upload truncated", got)
+			}
+			logs.assertSnapshot(t, srv, temporaryPath, data[:truncateAt], phpseclibClosedBy...)
+		})
+	}
+}
+
 // TestLaravelRepublishLosesThePublishedFile has a Laravel application
 // publish orders.csv over an earlier version, with the rename that follows
 // Flysystem's delete failing. A standard rename never replaces its target,

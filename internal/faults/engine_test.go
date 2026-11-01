@@ -281,6 +281,37 @@ func TestDownloadsAreSelectedAtTheirOpenForReading(t *testing.T) {
 	}
 }
 
+func TestUploadCorruptionsAreSelectedAtTheirOpenForWriting(t *testing.T) {
+	corrupt := sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: 1024}
+	e := newEngine(t, faults.Rule{ID: "short", MaxTriggers: 1, Match: faults.Match{Operations: ops(faults.Write)}, Action: corrupt})
+	decide := session(e, "test", "")
+	if decide(openFor("/f", sftpwire.OpenRead)) != nil {
+		t.Error("an open for reading was given an upload's fault")
+	}
+	a, ok := decide(openFor("/f", sftpwire.OpenWrite)).(sftpproxy.CorruptUpload)
+	if !ok || a.Reserve == nil || a.Offset != 1024 {
+		t.Fatalf("open for writing got %#v, want the corruption with a Reserve", a)
+	}
+	if got := e.Rules().Counts["short"]; got.Fired != 0 {
+		t.Errorf("counts before the corruption changes a write = %+v, want it not fired", got)
+	}
+	// A second upload selected before the first changes a write may not
+	// take the rule past max_triggers.
+	second, ok := decide(openFor("/g", sftpwire.OpenWrite)).(sftpproxy.CorruptUpload)
+	if !ok {
+		t.Fatal("a second open for writing was not selected")
+	}
+	if !a.Reserve() {
+		t.Fatal("Reserve refused the first corruption")
+	}
+	if second.Reserve() {
+		t.Error("Reserve allowed a second corruption past max_triggers 1")
+	}
+	if got := e.Rules().Counts["short"]; got.Fired != 1 {
+		t.Errorf("counts = %+v, want the corruption fired once", got)
+	}
+}
+
 func TestWrongSizesApplyToListingEntries(t *testing.T) {
 	shrink := sftpproxy.WrongSize{Delta: -1024}
 	e := newEngine(t,
@@ -493,6 +524,7 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 		{"a negative max_triggers", []faults.Rule{{ID: "r", MaxTriggers: -1, Match: read, Action: failure}}, "max_triggers is -1"},
 		{"a cutoff off writes", []faults.Rule{{ID: "r", Match: read, Action: cutOff}}, "match the write operation only"},
 		{"a cutoff that delays", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Write)}, Action: sftpproxy.PartialUpload{Result: sftpproxy.Delay{}}}}, "cannot end with sftpproxy.Delay"},
+		{"an upload corruption off writes", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.OpenWrite)}, Action: sftpproxy.CorruptUpload{}}}, "match the write operation only"},
 		{"a corruption off reads", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Read, faults.Stat)}, Action: sftpproxy.CorruptDownload{}}}, "match the read operation only"},
 		{"a hide on an open for writing", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Stat, faults.OpenWrite)}, Action: sftpproxy.Hide{}}}, "a hide applies to open_read, stat, lstat, list, remove and rename, not open_write"},
 		{"a hide on any operation", []faults.Rule{{ID: "r", Match: faults.Match{Operations: ops(faults.Any)}, Action: sftpproxy.Hide{}}}, "not any"},

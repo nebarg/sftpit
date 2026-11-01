@@ -50,8 +50,8 @@ func (w When) String() string {
 }
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze,
-// EndSession or ListenerDown, for an OPEN, a PartialUpload, CorruptDownload
-// or Timed, for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize, or for
+// EndSession or ListenerDown, for an OPEN, a PartialUpload, CorruptDownload,
+// CorruptUpload or Timed, for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize, or for
 // an OPEN, STAT, LSTAT, REMOVE, rename or READDIR entry, a Hide. What else an
 // action holds back depends on the session's ReplyOrder.
 type Action interface {
@@ -163,7 +163,28 @@ type CorruptDownload struct {
 	Reserve func() bool
 }
 
-// Corruption is what a CorruptDownload does to a file's reads.
+// CorruptUpload is chosen for an OPEN for writing to corrupt what writes
+// through the handle it opens store, while every write is answered with
+// success. A write's fate depends only on its own offset and length, so the
+// stored file is the same whatever order the writes arrive in. Writes are
+// judged by the offsets they carry, as a PartialUpload's are.
+type CorruptUpload struct {
+	// Corruption is what the writes store: Truncate stores nothing at or
+	// beyond Offset, OmitRange stores nothing of the Length bytes at Offset
+	// and stores every later byte Length bytes earlier, and FlipBytes flips
+	// the lowest bit of each of the Length bytes at Offset.
+	Corruption Corruption
+	Offset     uint64
+	Length     uint64
+
+	// Reserve, if set, is called when the corruption would first change a
+	// write on the handle, before it does. If it returns false, the handle
+	// carries on as if no CorruptUpload had been chosen for it.
+	Reserve func() bool
+}
+
+// Corruption is what a CorruptDownload does to a file's reads, or a
+// CorruptUpload to its writes.
 type Corruption int
 
 const (
@@ -183,6 +204,21 @@ const (
 	// so that each one changes and text stays mostly printable.
 	FlipBytes
 )
+
+// checkCorruption reports a corruption, of the fault named fault, that is
+// unknown or whose range does not fit a file.
+func checkCorruption(fault string, c Corruption, offset, length uint64) error {
+	switch c {
+	case Truncate:
+	case OmitRange, FlipBytes:
+		if length == 0 || length > math.MaxUint64-offset {
+			return fmt.Errorf("sftpproxy: a %s %v of %d bytes at %d does not fit a file", fault, c, length, offset)
+		}
+	default:
+		return fmt.Errorf("sftpproxy: unknown %s corruption %v", fault, c)
+	}
+	return nil
+}
 
 func (c Corruption) String() string {
 	switch c {
@@ -255,10 +291,11 @@ func (a EndSession) when() When   { return a.When }
 func (a ListenerDown) when() When { return a.When }
 func (a Hide) when() When         { return Before }
 
-// A session takes a PartialUpload, CorruptDownload, Timed or WrongSize off
+// A session takes a PartialUpload, CorruptDownload, CorruptUpload, Timed or WrongSize off
 // its request before acting on any, so their when is never asked.
 func (a PartialUpload) when() When   { return Before }
 func (a CorruptDownload) when() When { return Before }
+func (a CorruptUpload) when() When   { return Before }
 func (a Timed) when() When           { return Before }
 func (a WrongSize) when() When       { return Before }
 

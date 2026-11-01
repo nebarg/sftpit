@@ -51,9 +51,14 @@ type request struct {
 	// OPEN, the corruption the handle it opens will have.
 	download *download
 
-	// eof is set for a read that the corruption on its handle answers with
-	// EOF itself.
-	eof bool
+	// stored is the corruption of what writes store on the handle a request
+	// uses or, for an OPEN, the one the handle it opens will have.
+	stored *stored
+
+	// own is the status the proxy answers the request with itself: EOF for
+	// a read that a corruption on its handle truncates, or success for a
+	// write that one drops.
+	own *sftpwire.StatusReply
 
 	// flip is set for a read whose reply the corruption on its handle
 	// flips bytes in.
@@ -98,6 +103,7 @@ type handle struct {
 	path     string
 	upload   *upload
 	download *download
+	stored   *stored
 
 	// file is set for a handle that OPEN returned, rather than OPENDIR.
 	file bool
@@ -200,7 +206,7 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 // use attributes req to the open handle id, if the proxy knows it.
 func (t *tracker) use(req *request, id string) {
 	if h := t.handles[id]; h != nil {
-		req.handle, req.path, req.upload, req.download = h, h.path, h.upload, h.download
+		req.handle, req.path, req.upload, req.download, req.stored = h, h.path, h.upload, h.download, h.stored
 	}
 }
 
@@ -364,7 +370,7 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
 		_, file := req.packet.(*sftpwire.Open)
-		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, download: req.download, file: file, faulted: req.action != nil}
+		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
 	}
 	return req, nil
 }
