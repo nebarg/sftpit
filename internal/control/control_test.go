@@ -210,6 +210,28 @@ func TestTheAPIRefusesRequestsFromElsewhere(t *testing.T) {
 	}
 }
 
+func TestTheAPIAnswersTheHostsItIsGiven(t *testing.T) {
+	m, _ := start(t, runs.Options{})
+	api := control.Handler(m, []string{"sftpit", "fd00::1"})
+	for host, want := range map[string]int{
+		"sftpit:8122":             http.StatusOK,
+		"SFTPIT":                  http.StatusOK,
+		"[fd00::1]:8122":          http.StatusOK,
+		"127.0.0.1:8122":          http.StatusOK,
+		"sftpit.attacker.example": http.StatusForbidden,
+		"other:8122":              http.StatusForbidden,
+		"":                        http.StatusForbidden,
+	} {
+		req := httptest.NewRequest("GET", "/api/v1/status", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Errorf("GET /api/v1/status from %q = %d %s, want %d", host, rec.Code, rec.Body, want)
+		}
+	}
+}
+
 func TestResetStartsAnInlineScenario(t *testing.T) {
 	m, api := start(t, runs.Options{Scenario: "chaos"})
 	code, body := call(t, api, "POST", "/api/v1/reset", `{"faults": [`+denyStats+`], "seed": "7"}`)

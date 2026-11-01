@@ -1,0 +1,15 @@
+schema_version: 1
+
+server:
+  # Created at the first start. Commit the directory, so the fingerprints
+  # stay the same for everyone.
+  host_key: "./hostkeys"
+
+scenarios:
+  upload-recovery:
+    faults:
+      - id: "first-upload-cutoff"
+        fail_upload:
+          path: "/incoming/orders.csv"
+          attempts: [1]
+          after_bytes: 32768

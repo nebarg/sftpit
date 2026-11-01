@@ -3,8 +3,9 @@
 // can change during the run, the release of its stalls, and resets that
 // start the next run. Its Client calls the API.
 //
-// The API answers only requests addressed to a loopback host, so a web page
-// cannot reach it through DNS rebinding. It refuses a change that a browser
+// The API answers only requests addressed to a loopback host, or to a host
+// name it is given, such as a compose service's, so a web page cannot reach
+// it through DNS rebinding. It refuses a change that a browser
 // makes from another origin, and any change without the RequestHeader
 // header, which a page on another origin cannot send without a CORS
 // preflight that the API never allows.
@@ -19,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,8 +43,9 @@ const (
 	maxBodyBytes = 64 << 10
 )
 
-// Handler returns the control API for the runs that m manages.
-func Handler(m *runs.Manager) http.Handler {
+// Handler returns the control API for the runs that m manages. It answers
+// requests addressed to localhost, a loopback address or one of hosts.
+func Handler(m *runs.Manager, hosts []string) http.Handler {
 	a := &api{runs: m}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", a.health)
@@ -52,7 +55,7 @@ func Handler(m *runs.Manager) http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
-	return protect(mux)
+	return protect(mux, hosts)
 }
 
 type api struct {
@@ -343,15 +346,15 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return false
 }
 
-// protect refuses a request addressed to a host other than a loopback one,
-// and a change that a browser makes from another origin or that lacks
-// RequestHeader.
-func protect(next http.Handler) http.Handler {
+// protect refuses a request addressed to a host other than a loopback one
+// or one of hosts, and a change that a browser makes from another origin or
+// that lacks RequestHeader.
+func protect(next http.Handler, hosts []string) http.Handler {
 	crossOrigin := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if !isLoopbackHost(r.Host) {
-			writeError(w, http.StatusForbidden, fmt.Errorf("host %q is not a loopback host", r.Host))
+		if !allowedHost(r.Host, hosts) {
+			writeError(w, http.StatusForbidden, fmt.Errorf("host %q is not a loopback host or one given with --control-host", r.Host))
 			return
 		}
 		if err := crossOrigin.Check(r); err != nil {
@@ -366,17 +369,18 @@ func protect(next http.Handler) http.Handler {
 	})
 }
 
-// isLoopbackHost reports whether the host of a Host header, with or without
-// its port, is localhost or a loopback address.
-func isLoopbackHost(hostport string) bool {
+// allowedHost reports whether the host of a Host header, with or without
+// its port, is localhost, a loopback address or one of hosts.
+func allowedHost(hostport string, hosts []string) bool {
 	host := hostport
 	if h, _, err := net.SplitHostPort(hostport); err == nil {
 		host = h
 	}
-	if strings.EqualFold(host, "localhost") {
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.EqualFold(host, "localhost") || slices.ContainsFunc(hosts, func(h string) bool { return strings.EqualFold(h, host) }) {
 		return true
 	}
-	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
 }
 

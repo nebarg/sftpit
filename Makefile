@@ -1,4 +1,4 @@
-.PHONY: build test vet lint vuln fmt-check fix-check tidy-check check linux-check integration-deps
+.PHONY: build image test vet lint vuln fmt-check fix-check tidy-check check linux-check container-check integration-deps
 
 # golangci-lint is run at this version, built in isolation rather than
 # added to go.mod, as its authors advise.
@@ -6,6 +6,9 @@ GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2
 
 build:
 	go build -o bin/sftpit ./cmd/sftpit
+
+image:
+	docker build --tag sftpit:local .
 
 test:
 	go test -race ./...
@@ -39,6 +42,9 @@ linux-check:
 		--volume sftpit-linux-gocache:/home/tester/.cache \
 		--volume sftpit-linux-gomod:/home/tester/go \
 		sftpit-linux-check make check
+
+container-check: image
+	test/container/check.sh
 
 integration-deps:
 	composer install --working-dir=test/integration/php

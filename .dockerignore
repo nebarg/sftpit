@@ -1,0 +1,6 @@
+/bin/
+/sandbox-data/
+/work/
+/test/integration/php/vendor/
+.env
+.env.*

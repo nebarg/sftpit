@@ -46,7 +46,7 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { m.Close() })
-	return m, control.Handler(m)
+	return m, control.Handler(m, nil)
 }
 
 const denyStats = `{"id": "deny-stats", "match": {"operation": "stat", "user": "test"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}`

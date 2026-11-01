@@ -28,21 +28,28 @@ import (
 
 const serveUsage = `Usage: sftpit serve [flags]
 
-Runs an SFTP server on a loopback address until interrupted, with a control
-API over HTTP that reports on the current run and resets it. Files live in a
-temporary workspace that is deleted when sftpit stops, unless --data-dir
-names one to keep.
+Runs an SFTP server on a loopback address, or in a container on every
+interface, until interrupted, with a control API over HTTP that reports on
+the current run and resets it. Files live in a temporary workspace that is
+deleted when sftpit stops, unless --data-dir names one to keep.
 
 Flags:
+  --profile NAME       loopback (the default) listens only on loopback
+                       addresses; container listens on every interface by
+                       default, for other containers on its network
   --config FILE        read settings, users and scenarios from FILE
   --scenario NAME      inject the faults of the scenario NAME in the
                        config; without it, no faults are injected
   --seed N             pin the scenario's random decisions to seed N, in
                        place of its own seed or a fresh one every run
   --sftp-listen ADDR   listen on ADDR instead of the configured address
-                       (default 127.0.0.1:2122; port 0 picks a free port)
+                       (default 127.0.0.1:2122, or :2122 in the container
+                       profile; port 0 picks a free port)
   --http-listen ADDR   serve the control API on ADDR instead of the
-                       configured address (default 127.0.0.1:8122)
+                       configured address (default 127.0.0.1:8122, or
+                       :8122 in the container profile)
+  --control-host NAME  also answer control API requests addressed to NAME,
+                       such as a compose service's name; may be repeated
   --seed-dir DIR       start every run with a copy of the files under DIR,
                        as they are at startup
   --data-dir DIR       keep the workspace in DIR, with its host keys and its
@@ -58,9 +65,17 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	opts := config.Options{}
+	flags.Func("profile", "", func(s string) (err error) {
+		opts.Profile, err = config.ParseProfile(s)
+		return err
+	})
 	flags.StringVar(&opts.ConfigFile, "config", "", "")
 	flags.StringVar(&opts.SFTPListen, "sftp-listen", "", "")
 	flags.StringVar(&opts.HTTPListen, "http-listen", "", "")
+	flags.Func("control-host", "", func(name string) error {
+		opts.ControlHosts = append(opts.ControlHosts, name)
+		return nil
+	})
 	flags.StringVar(&opts.SeedDir, "seed-dir", "", "")
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
 	flags.StringVar(&opts.Scenario, "scenario", "", "")
@@ -128,11 +143,11 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
 	// Listening first makes a busy port fail before the workspace changes.
-	sftpLn, err := listenLoopback("sftp_listen", cfg.SFTPListen)
+	sftpLn, err := listen(cfg.Profile, "sftp_listen", cfg.SFTPListen)
 	if err != nil {
 		return err
 	}
-	httpLn, err := listenLoopback("http_listen", cfg.HTTPListen)
+	httpLn, err := listen(cfg.Profile, "http_listen", cfg.HTTPListen)
 	if err != nil {
 		sftpLn.Close()
 		return err
@@ -175,7 +190,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 	sftpServed := make(chan error, 1)
 	go func() { sftpServed <- srv.Serve(sftp) }()
 	api := &http.Server{
-		Handler:           control.Handler(manager),
+		Handler:           control.Handler(manager, cfg.ControlHosts),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -249,14 +264,15 @@ func openWorkspace(dataDir string) (*runs.Workspace, error) {
 	return runs.OpenWorkspace(dataDir)
 }
 
-// listenLoopback listens on addr, the value of setting, and refuses an
-// address that turns out not to be loopback, as a host name could.
-func listenLoopback(setting, addr string) (net.Listener, error) {
+// listen listens on addr, the value of setting, and in the loopback
+// profile refuses an address that turns out not to be loopback, as a host
+// name could.
+func listen(profile config.Profile, setting, addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", setting, err)
 	}
-	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+	if tcp, ok := ln.Addr().(*net.TCPAddr); profile == config.Loopback && (!ok || !tcp.IP.IsLoopback()) {
 		ln.Close()
 		return nil, fmt.Errorf("%s %q resolved to %v, which is not a loopback address", setting, addr, ln.Addr())
 	}
@@ -266,6 +282,12 @@ func listenLoopback(setting, addr string) (net.Listener, error) {
 func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, run runs.Run, hostKeys []ssh.Signer, cfg *config.Config) {
 	fmt.Fprintf(w, "sftpit is serving SFTP on %s\n", addr)
 	fmt.Fprintf(w, "  control API: http://%s/api/v1/\n", apiAddr)
+	if cfg.Profile == config.Container {
+		fmt.Fprintln(w, "  profile: container (every interface in the container; publish ports on host loopback)")
+	}
+	if len(cfg.ControlHosts) > 0 {
+		fmt.Fprintf(w, "  control hosts: %s\n", strings.Join(cfg.ControlHosts, ", "))
+	}
 	if workspace.Temporary() {
 		fmt.Fprintf(w, "  workspace: %s (deleted when sftpit stops)\n", workspace.Dir())
 	} else {

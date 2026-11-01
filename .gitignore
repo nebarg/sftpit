@@ -11,3 +11,4 @@
 *.prof
 
 .DS_Store
+/examples/sail/tests/sftpit/hostkeys/

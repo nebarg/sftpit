@@ -101,6 +101,21 @@ func TestConfigExplainPrintsTheConfigurationAsRead(t *testing.T) {
 	}
 }
 
+func TestConfigReadsTheFileAsTheProfileWould(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	testutil.WriteFile(t, config, "schema_version: 1\nserver:\n  sftp_listen: \"0.0.0.0:2122\"\n")
+	if code, _, stderr := runConfig(t, "validate", "--config", config); code != exitUsage || !strings.Contains(stderr, "is not a loopback address") {
+		t.Errorf("validate = %d with stderr %q, want the address refused in the loopback profile", code, stderr)
+	}
+	if code, stdout, stderr := runConfig(t, "validate", "--profile", "container", "--config", config); code != exitOK || stderr != "" {
+		t.Errorf("validate --profile container = %d with stdout %q and stderr %q, want it valid", code, stdout, stderr)
+	}
+	code, stdout, stderr := runConfig(t, "explain", "--profile", "container", "--config", config)
+	if code != exitOK || !strings.Contains(stdout, "sftp_listen: 0.0.0.0:2122\n") || !strings.Contains(stdout, "http_listen: :8122\n") {
+		t.Errorf("explain --profile container = %d with stderr %q, want the container profile's addresses:\n%s", code, stderr, stdout)
+	}
+}
+
 func TestConfigRejectsBadCommandLines(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	testutil.WriteFile(t, config, "schema_version: 1\n")
@@ -115,6 +130,7 @@ func TestConfigRejectsBadCommandLines(t *testing.T) {
 		{"an unknown flag", []string{"explain", "--config", config, "--scenario", "s"}, "sftpit config explain: flag provided but not defined: -scenario"},
 		{"a stray argument", []string{"validate", "--config", config, "extra"}, `sftpit config validate: unexpected arguments ["extra"]`},
 		{"a missing file", []string{"validate", "--config", config + ".missing"}, "sftpit config validate: config: open "},
+		{"an unknown profile", []string{"validate", "--config", config, "--profile", "remote"}, `sftpit config validate: invalid value "remote" for flag -profile`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

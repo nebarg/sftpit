@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/control"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/testutil"
@@ -449,6 +450,83 @@ func TestServeResetsThroughTheControlAPI(t *testing.T) {
 	}
 }
 
+func TestServeAnswersTheControlHostsItIsGiven(t *testing.T) {
+	s := startServe(t, "--control-host", "sftpit", "--control-host", "files.test")
+	if !strings.Contains(s.stdout.String(), "control hosts: sftpit, files.test") {
+		t.Errorf("banner does not list the control hosts:\n%s", s.stdout.String())
+	}
+	for host, want := range map[string]int{"sftpit:8122": http.StatusOK, "FILES.test": http.StatusOK, "other:8122": http.StatusForbidden} {
+		req, err := http.NewRequest("GET", "http://"+s.apiAddr+"/api/v1/status", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET status as %s: %v", host, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("GET status as %s = %s, want %d", host, resp.Status, want)
+		}
+	}
+}
+
+func TestServeWarnsOfLoopbackAddressesInTheContainerProfile(t *testing.T) {
+	s := startServe(t, "--profile", "container")
+	if !strings.Contains(s.stdout.String(), "profile: container") {
+		t.Errorf("banner does not show the profile:\n%s", s.stdout.String())
+	}
+	for _, setting := range []string{"sftp_listen", "http_listen"} {
+		if want := `warning: ` + setting + ` "127.0.0.1:0" is a loopback address, which other containers cannot reach`; !strings.Contains(s.stderr.String(), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, s.stderr.String())
+		}
+	}
+	s.dial(t, "test", "test")
+}
+
+func TestServeListensOnEveryInterfaceInTheContainerProfile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("listening on every interface makes the firewall of macOS ask to allow it")
+	}
+	s := startServe(t, "--profile", "container", "--sftp-listen", ":0", "--http-listen", ":0")
+	if stderr := s.stderr.String(); stderr != "" {
+		t.Errorf("serve logged:\n%s", stderr)
+	}
+	// Another container reaches it on the address of an interface that is
+	// not loopback.
+	other := nonLoopbackAddress(t)
+	for _, addr := range []string{s.addr, s.apiAddr} {
+		host, port, err := net.SplitHostPort(addr)
+		if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsUnspecified() {
+			t.Fatalf("serving on %s, want every interface", addr)
+		}
+		conn, err := net.Dial("tcp", net.JoinHostPort(other, port))
+		if err != nil {
+			t.Fatalf("connecting on %s: %v", other, err)
+		}
+		conn.Close()
+	}
+	s.dial(t, "test", "test")
+}
+
+// nonLoopbackAddress returns an IPv4 address of this host's that is not
+// loopback, or skips the test if it has none.
+func nonLoopbackAddress(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
+			return ipNet.IP.String()
+		}
+	}
+	t.Skip("no interface has an IPv4 address that is not loopback")
+	return ""
+}
+
 // requestJSON makes a request to the control API, with the header that a
 // change needs, and decodes its JSON reply, which must be a success.
 func requestJSON(t *testing.T, method, url, body string) map[string]any {
@@ -520,6 +598,8 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		{"non-loopback address", []string{"--sftp-listen", "0.0.0.0:2122"}, "not a loopback address"},
 		{"unknown flag", []string{"--smtp-listen", "127.0.0.1:0"}, "flag provided but not defined"},
 		{"non-loopback control address", []string{"--http-listen", "0.0.0.0:8122"}, `http_listen "0.0.0.0:8122" is not a loopback address`},
+		{"unknown profile", []string{"--profile", "remote"}, `invalid value "remote" for flag -profile: profile "remote" is not loopback or container`},
+		{"control host with a port", []string{"--control-host", "sftpit:8122"}, `control host "sftpit:8122" is not a host name or IP address without a port`},
 		{"stray argument", []string{"extra"}, `unexpected arguments ["extra"]`},
 		{"missing config", []string{"--config", "missing.yaml"}, "missing.yaml"},
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
@@ -568,19 +648,19 @@ func TestServeFailsClearlyOnAnOccupiedPort(t *testing.T) {
 	}
 }
 
-func TestListenLoopbackRefusesAnAddressThatIsNotLoopback(t *testing.T) {
+func TestListenRefusesAnAddressThatIsNotLoopbackInTheLoopbackProfile(t *testing.T) {
 	// The configuration refuses every address but localhost and loopback
 	// ones, so only localhost resolving elsewhere would reach the check.
 	// The test listens on every interface instead.
 	if runtime.GOOS != "linux" {
 		t.Skip("listening on every interface makes the firewall of macOS ask to allow it")
 	}
-	ln, err := listenLoopback("http_listen", "0.0.0.0:0")
+	ln, err := listen(config.Loopback, "http_listen", "0.0.0.0:0")
 	if err == nil {
 		ln.Close()
 	}
 	if err == nil || !strings.HasPrefix(err.Error(), `http_listen "0.0.0.0:0" resolved to `) || !strings.HasSuffix(err.Error(), "which is not a loopback address") {
-		t.Errorf("listenLoopback = %v, want it refused as not loopback", err)
+		t.Errorf("listen = %v, want it refused as not loopback", err)
 	}
 }
 

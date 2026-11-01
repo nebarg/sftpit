@@ -1,0 +1,12 @@
+# Added to examples/sail/docker-compose.yml by check.sh: a stand-in for a
+# Sail application, which runs check.php on the sail network. Paths are
+# relative to examples/sail.
+services:
+    laravel.test:
+        image: 'php:8.4-cli'
+        command: ['php', '/check/check.php']
+        volumes:
+            - '../../test/container:/check:ro'
+            - '../../test/integration/php/vendor:/vendor:ro'
+        networks:
+            - sail

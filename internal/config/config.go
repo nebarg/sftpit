@@ -21,13 +21,10 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"net"
-	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -51,6 +48,13 @@ const (
 	DefaultPassword   = "test"
 )
 
+// The listen addresses in the container profile, when neither the
+// configuration nor the command line sets them: every interface.
+const (
+	ContainerSFTPListen = ":2122"
+	ContainerHTTPListen = ":8122"
+)
+
 // DefaultLimits returns the storage limits sftpit serve has when the
 // configuration sets none.
 func DefaultLimits() backend.Limits {
@@ -62,10 +66,17 @@ const hostKeyWorkspace = "workspace"
 
 // Config is a validated configuration with its secrets resolved.
 type Config struct {
-	// SFTPListen is the loopback address the SFTP server listens on, and
-	// HTTPListen the one the control API listens on.
+	// Profile says which addresses SFTPListen and HTTPListen may be.
+	Profile Profile
+
+	// SFTPListen is the address the SFTP server listens on, and HTTPListen
+	// the one the control API listens on.
 	SFTPListen string
 	HTTPListen string
+
+	// ControlHosts are the host names, besides localhost and loopback
+	// addresses, that the control API answers to.
+	ControlHosts []string
 
 	// HostKeyDir is the absolute path of the directory holding the host
 	// keys, or "" for the workspace's own.
@@ -135,10 +146,18 @@ type Options struct {
 	// ConfigFile is the configuration file to read, or "" for none.
 	ConfigFile string
 
+	// Profile says which addresses sftpit may listen on, and which it
+	// listens on by default.
+	Profile Profile
+
 	// SFTPListen and HTTPListen override the configured listen addresses
 	// when non-empty.
 	SFTPListen string
 	HTTPListen string
+
+	// ControlHosts are host names the control API answers to besides
+	// localhost and loopback addresses.
+	ControlHosts []string
 
 	// SeedDir overrides the configured seed directory when non-empty.
 	SeedDir string
@@ -308,16 +327,28 @@ func read(opts Options) (*reading, error) {
 		f = *decoded
 	}
 
+	sftpListen, httpListen := opts.Profile.defaultListen()
 	cfg := &Config{
-		SFTPListen: cmp.Or(opts.SFTPListen, f.Server.SFTPListen, DefaultSFTPListen),
-		HTTPListen: cmp.Or(opts.HTTPListen, f.Server.HTTPListen, DefaultHTTPListen),
+		Profile:    opts.Profile,
+		SFTPListen: cmp.Or(opts.SFTPListen, f.Server.SFTPListen, sftpListen),
+		HTTPListen: cmp.Or(opts.HTTPListen, f.Server.HTTPListen, httpListen),
 	}
-	if err := checkLoopback("sftp_listen", cfg.SFTPListen); err != nil {
-		return nil, err
+	var warnings []string
+	for _, listen := range []struct{ setting, addr string }{{"sftp_listen", cfg.SFTPListen}, {"http_listen", cfg.HTTPListen}} {
+		warning, err := opts.Profile.checkListen(listen.setting, listen.addr)
+		if err != nil {
+			return nil, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
 	}
-	if err := checkLoopback("http_listen", cfg.HTTPListen); err != nil {
-		return nil, err
+	for _, name := range opts.ControlHosts {
+		if err := checkControlHost(name); err != nil {
+			return nil, err
+		}
 	}
+	cfg.ControlHosts = opts.ControlHosts
 	if f.Server.ReplyOrder != "" {
 		order, ok := replyOrders[f.Server.ReplyOrder]
 		if !ok {
@@ -374,7 +405,7 @@ func read(opts Options) (*reading, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Warnings = secrets.warnings
+	cfg.Warnings = append(warnings, secrets.warnings...)
 
 	if len(f.Users) == 0 {
 		cfg.Users = []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}
@@ -433,25 +464,6 @@ func resolvePath(dir, name string) string {
 		return name
 	}
 	return filepath.Join(dir, name)
-}
-
-// checkLoopback requires addr, the value of setting, to be a loopback IP
-// address or localhost and a numeric port.
-func checkLoopback(setting, addr string) error {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("%s %q: %w", setting, addr, err)
-	}
-	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-		return fmt.Errorf("%s %q: the port must be a number from 0 to 65535", setting, addr)
-	}
-	if host == "localhost" {
-		return nil
-	}
-	if ip, err := netip.ParseAddr(host); err == nil && ip.IsLoopback() {
-		return nil
-	}
-	return fmt.Errorf("%s %q is not a loopback address; sftpit listens only on loopback, such as 127.0.0.1:%s or [::1]:%[3]s", setting, addr, port)
 }
 
 // checkSeedDir requires the seed directory to exist and refuses the

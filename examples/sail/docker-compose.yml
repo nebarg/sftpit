@@ -1,0 +1,30 @@
+# The sftpit service to add to a Laravel Sail project's docker-compose.yml,
+# beside mailpit. Build the image first with make image in a clone of sftpit.
+services:
+    laravel.test:
+        # Sail's own settings stay as they are; the application only needs
+        # sftpit started with it.
+        depends_on:
+            - sftpit
+    sftpit:
+        image: 'sftpit:local'
+        # Sail's user, so that the host keys sftpit creates belong to you.
+        user: '${WWWUSER:-1000}:${WWWGROUP:-1000}'
+        command:
+            - serve
+            - '--profile'
+            - container
+            - '--control-host'
+            - sftpit
+            - '--config'
+            - /sftpit/sftpit.yaml
+        ports:
+            - '127.0.0.1:${FORWARD_SFTPIT_PORT:-2122}:2122'
+            - '127.0.0.1:${FORWARD_SFTPIT_CONTROL_PORT:-8122}:8122'
+        volumes:
+            - './tests/sftpit:/sftpit'
+        networks:
+            - sail
+networks:
+    sail:
+        driver: bridge

@@ -21,6 +21,8 @@ Commands:
 
 Flags:
   --config FILE     the configuration file to read
+  --profile NAME    read it as serve --profile NAME would: loopback, the
+                    default, or container
   --env-file FILE   also read secrets from FILE; may be repeated, and later
                     files override earlier ones
 `
@@ -39,6 +41,10 @@ func configCommand(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(io.Discard)
 	opts := config.Options{}
 	flags.StringVar(&opts.ConfigFile, "config", "", "")
+	flags.Func("profile", "", func(s string) (err error) {
+		opts.Profile, err = config.ParseProfile(s)
+		return err
+	})
 	flags.Func("env-file", "", func(name string) error {
 		opts.EnvFiles = append(opts.EnvFiles, name)
 		return nil

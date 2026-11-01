@@ -12,7 +12,7 @@ go run ./cmd/sftpit serve
 
 sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
 
-`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces. The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
+`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces, except in a container with [`--profile container`](#with-laravel-sail-or-docker-compose). The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
 
 To have files ready to download, point sftpit at a directory of fixtures:
 
@@ -31,6 +31,50 @@ go run ./cmd/sftpit serve --data-dir ./sandbox-data
 The directory must be empty or already an sftpit workspace, and only one sftpit can use it at a time. It keeps the host keys, so clients see the same fingerprints at every start, and the files of the last five runs, under `runs/<run>/fs/`, so that a failed run can be inspected afterwards. Each start, and each reset, is still a new run, which begins with only the seed's files. The seed's snapshot is in `fixtures/seed/`, and `fixtures/seed.json` lists what it holds, with each file's size and SHA-256.
 
 Names in `fs/` are encoded, so that they behave as on a case-sensitive Linux server whatever the host's volume ignores or refuses. A capital is stored as `^` and its lowercase letter, and any other character outside `a-z`, `0-9`, `-`, `_` and `.` as `%` and two hex digits: `Orders 2026.CSV` is stored as `^orders%202026.^c^s^v`. Add files through the seed directory or over SFTP, because sftpit ignores names in `fs/` that it did not encode. Escaping makes names longer, so a name of more than 127 capitals, or of more than 85 bytes that need `%`, is too long to store and fails the way an over-long name fails on a Linux server.
+
+### With Laravel Sail or Docker Compose
+
+An application in a container cannot reach a server that listens on the host's loopback address, so sftpit runs as a service beside it, as Mailpit does in Sail. Build the image in a clone of sftpit:
+
+```bash
+make image
+```
+
+Then add the service to the project's `docker-compose.yml`, as [`examples/sail`](examples/sail) does:
+
+```yaml
+    sftpit:
+        image: 'sftpit:local'
+        user: '${WWWUSER:-1000}:${WWWGROUP:-1000}'
+        command: ['serve', '--profile', 'container', '--control-host', 'sftpit', '--config', '/sftpit/sftpit.yaml']
+        ports:
+            - '127.0.0.1:${FORWARD_SFTPIT_PORT:-2122}:2122'
+            - '127.0.0.1:${FORWARD_SFTPIT_CONTROL_PORT:-8122}:8122'
+        volumes:
+            - './tests/sftpit:/sftpit'
+        networks:
+            - sail
+```
+
+Put the [configuration](#configuration) in `tests/sftpit/sftpit.yaml`, list `sftpit` under the application's `depends_on`, and point its disk at the service:
+
+```php
+// config/filesystems.php
+'sftp' => [
+    'driver' => 'sftp',
+    'host' => 'sftpit',
+    'port' => 2122,
+    'username' => 'test',
+    'password' => 'test',
+],
+```
+
+- **The application** reaches SFTP at `sftpit:2122` and the control API at `http://sftpit:8122`, so a test can [reset](#control-api) the run.
+- **The host** reaches both on `127.0.0.1` only, at the ports `FORWARD_SFTPIT_PORT` and `FORWARD_SFTPIT_CONTROL_PORT` choose.
+- **`--profile container`** makes sftpit listen on every interface in the container: `:2122` and `:8122` unless the configuration or flags say otherwise. It warns of a loopback address, which other containers cannot reach. The profile is never chosen for you. It belongs only in a container, because on a host, every interface includes those that other machines reach.
+- **`--control-host sftpit`** lets the control API answer requests addressed to `sftpit`, the service's name; otherwise it answers only `localhost` and loopback addresses. Any container on the compose network can then reset runs and change rules, as it can reach any other service there.
+- **The user** is Sail's, from its `.env`, so that sftpit can create the host keys in `tests/sftpit/hostkeys`, which the configuration names, on the first start. Commit them, so the fingerprints stay the same for everyone. As its own user, which is not root, sftpit could not write to a directory that a Linux host user owns, or read keys only that user can read.
+- **The workspace** is temporary, inside the container. To keep runs after the container stops, mount a directory and name it with `--data-dir`.
 
 ## Configuration
 
@@ -101,7 +145,7 @@ sftpit config validate --config ./sftpit.yaml
 sftpit config explain --config ./sftpit.yaml
 ```
 
-`validate` checks the file, the users and their keys, every secret and every scenario, and exits with 2 at the first problem. The seed directory's contents and whether they fit the limits, the data directory, the host keys and whether the listen addresses are free are checked when `serve` starts. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, each scenario's rules in the order they are tried, and the rules each [chaos preset](#chaos) compiles to, in a comment. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace, and both take `--env-file`.
+`validate` checks the file, the users and their keys, every secret and every scenario, and exits with 2 at the first problem. The seed directory's contents and whether they fit the limits, the data directory, the host keys and whether the listen addresses are free are checked when `serve` starts. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, each scenario's rules in the order they are tried, and the rules each [chaos preset](#chaos) compiles to, in a comment. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace. Both take `--env-file`, and `--profile` to check the listen addresses as `serve` would in that profile.
 
 ## Faults
 
@@ -334,7 +378,7 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 
 ## Control API
 
-`sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names. Port `0` picks a free port, and the banner shows the address.
+`sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names, or [in a container](#with-laravel-sail-or-docker-compose) on `:8122`. Port `0` picks a free port, and the banner shows the address.
 
 | Route | Answer |
 |---|---|
@@ -376,7 +420,7 @@ An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, or
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
-**Who can use it:** the API answers only requests addressed to `localhost` or a loopback address, so a web page cannot reach it by DNS rebinding. Any request but a `GET`, `HEAD` or `OPTIONS` needs the `Sftpit-Control` header, with any non-empty value, which a page on another origin cannot send, and one that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`, except that a request that passes these checks gets a plain-text 404 for an unknown route, and a plain-text 405 for a method its route does not take.
+**Who can use it:** the API answers only requests addressed to `localhost`, a loopback address or a name given with `--control-host`, so a web page cannot reach it by DNS rebinding. Any request but a `GET`, `HEAD` or `OPTIONS` needs the `Sftpit-Control` header, with any non-empty value, which a page on another origin cannot send, and one that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`, except that a request that passes these checks gets a plain-text 404 for an unknown route, and a plain-text 405 for a method its route does not take.
 
 ### Changing the rules during a run
 
@@ -488,6 +532,8 @@ make integration-deps
 ```
 
 `make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the PHP clients that `make integration-deps` installed.
+
+`make image` builds the container image `sftpit:local`. `make container-check` runs [`examples/sail`](examples/sail) with a stand-in for a Sail application, which uploads through Laravel's sftp disk to `sftpit:2122` and resets the run through `sftpit:8122`, and checks that the host reaches both ports on loopback only. It also uses the PHP clients.
 
 ## License
 
