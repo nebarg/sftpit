@@ -173,7 +173,7 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 		if opts.Logger == nil {
 			opts.Logger = logger
 		}
-		handler = runs.Handler(run, embedded, nil, opts)
+		handler = runs.Handler(run, embedded, nil, config.Policy{}, opts)
 	}
 	var sessions sync.WaitGroup
 	s := &server{files: run.Files, run: run, wait: sessions.Wait}

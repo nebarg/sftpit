@@ -107,6 +107,10 @@ users:
   - {name: test, password_env: P}
   - {name: partner-b, password_env: P2, authorized_keys: keys/partner-b.pub, home: /partner-b}
   - {name: robot, authorized_keys: keys/robot.pub}
+policy:
+  read_only:
+    - {path_prefix: /reference}
+    - {path_prefix: /outgoing, users: [partner-b, robot]}
 scenarios:
   empty: {faults: []}
   zero: {seed: 0, faults: []}

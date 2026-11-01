@@ -15,6 +15,7 @@ import (
 	"log/slog"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -28,11 +29,12 @@ import (
 // opts.Listener. Its faults and timers come from rules, for the user and key
 // it logged in with and the time it did, including the timers of rules that
 // a change applies during the session, and its stalls and freezes end when
-// rules releases them; or they come from opts if rules is nil. Each session
-// logs with the connection's ID and user, as the SSH server does.
+// rules releases them; or they come from opts if rules is nil. The paths
+// that policy makes read-only for the user are its opts.ReadOnly. Each
+// session logs with the connection's ID and user, as the SSH server does.
 // Snapshots hold back every session's changes to their file, and keep copies
 // in the run's snapshots directory.
-func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sftpproxy.Options) sshfront.Handler {
+func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, policy config.Policy, opts sftpproxy.Options) sshfront.Handler {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -42,6 +44,7 @@ func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, opts sf
 	return func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		opts := opts
 		opts.Conn, opts.Listener = conn, conn.Server()
+		opts.ReadOnly = policy.ReadOnlyFor(conn.User())
 		opts.Logger = logger.With("conn", conn.ID(), "user", conn.User())
 		if rules != nil {
 			s := rules.Session(faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID(), Authenticated: conn.Authenticated()})

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -54,6 +55,41 @@ func TestServeTransfersFilesAndCleansUp(t *testing.T) {
 	}
 	if _, err := os.Stat(s.workspace); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("workspace %s still exists after shutdown (%v)", s.workspace, err)
+	}
+}
+
+func TestServeKeepsReadOnlyPathsFromChange(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "sftpit.yaml")
+	testutil.WriteFile(t, config, `schema_version: 1
+users:
+  - name: "test"
+    password_env: "TEST_PASSWORD"
+  - name: "partner-b"
+    password_env: "TEST_PASSWORD"
+policy:
+  read_only:
+    - path_prefix: "/reference"
+    - path_prefix: "/outgoing"
+      users: ["partner-b"]
+`)
+	testutil.WriteFile(t, filepath.Join(dir, ".env"), "TEST_PASSWORD=pw\n")
+
+	s := startServe(t, "--config", config, "--env-file", filepath.Join(dir, ".env"))
+	if out := s.stdout.String(); !strings.Contains(out, "  read-only: /reference, /outgoing (partner-b)\n") {
+		t.Errorf("banner should list the read-only paths:\n%s", out)
+	}
+	for user, refused := range map[string][]string{
+		"test":      {"/reference"},
+		"partner-b": {"/reference", "/outgoing"},
+	} {
+		c := s.dial(t, user, "pw")
+		for _, dir := range []string{"/reference", "/outgoing"} {
+			err := c.Mkdir(dir)
+			if denied := errors.Is(err, fs.ErrPermission); denied != slices.Contains(refused, dir) {
+				t.Errorf("%s: Mkdir(%s) = %v, want it refused: %v", user, dir, err, slices.Contains(refused, dir))
+			}
+		}
 	}
 }
 

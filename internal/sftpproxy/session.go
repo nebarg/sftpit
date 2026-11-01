@@ -55,6 +55,14 @@ var (
 
 // Options configures a session.
 type Options struct {
+	// ReadOnly are the clean absolute paths the client may not change, each
+	// with everything beneath it. A request that would change one is
+	// answered SSH_FX_PERMISSION_DENIED before Faults sees it: an OPEN that
+	// can write, create or truncate, a SETSTAT, FSETSTAT, REMOVE, MKDIR or
+	// RMDIR, or a rename either of whose paths is one of them, beneath one
+	// or above one, since moving a directory above one moves it too.
+	ReadOnly []string
+
 	// Faults chooses the fault, if any, for each request the proxy would
 	// forward, and for each entry of a READDIR reply. It is called once per
 	// request, in request order, and once per entry as each READDIR reply
@@ -151,6 +159,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		clientIn:  bufio.NewReader(client),
 		backend:   backend,
 		backendIn: bufio.NewReader(backend),
+		readOnly:  opts.ReadOnly,
 		faults:    opts.Faults,
 		conn:      opts.Conn,
 		listener:  opts.Listener,
@@ -205,6 +214,7 @@ type session struct {
 	clientIn  *bufio.Reader
 	backend   io.ReadWriteCloser
 	backendIn *bufio.Reader
+	readOnly  []string
 	faults    func(Request) Action
 	conn      Conn
 	listener  Listener
@@ -406,6 +416,9 @@ func (s *session) handleRequest(b []byte) error {
 	}
 
 	req, rejection := s.tracker.describe(clientID, p)
+	if rejection == nil {
+		rejection = s.enforce(req)
+	}
 	if rejection != nil {
 		s.logRequest(req, rejection)
 		return s.replyNow(sftpwire.AppendPacket(nil, clientID, rejection))

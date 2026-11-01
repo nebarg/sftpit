@@ -94,6 +94,9 @@ type Config struct {
 	// because no users were configured.
 	DefaultCredentials bool
 
+	// Policy is what clients may do, whatever faults a run injects.
+	Policy Policy
+
 	// Scenarios are the configuration's scenarios, by name.
 	Scenarios map[string]Scenario
 
@@ -164,6 +167,7 @@ type fileConfig struct {
 	Server        serverConfig  `yaml:"server"`
 	Storage       storageConfig `yaml:"storage"`
 	Users         []userConfig  `yaml:"users,omitempty"`
+	Policy        policyConfig  `yaml:"policy,omitempty"`
 
 	Scenarios map[string]scenarioConfig `yaml:"scenarios,omitempty"`
 }
@@ -384,6 +388,9 @@ func read(opts Options) (*reading, error) {
 		cfg.Users = append(cfg.Users, user)
 	}
 
+	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
+		return nil, err
+	}
 	cfg.Scenarios, err = scenarios(f.Scenarios, opts.Scenario, cfg.Users)
 	if err != nil {
 		return nil, err

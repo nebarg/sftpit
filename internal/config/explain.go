@@ -50,6 +50,9 @@ func Explain(opts Options) ([]byte, error) {
 			f.Users[i].AuthorizedKeys = resolvePath(r.dir, u.AuthorizedKeys)
 		}
 	}
+	for _, r := range cfg.Policy.ReadOnly {
+		f.Policy.ReadOnly = append(f.Policy.ReadOnly, readOnlyConfig{PathPrefix: r.PathPrefix, Users: r.Users})
+	}
 	if len(cfg.Scenarios) > 0 {
 		f.Scenarios = make(map[string]scenarioConfig, len(cfg.Scenarios))
 	}

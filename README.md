@@ -64,6 +64,12 @@ users:
   - name: "partner-b"
     authorized_keys: "./keys/partner-b.pub"
     home: "/partner-b" # default directory for relative paths
+
+policy:
+  read_only:
+    - path_prefix: "/reference" # for every user
+    - path_prefix: "/outgoing"
+      users: ["partner-b"]
 ```
 
 - Relative paths are resolved against the config file's directory.
@@ -75,6 +81,8 @@ users:
 `reply_order` sets the order in which replies reach a client. With `request`, the default, a session passes the client's requests to the server one at a time and answers them in order, as OpenSSH's `sftp-server` does, so a fault that holds a request before the server acts holds back every later one. With `completion`, it answers each request as soon as it is done, as a server that handles requests concurrently may: requests on the same file still reach the server in order, but a held request holds back only later requests on its own files.
 
 The storage limits keep a runaway client from filling the disk. A file counts at its logical size, so a sparse write or a truncate that extends a file counts in full, and only file handles count as open files. A request that would take the files past a limit changes nothing and fails with `SSH_FX_FAILURE`, as a write to a full disk fails on OpenSSH's server, and sftpit logs it as `storage limit reached`, naming the setting. The seed counts too, and sftpit refuses to start with one that does not fit. A limit can be set to any value of at least 1, but not turned off.
+
+The policy makes paths read-only, as a partner's server does with permissions, whatever scenario a run injects. A `path_prefix` covers the path and everything beneath it, so `/reference` covers `/reference/rates.csv` but not `/reference-old`, and `users` limits it to some users. Clients can still list, stat and download there, but sftpit refuses every change with `SSH_FX_PERMISSION_DENIED`: an open that can write, create or truncate, a `setstat`, `remove`, `mkdir` or `rmdir`, and a rename either of whose paths is read-only, or holds a read-only path, since renaming a directory moves what is in it. sftpit logs each refusal as `policy denied`, naming the path that refused it, and the banner lists the read-only paths. Fault rules never see a refused request, so it does not count towards them.
 
 Passwords never appear in the config file. `password_env` names an environment variable, which is read from the process environment first and then from the env files named by `env_file` and `--env-file`. A later file overrides an earlier one, and a missing env file is skipped.
 

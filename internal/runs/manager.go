@@ -57,6 +57,9 @@ type Options struct {
 	// client.
 	ReplyOrder sftpproxy.ReplyOrder
 
+	// Policy is what clients may do, whatever faults a run injects.
+	Policy config.Policy
+
 	// Scenarios are the scenarios whose faults a run can inject, by name.
 	Scenarios map[string]config.Scenario
 
@@ -490,7 +493,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		run:        run,
 		root:       root,
 		rules:      rules,
-		handler:    Handler(run, embedded, rules, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger}),
+		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger}),
 		hooks:      connectionHooks(rules, m.logger),
 		startRules: chosen.rules,
 		startChaos: chosen.chaos,

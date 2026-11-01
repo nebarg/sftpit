@@ -159,6 +159,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 		SeedDir:    cfg.SeedDir,
 		Limits:     cfg.Limits,
 		ReplyOrder: cfg.ReplyOrder,
+		Policy:     cfg.Policy,
 		Scenarios:  cfg.Scenarios,
 		Scenario:   cfg.Scenario,
 		Seed:       cfg.Seed,
@@ -288,6 +289,17 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 	}
 	if cfg.SeedDir != "" {
 		fmt.Fprintf(w, "  seeded from: %s\n", cfg.SeedDir)
+	}
+	if readOnly := cfg.Policy.ReadOnly; len(readOnly) > 0 {
+		var paths []string
+		for _, r := range readOnly {
+			if r.Users != nil {
+				paths = append(paths, r.PathPrefix+" ("+strings.Join(r.Users, ", ")+")")
+			} else {
+				paths = append(paths, r.PathPrefix)
+			}
+		}
+		fmt.Fprintf(w, "  read-only: %s\n", strings.Join(paths, ", "))
 	}
 	fmt.Fprintln(w, "  host keys:")
 	for _, key := range hostKeys {
