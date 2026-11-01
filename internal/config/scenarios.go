@@ -40,9 +40,10 @@ type ruleConfig struct {
 	Action      actionConfig    `yaml:"action" json:"action"`
 
 	// A rule gives either a match and an action, or one recipe.
-	FailUpload      *failUploadConfig      `yaml:"fail_upload,omitempty" json:"fail_upload,omitempty"`
-	FailRandomly    *failRandomlyConfig    `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
-	CorruptDownload *corruptDownloadConfig `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
+	FailUpload          *failUploadConfig          `yaml:"fail_upload,omitempty" json:"fail_upload,omitempty"`
+	FailRandomly        *failRandomlyConfig        `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
+	CorruptDownload     *corruptDownloadConfig     `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
+	DenyAcknowledgement *denyAcknowledgementConfig `yaml:"deny_acknowledgement,omitempty" json:"deny_acknowledgement,omitempty"`
 }
 
 type triggerConfig struct {

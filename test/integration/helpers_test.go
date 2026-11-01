@@ -263,6 +263,29 @@ func startRuns(tb testing.TB, opts runs.Options) (*runs.Manager, *server) {
 	return m, s
 }
 
+// scenarioOptions returns the options of runs whose first run injects the
+// faults of scenario, as sftpit serve --scenario does, from a configuration
+// with the test user and scenarios as its scenarios section.
+func scenarioOptions(t testing.TB, scenarios, scenario string) runs.Options {
+	t.Helper()
+	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
+	writeFile(t, configFile, []byte(`schema_version: 1
+users:
+  - name: `+testUser+`
+    password_env: TEST_PASSWORD
+scenarios:
+`+scenarios))
+	cfg, err := config.Load(config.Options{
+		ConfigFile: configFile,
+		Scenario:   scenario,
+		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed}
+}
+
 // testUsers are the users of a server: the test user, with a password and
 // the client key.
 func testUsers() []sshfront.User {

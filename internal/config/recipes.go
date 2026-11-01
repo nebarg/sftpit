@@ -66,14 +66,25 @@ type corruptDownloadConfig struct {
 	Length      *uint64  `yaml:"length,omitempty" json:"length,omitempty"`
 }
 
+// denyAcknowledgementConfig fails a consumer's acknowledgement of a file,
+// its remove or its rename into an archive, before the server acts, with
+// permission_denied unless a status is set.
+type denyAcknowledgementConfig struct {
+	scopeConfig `yaml:",inline"`
+	Occurrences []uint64 `yaml:"occurrences,flow,omitempty" json:"occurrences,omitempty"`
+	Probability *float64 `yaml:"probability,omitempty" json:"probability,omitempty"`
+	Status      string   `yaml:"status,omitempty" json:"status,omitempty"`
+}
+
 // expand returns rc with its recipe, if it has one, written in the long
 // form, and the recipe's name.
 func (rc ruleConfig) expand() (ruleConfig, string, error) {
 	var recipes []string
 	for name, set := range map[string]bool{
-		"fail_upload":      rc.FailUpload != nil,
-		"fail_randomly":    rc.FailRandomly != nil,
-		"corrupt_download": rc.CorruptDownload != nil,
+		"fail_upload":          rc.FailUpload != nil,
+		"fail_randomly":        rc.FailRandomly != nil,
+		"corrupt_download":     rc.CorruptDownload != nil,
+		"deny_acknowledgement": rc.DenyAcknowledgement != nil,
 	} {
 		if set {
 			recipes = append(recipes, name)
@@ -99,6 +110,8 @@ func (rc ruleConfig) expand() (ruleConfig, string, error) {
 		err = rc.FailRandomly.expand(&rc)
 	case rc.CorruptDownload != nil:
 		rc.CorruptDownload.expand(&rc)
+	case rc.DenyAcknowledgement != nil:
+		rc.DenyAcknowledgement.expand(&rc)
 	}
 	if err != nil {
 		return rc, "", fmt.Errorf("%s: %w", recipe, err)
@@ -148,6 +161,13 @@ func (c corruptDownloadConfig) expand(rc *ruleConfig) {
 	rc.Match.Attempt = attempts(c.Attempts)
 	rc.Decision = decision(c.Probability)
 	rc.Action = actionConfig{Type: "corrupt_download", Transform: c.Transform, Offset: c.Offset, Length: c.Length}
+}
+
+func (c denyAcknowledgementConfig) expand(rc *ruleConfig) {
+	rc.Match = c.match("remove", "rename")
+	rc.Match.Occurrence = c.Occurrences
+	rc.Decision = decision(c.Probability)
+	rc.Action = actionConfig{Type: "fail", When: "before", Status: cmp.Or(c.Status, "permission_denied")}
 }
 
 // attempts returns the attempt of a recipe that lists numbers, counted per

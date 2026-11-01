@@ -87,6 +87,19 @@ func TestRecipesCompileToTheirLongForm(t *testing.T) {
         decision: {scope: transfer, probability: 0.1}
         action: {type: corrupt_download, transform: truncate, offset: 100}`,
 		},
+		{
+			"a denied acknowledgement",
+			`deny_acknowledgement: {path_glob: /outgoing/*.csv, occurrences: [1]}`,
+			`match: {operation: [remove, rename], path_glob: /outgoing/*.csv, occurrence: [1]}
+        action: {type: fail, when: before, status: permission_denied}`,
+		},
+		{
+			"random denied acknowledgements with a status",
+			`deny_acknowledgement: {user: partner-b, filename: orders.csv, probability: 0.5, status: failure}`,
+			`match: {operation: [remove, rename], user: partner-b, filename: orders.csv}
+        decision: {probability: 0.5}
+        action: {type: fail, when: before, status: failure}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -140,6 +153,11 @@ func TestLoadRejectsInvalidRecipes(t *testing.T) {
 		{"a bad when", "fail_randomly: {operations: stat, probability: 0.5, when: during}", `fail_randomly: action: when "during" is not before or after`},
 		{"a corruption without a transform", "corrupt_download: {offset: 0}", "corrupt_download: action: transform is required: one of flip_bytes, omit_range, truncate"},
 		{"a corruption without an offset", "corrupt_download: {transform: truncate}", "corrupt_download: action: offset is required"},
+		{"an acknowledgement with an action", "deny_acknowledgement: {}\n        action: {type: fail, when: before, status: failure}", "a rule with the deny_acknowledgement recipe has no match, decision or action"},
+		{"no occurrences", "deny_acknowledgement: {occurrences: []}", "occurrence needs at least one number"},
+		{"a zero occurrence", "deny_acknowledgement: {occurrences: [0]}", "occurrence numbers count from 1"},
+		{"an acknowledgement denied with an unknown status", "deny_acknowledgement: {status: oops}", `deny_acknowledgement: action: status "oops" is not one of`},
+		{"an acknowledgement with a when", "deny_acknowledgement: {when: after}", "field when not found"},
 		{"a truncation with a length", "corrupt_download: {transform: truncate, offset: 0, length: 1}", "length does not apply to truncate"},
 	}
 	for _, tt := range tests {

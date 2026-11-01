@@ -173,6 +173,10 @@ faults:
       transform: "omit_range"
       offset: 1048576
       length: 4096
+  - id: "deny-ack"
+    deny_acknowledgement:
+      path_glob: "/outgoing/*.csv"
+      occurrences: [1]
 ```
 
 | Recipe | Long form | Fields |
@@ -180,8 +184,13 @@ faults:
 | `fail_upload` | A `partial_upload` cut off at `after_bytes`, whose `result` is `status` and `status` is `failure` unless set | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
 | `fail_randomly` | A `fail` of `operations` with `probability`, `when` `before` and `status` `failure` unless set | `operations`, `probability`, `status`, `when` |
 | `corrupt_download` | A `corrupt_download` | `attempts`, `probability`, `transform`, `offset`, `length` |
+| `deny_acknowledgement` | A `fail` of `remove` and `rename` before the server acts, with `permission_denied` unless `status` is set | `occurrences`, `probability`, `status` |
 
-`attempts` lists the opens a recipe selects, counted per user and path. `sftpit config explain` shows the long form of each recipe.
+`attempts` lists the opens a recipe selects, counted per user and path, and `occurrences` the matching requests, counting from 1. `sftpit config explain` shows the long form of each recipe.
+
+`deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. Laravel's sftp disk never hears of it: Flysystem's SFTP adapter ignores a failed remove, so `Storage::delete()` returns `true`, and only a consumer that remembers what it has processed avoids processing the file twice.
+
+Publishing over an existing file needs no recipe. A standard rename never replaces its target, so Flysystem's `move()` deletes the published file and renames again, and a `fail` on that second rename (`occurrence: [2]`) leaves no published file at all.
 
 A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial upload or corrupt download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
 

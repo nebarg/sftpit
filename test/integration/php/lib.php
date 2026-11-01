@@ -6,6 +6,8 @@ declare(strict_types=1);
 
 require __DIR__ . '/vendor/autoload.php';
 
+use Illuminate\Contracts\Filesystem\Filesystem;
+use Illuminate\Filesystem\FilesystemManager;
 use phpseclib3\Net\SFTP;
 
 // connect logs in with the script's arguments, and exits if the server's
@@ -48,6 +50,13 @@ function record(SFTP $sftp, string $op, mixed $result): void
     echo json_encode($line, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR), "\n";
 }
 
+// outcome prints the result of one step of a Laravel script as a line of
+// JSON.
+function outcome(string $op, mixed $result): void
+{
+    echo json_encode(['op' => $op, 'result' => $result], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR), "\n";
+}
+
 // attempt returns what $operation returns, or the exception it throws.
 function attempt(callable $operation): mixed
 {
@@ -61,4 +70,34 @@ function attempt(callable $operation): mixed
 function digest(string|false $data): string|false
 {
     return $data === false ? false : strlen($data) . ' ' . hash('sha256', $data);
+}
+
+// sftpDisk returns Laravel's sftp disk, as config/filesystems.php would
+// declare it, on a connection of its own, as Storage::disk() does after
+// Storage::forgetDisk(). It keeps Laravel's default of returning false from
+// a failed operation rather than throwing.
+function sftpDisk(string $host, string $port, string $user, string $password, string $hostKeysFile): Filesystem
+{
+    return (new FilesystemManager(null))->createSftpDriver([
+        'driver' => 'sftp',
+        'host' => $host,
+        'port' => (int) $port,
+        'username' => $user,
+        'password' => $password,
+        'hostFingerprint' => fingerprints($hostKeysFile),
+        'timeout' => 10,
+        'throw' => false,
+    ]);
+}
+
+// fingerprints returns the SHA-256 fingerprints of the host keys in
+// $hostKeysFile, in the form Flysystem's hostFingerprint option accepts.
+function fingerprints(string $hostKeysFile): array
+{
+    $fingerprints = [];
+    foreach (file($hostKeysFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        $blob = base64_decode(explode(' ', $line)[1], true);
+        $fingerprints[] = 'sha256:' . base64_encode(hash('sha256', $blob, true));
+    }
+    return $fingerprints;
 }

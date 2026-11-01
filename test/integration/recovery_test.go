@@ -1,7 +1,9 @@
 package integration
 
 import (
+	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -10,9 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
@@ -168,14 +168,7 @@ func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
 	// slowed down, snapshots it.
 	php := phpseclibOrSkip(t)
 
-	dir := t.TempDir()
-	configFile := filepath.Join(dir, "sftpit.yaml")
-	writeFile(t, configFile, []byte(`schema_version: 1
-users:
-  - name: `+testUser+`
-    password_env: TEST_PASSWORD
-scenarios:
-  upload-recovery:
+	opts := scenarioOptions(t, `  upload-recovery:
     faults:
       - id: first-upload-cutoff
         match:
@@ -190,17 +183,10 @@ scenarios:
           cutoff_offset: `+strconv.Itoa(uploadCutoff)+`
           result: status
           status: failure
-`))
-	cfg, err := config.Load(config.Options{
-		ConfigFile: configFile,
-		Scenario:   "upload-recovery",
-		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+`, "upload-recovery")
 	var logs capturedLog
-	_, srv := startRuns(t, runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed, Logger: logs.logger()})
+	opts.Logger = logs.logger()
+	_, srv := startRuns(t, opts)
 	work := t.TempDir()
 	data := randomBytes(4<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
@@ -219,6 +205,70 @@ scenarios:
 	}
 	if fired := `msg="rule fired" rule=first-upload-cutoff operation=open_write path=` + temporaryPath + ` user=` + testUser + ` ordinal=1`; !strings.Contains(logs.text(), fired) {
 		t.Errorf("logs lack %s:\n%s", fired, logs.text())
+	}
+}
+
+// TestLaravelRepublishLosesThePublishedFile has a Laravel application
+// publish orders.csv over an earlier version, with the rename that follows
+// Flysystem's delete failing. A standard rename never replaces its target,
+// so Flysystem's move() deletes the published file and renames again, and
+// when that rename fails the published file is gone. The debug log records
+// the order of the requests on the published file and their results.
+func TestLaravelRepublishLosesThePublishedFile(t *testing.T) {
+	t.Parallel()
+	php := phpseclibOrSkip(t)
+
+	seed := t.TempDir()
+	previous := randomBytes(64<<10 + 123)
+	if err := os.Mkdir(filepath.Join(seed, "incoming"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seed, filepath.FromSlash(publishedPath)), previous)
+	opts := scenarioOptions(t, `  republish:
+    faults:
+      - id: fail-rename-after-delete
+        match:
+          operation: rename
+          source: `+temporaryPath+`
+          target: `+publishedPath+`
+          occurrence: [2]
+        action: {type: fail, when: before, status: failure}
+`, "republish")
+	var logs capturedLog
+	opts.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	opts.SeedDir = seed
+	_, srv := startRuns(t, opts)
+	work := t.TempDir()
+	data := randomBytes(1<<20 + 321)
+	writeFile(t, filepath.Join(work, "orders.csv"), data)
+
+	outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	srv.waitForSessions()
+
+	if want := map[string]any{"upload 1": true, "move": false}; !maps.Equal(outcomes, want) {
+		t.Errorf("publish.php gave %v, want %v", outcomes, want)
+	}
+	var got []string
+	for l := range strings.Lines(connID.ReplaceAllString(logs.text(), "conn=N ")) {
+		if strings.Contains(l, " path="+publishedPath+" ") || strings.Contains(l, " target="+publishedPath+" ") {
+			_, l, _ = strings.Cut(l, " msg=")
+			got = append(got, strings.TrimSpace(l))
+		}
+	}
+	user := "conn=N user=" + testUser
+	want := []string{
+		`"sftp request" ` + user + ` request=SSH_FXP_RENAME path=` + temporaryPath + ` target=` + publishedPath + ` result=SSH_FX_FAILURE`,
+		`"sftp request" ` + user + ` request=SSH_FXP_STAT path=` + publishedPath + ` result=SSH_FXP_ATTRS`,
+		`"sftp request" ` + user + ` request=SSH_FXP_REMOVE path=` + publishedPath + ` result=SSH_FX_OK`,
+		`"injected fault" ` + user + ` request=SSH_FXP_RENAME path=` + temporaryPath + ` target=` + publishedPath + ` fault=fail when=before status=SSH_FX_FAILURE`,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("requests on %s:\n%s\nwant\n%s", publishedPath, strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	assertHolds(t, srv, publishedPath, nil)
+	assertHolds(t, srv, temporaryPath, data)
+	if got, want := srv.counts(t, "fail-rename-after-delete"), (faults.Counts{Matched: 2, Selected: 1, Fired: 1}); got != want {
+		t.Errorf("counts = %+v, want both renames matched and the second failed", got)
 	}
 }
 
@@ -260,13 +310,7 @@ func TestLaravelUploadRecoveryFromAResetMidUpload(t *testing.T) {
 	t.Parallel()
 	php := phpseclibOrSkip(t)
 
-	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeFile(t, configFile, []byte(`schema_version: 1
-users:
-  - name: `+testUser+`
-    password_env: TEST_PASSWORD
-scenarios:
-  reset-mid-upload:
+	opts := scenarioOptions(t, `  reset-mid-upload:
     faults:
       - id: slow-start
         match: {operation: write, path: `+temporaryPath+`}
@@ -276,17 +320,10 @@ scenarios:
         match: {operation: write, path: `+temporaryPath+`, attempt: {numbers: [1]}}
         trigger: {at: 500ms, anchor: transfer}
         action: {type: close_connection, mode: rst}
-`))
-	cfg, err := config.Load(config.Options{
-		ConfigFile: configFile,
-		Scenario:   "reset-mid-upload",
-		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+`, "reset-mid-upload")
 	var logs capturedLog
-	_, srv := startRuns(t, runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed, Logger: logs.logger()})
+	opts.Logger = logs.logger()
+	_, srv := startRuns(t, opts)
 	work := t.TempDir()
 	data := randomBytes(4<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
@@ -322,28 +359,15 @@ func TestLaravelReconnectsWhenItsFirstLoginsAreCutOff(t *testing.T) {
 	t.Parallel()
 	php := phpseclibOrSkip(t)
 
-	configFile := filepath.Join(t.TempDir(), "sftpit.yaml")
-	writeFile(t, configFile, []byte(`schema_version: 1
-users:
-  - name: `+testUser+`
-    password_env: TEST_PASSWORD
-scenarios:
-  cut-off-logins:
+	opts := scenarioOptions(t, `  cut-off-logins:
     faults:
       - id: first-logins
         match: {operation: authenticate, user: `+testUser+`, occurrence: [1, 2, 3, 4]}
         action: {type: close_connection}
-`))
-	cfg, err := config.Load(config.Options{
-		ConfigFile: configFile,
-		Scenario:   "cut-off-logins",
-		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+`, "cut-off-logins")
 	var logs capturedLog
-	_, srv := startRuns(t, runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed, Logger: logs.logger()})
+	opts.Logger = logs.logger()
+	_, srv := startRuns(t, opts)
 	work := t.TempDir()
 	data := randomBytes(1<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
