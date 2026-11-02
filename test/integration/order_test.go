@@ -48,7 +48,7 @@ func TestClientsTolerateOutOfOrderReplies(t *testing.T) {
 			t.Run(c.name+"/"+d.name, func(t *testing.T) {
 				t.Parallel()
 				hold := &firstReplyHold{write: upload}
-				srv := startServer(t, proxied, sftpproxy.Options{Faults: hold.faults, ReplyOrder: sftpproxy.CompletionOrder})
+				srv := startServer(t, proxied, sftpproxy.Options{Faults: faultsOf(hold.faults), ReplyOrder: sftpproxy.CompletionOrder})
 				work := t.TempDir()
 				source, result := srv.path("/orders.csv"), filepath.Join(work, "orders.csv")
 				if upload {

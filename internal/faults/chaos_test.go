@@ -111,7 +111,7 @@ func TestChaosThatCannotApplyIsRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := faults.New(nil, &tt.chaos, testSeed, nil); err == nil || !strings.HasPrefix(err.Error(), "faults: "+tt.err) {
+			if _, err := faults.New(nil, &tt.chaos, testSeed, faults.Options{}); err == nil || !strings.HasPrefix(err.Error(), "faults: "+tt.err) {
 				t.Errorf("New = %v, want an error about %q", err, tt.err)
 			}
 			e := newEngine(t)
@@ -128,7 +128,7 @@ func TestChaosThatCannotApplyIsRefused(t *testing.T) {
 func TestChaosIsTriedAfterTheScenariosOwnRules(t *testing.T) {
 	last := faults.Rule{ID: "last", Priority: 9, Match: stat, Action: denied}
 	chaos := &faults.Chaos{Preset: faults.Heavy}
-	e, err := faults.New([]faults.Rule{last}, chaos, testSeed, slog.New(slog.DiscardHandler))
+	e, err := faults.New([]faults.Rule{last}, chaos, testSeed, faults.Options{Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestPausedChaosMatchesNothingAndKeepsItsCounts(t *testing.T) {
 	paused := &faults.Chaos{Preset: faults.Light, Scope: f, Paused: true}
 	running := &faults.Chaos{Preset: faults.Light, Scope: f}
 	// The run starts without chaos, so that a change adds it.
-	e, err := faults.New([]faults.Rule{deny}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	e, err := faults.New([]faults.Rule{deny}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestPausedChaosMatchesNothingAndKeepsItsCounts(t *testing.T) {
 func TestAMomentThatChaosChoseDoesNotComeWhilePaused(t *testing.T) {
 	var logs bytes.Buffer
 	heavy := &faults.Chaos{Preset: faults.Heavy}
-	e, err := faults.New(nil, heavy, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	e, err := faults.New(nil, heavy, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}

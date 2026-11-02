@@ -174,14 +174,14 @@ func failedPhpseclibUpload(t *testing.T, srv *server, work string) string {
 
 // onFirstUpload returns faults that apply action to the first OPEN of
 // /orders.csv, so that a retry succeeds.
-func onFirstUpload(action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
+func onFirstUpload(action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
 	var applied atomic.Bool
-	return func(r sftpproxy.Request) sftpproxy.Action {
+	return faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 		if _, ok := r.Packet.(*sftpwire.Open); ok && r.Path == "/orders.csv" && applied.CompareAndSwap(false, true) {
 			return action
 		}
 		return nil
-	}
+	})
 }
 
 // TestCorruptedUploadsAreTheSameForEveryClient uploads a file through each
@@ -227,12 +227,12 @@ func TestCorruptedUploadsAreTheSameForEveryClient(t *testing.T) {
 				t.Run(c.name+"/"+order.String()+"/"+tt.corruption.Corruption.String(), func(t *testing.T) {
 					var logs capturedLog
 					srv := startServer(t, proxied, sftpproxy.Options{
-						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+						Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 							if open, ok := r.Packet.(*sftpwire.Open); ok && r.Path == "/orders.csv" && open.Flags&sftpwire.OpenWrite != 0 {
 								return tt.corruption
 							}
 							return nil
-						},
+						}),
 						ReplyOrder: order,
 						Logger:     logs.logger(),
 					})

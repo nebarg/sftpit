@@ -65,16 +65,16 @@ func TestAListenerDownDrawsItsDurationForEachConnectionAndTransfer(t *testing.T)
 
 func TestAListenerDownAtLogin(t *testing.T) {
 	e := newEngine(t, faults.Rule{ID: "outage", MaxTriggers: 1, Match: faults.Match{Operations: ops(faults.Authenticate)}, Action: outage})
-	if got := e.Authenticate(faults.Client{User: "test"}); got != outage {
+	if got := e.Authenticate(faults.Client{User: "test"}).Action; got != outage {
 		t.Errorf("the first login got %#v, want %#v", got, outage)
 	}
-	if got := e.Authenticate(faults.Client{User: "test"}); got != nil {
+	if got := e.Authenticate(faults.Client{User: "test"}).Action; got != nil {
 		t.Errorf("the second login got %#v, want nothing once max_triggers is used up", got)
 	}
 }
 
 func TestARunWideOutageMatchesNoUser(t *testing.T) {
-	_, err := faults.New([]faults.Rule{{ID: "r", Match: faults.Match{User: "test"}, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: outage}}, nil, testSeed, nil)
+	_, err := faults.New([]faults.Rule{{ID: "r", Match: faults.Match{User: "test"}, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: outage}}, nil, testSeed, faults.Options{})
 	if want := "a listener_down at a moment of the run takes the listener down for everyone, so it matches no user or key"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("New = %v, want an error about %q", err, want)
 	}

@@ -2,6 +2,7 @@ package sftpproxy
 
 import (
 	"fmt"
+	"log/slog"
 	"path"
 
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -24,12 +25,16 @@ func (s *session) rewriteEntries(req *request, p sftpwire.Packet) (emptied bool,
 			continue
 		}
 		name := path.Join(req.path, e.Filename)
-		switch a := s.faults(Request{Packet: req.packet, Path: name, Entry: true}).(type) {
+		f := s.faults(Request{Packet: req.packet, Path: name, Entry: true})
+		if f.Action != nil {
+			req.rule = f.Rule
+		}
+		switch a := f.Action.(type) {
 		case nil:
 		case WrongSize:
 			s.resize(req, name, a, &e.Attrs, &e.Longname)
 		case Hide:
-			s.logger.Info("injected fault", "request", operation(req.packet), "path", name, "fault", "hide")
+			s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", "hide")
 			continue
 		default:
 			return false, fmt.Errorf("sftpproxy: a %T fault cannot apply to a READDIR entry", a)
@@ -58,7 +63,7 @@ func (s *session) readOn(req *request) {
 		s.sendMu.Lock()
 		defer s.sendMu.Unlock()
 		if s.isHalted() {
-			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(sftpwire.StatusEOF))})
+			s.answer(req.reply, replyTo(req, status(sftpwire.StatusEOF)))
 			s.answered()
 			return
 		}

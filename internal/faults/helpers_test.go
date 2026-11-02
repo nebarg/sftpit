@@ -36,7 +36,7 @@ func on(p sftpwire.Packet, path string) sftpproxy.Request {
 
 func newEngine(t *testing.T, rules ...faults.Rule) *faults.Engine {
 	t.Helper()
-	e, err := faults.New(rules, nil, testSeed, slog.New(slog.DiscardHandler))
+	e, err := faults.New(rules, nil, testSeed, faults.Options{Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -46,7 +46,12 @@ func newEngine(t *testing.T, rules ...faults.Rule) *faults.Engine {
 // session returns the faults of a session of user, logged in with key, or
 // with a password if key is "".
 func session(e *faults.Engine, user, key string) func(sftpproxy.Request) sftpproxy.Action {
-	return e.Session(faults.Client{User: user, KeyFingerprint: key}).Decide
+	return actions(e.Session(faults.Client{User: user, KeyFingerprint: key}))
+}
+
+// actions returns the action s decides for each request, without its rule.
+func actions(s *faults.Session) func(sftpproxy.Request) sftpproxy.Action {
+	return func(r sftpproxy.Request) sftpproxy.Action { return s.Decide(r).Action }
 }
 
 // unreleased returns a without the release that the engine gives a delay,

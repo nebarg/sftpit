@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -84,4 +85,11 @@ func (s *session) takeSnapshot(path, closedBy string) {
 		attrs = append(attrs, "copy", snap.Copy)
 	}
 	s.logger.Info("snapshot", attrs...)
+	if s.record != nil {
+		reason := closedBy
+		if closedBy == closedBySessionEnd {
+			reason = "session_ended"
+		}
+		s.record(events.Event{Kind: events.Snapshotted, Path: path, Reason: reason, Snapshot: snap.Copy})
+	}
 }

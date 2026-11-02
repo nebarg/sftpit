@@ -53,10 +53,10 @@ func TestReadOnlyRefusesChangesBeforeFaults(t *testing.T) {
 				var asked atomic.Int32
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
 					ReadOnly: tt.readOnly,
-					Faults: func(sftpproxy.Request) sftpproxy.Action {
+					Faults: faultsOf(func(sftpproxy.Request) sftpproxy.Action {
 						asked.Add(1)
 						return nil
-					},
+					}),
 					Logger: logs.logger(),
 				})
 

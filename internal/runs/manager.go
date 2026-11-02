@@ -10,12 +10,14 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -37,7 +39,14 @@ var (
 	// ErrTwoScenarios reports a reset that both names a scenario and gives
 	// an inline one.
 	ErrTwoScenarios = errors.New("a reset names a scenario or gives one inline, not both")
+
+	// ErrUnknownRun reports a run that is neither current nor among the
+	// recent runs whose events the Manager keeps.
+	ErrUnknownRun = errors.New("unknown run")
 )
+
+// maxEvents bounds the events kept for each run.
+const maxEvents = 10000
 
 // Options configure a Manager.
 type Options struct {
@@ -91,15 +100,24 @@ type Manager struct {
 	resetting sync.Mutex
 	closed    bool
 
-	// mu guards current, inReset and failed. current also changes only
-	// while resetting is held, so code holding resetting reads it without
-	// mu.
+	// mu guards current, inReset, failed and recent. current also changes
+	// only while resetting is held, so code holding resetting reads it
+	// without mu.
 	mu      sync.Mutex
 	current *activeRun
+	// recent holds the events of the runs the workspace keeps, the current
+	// run's last.
+	recent []recentRun
 	// inReset is set while a reset is under way, and failed once one has
 	// failed, until another succeeds.
 	inReset bool
 	failed  error
+}
+
+// recentRun is the events of a run.
+type recentRun struct {
+	id     string
+	events *events.Recorder
 }
 
 // activeRun is a run that a Manager serves.
@@ -107,6 +125,7 @@ type activeRun struct {
 	run     *Run
 	root    *os.Root
 	rules   *faults.Engine
+	events  *events.Recorder
 	handler sshfront.Handler
 	hooks   sshfront.Hooks
 
@@ -153,7 +172,8 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if m.current, err = m.begin(first); err != nil {
 		return nil, err
 	}
-	m.current.stops = append(m.current.stops, armTimers(m.current.rules.Timers(), m.srv, logger))
+	m.keep(m.current)
+	m.current.stops = append(m.current.stops, armTimers(m.current.rules.Timers(), m.srv, logger, m.current.events.Record))
 	return m, nil
 }
 
@@ -240,6 +260,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 		m.failed = err
 	} else {
 		m.current, m.failed = next, nil
+		m.keep(next)
 	}
 	m.mu.Unlock()
 	if err != nil {
@@ -250,12 +271,13 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 		return Status{}, err
 	}
 
+	current.events.Close()
 	if err := current.root.Close(); err != nil {
 		m.logger.Warn("closing the files of the previous run failed", "run", current.run.ID, "err", err)
 	}
 	// An outage at the start of the run begins before any client is
 	// admitted.
-	next.stops = append(next.stops, armTimers(next.rules.Timers(), m.srv, m.logger))
+	next.stops = append(next.stops, armTimers(next.rules.Timers(), m.srv, m.logger, next.events.Record))
 	m.srv.Resume()
 	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(chosen.scenario)...)...)
 	return m.Status(), nil
@@ -293,8 +315,14 @@ func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, 
 	if err != nil {
 		return faults.RuleSet{}, err
 	}
-	current.stops = append(current.stops, armTimers(timers, m.srv, m.logger))
-	return current.rules.Rules(), nil
+	current.stops = append(current.stops, armTimers(timers, m.srv, m.logger, current.events.Record))
+	set := current.rules.Rules()
+	if changed, err := rulesOf(set, revision); err != nil {
+		m.logger.Warn("recording the change of rules failed", "run", run, "err", err)
+	} else {
+		current.events.Record(events.Event{Kind: events.RulesChanged, Rules: changed})
+	}
+	return set, nil
 }
 
 // ReleaseStalls releases the stalls and freezes in progress in run, which
@@ -307,6 +335,41 @@ func (m *Manager) ReleaseStalls(run string) error {
 	}
 	current.rules.ReleaseStalls()
 	return nil
+}
+
+// Events returns the events of run, the current run or one of the recent
+// runs the workspace keeps, or else fails with ErrUnknownRun. The events of
+// a run that has ended are closed.
+func (m *Manager) Events(run string) (*events.Recorder, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.recent {
+		if r.id == run {
+			return r.events, nil
+		}
+	}
+	return nil, fmt.Errorf("runs: %w %s", ErrUnknownRun, run)
+}
+
+// keep adds the events of a, which has become current, to the recent runs,
+// forgetting the oldest beyond those the workspace keeps. m.mu must be
+// held, or m not yet shared.
+func (m *Manager) keep(a *activeRun) {
+	m.recent = append(m.recent, recentRun{id: a.run.ID, events: a.events})
+	if len(m.recent) > keptRuns {
+		m.recent = slices.Delete(m.recent, 0, len(m.recent)-keptRuns)
+	}
+}
+
+// rulesOf describes set, the rules of a run, which replaced the revision
+// previous, if any, for an event.
+func rulesOf(set faults.RuleSet, previous uint64) (*events.Rules, error) {
+	r := &events.Rules{Revision: set.Revision, Previous: previous}
+	var err error
+	if r.Faults, err = config.RulesJSON(set.Rules); err == nil && set.Chaos != nil {
+		r.Chaos, err = config.ChaosJSON(set.Chaos)
+	}
+	return r, err
 }
 
 // Users returns the users that the Manager's server accepts, which rules
@@ -356,12 +419,17 @@ type Status struct {
 
 	// Err is why the last reset failed, in StateUnavailable.
 	Err error
+
+	// Stalled counts the requests or replies that stalls hold now, and
+	// Frozen the connections that freezes hold.
+	Stalled, Frozen int
 }
 
 // Status describes the current run.
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision()}
+	s.Stalled, s.Frozen = m.current.events.Waiting("stall"), m.current.events.Waiting("freeze_connection")
 	switch {
 	case m.inReset:
 		s.State = StateResetting
@@ -485,16 +553,24 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 
 	// A run without a scenario has an engine too, for rules applied to it
 	// later.
-	rules, err := faults.New(chosen.rules, chosen.chaos, chosen.scenario.Seed, m.logger)
+	rec := events.NewRecorder(run.Started, maxEvents)
+	rules, err := faults.New(chosen.rules, chosen.chaos, chosen.scenario.Seed, faults.Options{Logger: m.logger, Record: rec.Record})
 	if err != nil {
 		return nil, err
 	}
+	started, err := rulesOf(rules.Rules(), 0)
+	if err != nil {
+		return nil, err
+	}
+	s := chosen.scenario
+	rec.Record(events.Event{Kind: events.RunStarted, Run: &events.Run{ID: run.ID, Scenario: s.Name, Inline: s.Inline, Seed: strconv.FormatUint(uint64(s.Seed), 10), Pinned: s.Pinned}, Rules: started})
 	return &activeRun{
 		run:        run,
 		root:       root,
 		rules:      rules,
-		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger}),
-		hooks:      connectionHooks(rules, m.logger),
+		events:     rec,
+		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger, Record: rec.Record}),
+		hooks:      connectionHooks(rules, m.logger, rec.Record),
 		startRules: chosen.rules,
 		startChaos: chosen.chaos,
 	}, nil
@@ -520,6 +596,9 @@ func (m *Manager) hooks() sshfront.Hooks {
 		},
 		Authenticate: func(ctx context.Context, conn *sshfront.Conn) {
 			m.active().hooks.Authenticate(ctx, conn)
+		},
+		Disconnect: func(conn *sshfront.Conn) {
+			m.active().hooks.Disconnect(conn)
 		},
 	}
 }

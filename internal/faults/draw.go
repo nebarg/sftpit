@@ -122,8 +122,13 @@ func appendString(b []byte, s string) []byte {
 // d. It never fires when p is 0 or less, and always fires when p is 1 or
 // more.
 func (d Draw) Fires(p float64) bool {
-	// The top 53 bits of d, as a fraction of 2⁵³, are exact in a float64.
-	return float64(d>>11)*0x1p-53 < p
+	return d.Fraction() < p
+}
+
+// Fraction returns d as a fraction from 0 up to 1: its top 53 bits, as a
+// fraction of 2⁵³, which a float64 holds exactly.
+func (d Draw) Fraction() float64 {
+	return float64(d>>11) * 0x1p-53
 }
 
 // Between returns the value that d picks from the range [lo, hi]. The values

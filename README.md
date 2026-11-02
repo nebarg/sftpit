@@ -389,6 +389,7 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 | `GET /api/v1/runs/{id}/rules` | the run's rules and chaos, their revision and what each rule has done |
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 | `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
+| `GET /api/v1/runs/{id}/events` | what happened in the run, [page by page or as it happens](#events) |
 
 ```bash
 curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
@@ -399,11 +400,11 @@ curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
 {
   "sftp": { "state": "up" },
   "backend": "embedded",
-  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1 }
+  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0 }
 }
 ```
 
-The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules.
+The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold.
 
 **A reset:**
 - **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
@@ -447,7 +448,7 @@ It answers as `GET` on the same route does, with the rules' revision, the run's 
       "action": { "type": "partial_upload", "cutoff_offset": 1048576, "result": "status", "status": "failure" }
     }
   ],
-  "counts": { "first-upload-cutoff": { "matched": 0, "selected": 0, "fired": 0 } }
+  "counts": { "first-upload-cutoff": { "matched": 0, "selected": 0, "fired": 0, "canceled": 0 } }
 }
 ```
 
@@ -455,13 +456,62 @@ It answers as `GET` on the same route does, with the rules' revision, the run's 
 - **Chaos** is replaced as the rules are: a change without `chaos` ends it, and one that only sets `paused` pauses or resumes it, keeping its rules' counts.
 - **A rule that carries on**, with the same ID and definition, keeps its counts, attempts, occurrences and moments.
 - **Any other rule starts from the change.** Its first attempt is the next open, a trigger anchored to the run measures from the change, and its random decisions differ from those of an earlier rule with the same ID.
-- **A rule that goes** releases what it holds: a delayed request or reply goes on, and a frozen connection is closed. None of its moments come. A transfer it chose keeps its partial upload or corruption, so a download is never corrupted only in part, and an outage it started runs its course.
+- **A rule that goes** releases what it holds: a delayed request or reply goes on, and a frozen connection is closed. Each counts as `canceled`. None of its moments come. A transfer it chose keeps its partial upload or corruption, so a download is never corrupted only in part, and an outage it started runs its course.
 - **Sessions already open** get the new rules from their next request, and a connection action at a moment of the run or the connection reaches them too.
 - **A reset** starts the next run with its scenario's rules, whatever changed during this one. Use a reset when a test needs a clean start that it can repeat.
 
 ### Releasing stalls
 
 `POST /api/v1/runs/{id}/release-stalls` releases every stall and frozen connection of the run that is in progress, whichever rule chose it: a stalled request or reply goes on, and a frozen connection is closed, as at its limit. A stall that begins later holds as usual, and a delay runs its course. Each release is logged as `fault released`. A run that is no longer current is refused with status 409.
+
+### Events
+
+Each run records what happens in it, numbered from 1, and the API keeps the latest 10,000 events of each of the last five runs in memory. `GET /api/v1/runs/{id}/events` answers with a page of them, oldest first:
+
+```bash
+curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/events?kind=fault,operation&path=/incoming/orders.csv.part'
+```
+
+```json
+{
+  "events": [
+    {
+      "id": 41, "time": "2026-10-24T19:25:41.203911Z", "elapsed_ms": 2526.418, "kind": "fault",
+      "connection": 3, "user": "test", "request": "SSH_FXP_WRITE", "request_id": 37, "path": "/incoming/orders.csv.part",
+      "rule": "first-upload-cutoff", "fault": { "type": "fail", "when": "after", "settings": { "cutoff": 1048576, "offset": 1015808, "status": "SSH_FX_FAILURE" } }
+    },
+    {
+      "id": 42, "time": "2026-10-24T19:25:41.204120Z", "elapsed_ms": 2526.627, "kind": "operation",
+      "connection": 3, "user": "test", "request": "SSH_FXP_WRITE", "request_id": 37, "path": "/incoming/orders.csv.part",
+      "reply": "SSH_FX_FAILURE", "backend_reply": "SSH_FX_OK", "duration_ms": 0.402, "rule": "first-upload-cutoff"
+    }
+  ],
+  "first_id": 1,
+  "next": 58
+}
+```
+
+The kinds of event:
+
+| Kind | Records |
+|---|---|
+| `run_started` | the run's ID, scenario and seed, and the rules and chaos it starts with |
+| `connected`, `authenticated`, `disconnected` | each connection as it is accepted, logs in and ends, with the user and, for a key, its fingerprint |
+| `operation` | each request once its client has the reply: the `reply`, what the backend answered as `backend_reply` if the request reached it, how long it took, the `rule` whose fault acted on it, and the `read_only` path that refused it |
+| `transfer` | the reads and writes through a file handle, summed once it is closed or its session ends |
+| `fault` | each fault as it takes effect, with its rule, type, when it acts and its settings |
+| `fault_ended` | the end of a delay, stall or freeze: `elapsed`, `limit`, `released` by `release-stalls`, `canceled` by a change of rules, or `session_ended` |
+| `suppressed` | a fault whose rule did not inject it when its moment came: `removed`, `paused` or `max_triggers` |
+| `decision` | each random decision a rule drew from the seed, with its draw from 0 up to 1 and what it decided |
+| `rules_changed` | a change of the run's rules, with the revision it replaced and the new rules and chaos |
+| `snapshot` | a snapshot of a file that a faulted handle left behind, and what closed the handle |
+
+- **Reads and writes** that succeed and that no fault touches are summed into their handle's `transfer`, so a large upload is one event, not thousands. One that a fault touches, or that fails, is an `operation` of its own.
+- **A request whose reply never left**, because a fault closed the connection first, has no `operation`; its `fault` explains why.
+- **Filters:** `kind`, a list separated by commas, `connection`, `user`, `path`, which matches a rename's target too, and `rule`. `limit` sets the page size, 500 by default and at most 5000, and `after` the ID to continue after: the page's `next`. Events before `first_id` are gone.
+- **Live:** with `Accept: text/event-stream`, the same route streams the events as [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html), each with its ID, from `after` or the `Last-Event-ID` a browser sends when it reconnects. A `gap` event says that events it asked for are gone, and an `end` event that the run has ended, after which the next run's events are at its own route.
+
+The events are also the evidence for a run that has ended: a reset keeps them, along with the run's files. Unknown runs, and runs older than the last five, are answered with 404.
 
 ### In a test harness
 

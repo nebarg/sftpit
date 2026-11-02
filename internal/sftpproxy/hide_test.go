@@ -59,7 +59,7 @@ func TestHideLeavesOutTheReaddirEntriesFaultsChooses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var logs syncBuffer
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults: func(r sftpproxy.Request) sftpproxy.Action {
+			Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 				switch {
 				case r.Entry && (r.Path == "/d/b.csv" || r.Path == "/d" || r.Path == "/"):
 					return sftpproxy.Hide{}
@@ -67,7 +67,7 @@ func TestHideLeavesOutTheReaddirEntriesFaultsChooses(t *testing.T) {
 					return sftpproxy.WrongSize{Delta: -1024}
 				}
 				return nil
-			},
+			}),
 			Logger: logs.logger(),
 		})
 		openDir(t, p, fb, "/d")
@@ -93,12 +93,12 @@ func TestHideReadsOnPastAReplyWhoseEveryEntryItLeavesOut(t *testing.T) {
 		t.Run(order.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
-					Faults: func(r sftpproxy.Request) sftpproxy.Action {
+					Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 						if r.Entry && r.Path != "/d/c.csv" {
 							return sftpproxy.Hide{}
 						}
 						return nil
-					},
+					}),
 					ReplyOrder: order,
 				})
 				openDir(t, p, fb, "/d")
@@ -139,7 +139,7 @@ func TestHideReadsOnPastAReplyWhoseEveryEntryItLeavesOut(t *testing.T) {
 func TestHideAnswersEOFRatherThanReadOnPastADrop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults: func(r sftpproxy.Request) sftpproxy.Action {
+			Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 				switch {
 				case r.Entry:
 					return sftpproxy.Hide{}
@@ -147,7 +147,7 @@ func TestHideAnswersEOFRatherThanReadOnPastADrop(t *testing.T) {
 					return sftpproxy.Drop{}
 				}
 				return nil
-			},
+			}),
 		})
 		openDir(t, p, fb, "/d")
 

@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -90,11 +91,11 @@ func TestArmTimersStartsNoOutageOnceStopped(t *testing.T) {
 	moment := &faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Millisecond}
 	outage := faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.ListenerDown{Duration: time.Minute}}
 	for attempt := range 300 {
-		rules, err := faults.New([]faults.Rule{outage}, nil, 0, logger)
+		rules, err := faults.New([]faults.Rule{outage}, nil, 0, faults.Options{Logger: logger})
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}
-		stop := armTimers(rules.Timers(), srv, logger)
+		stop := armTimers(rules.Timers(), srv, logger, events.NewRecorder(time.Now(), 10).Record)
 		time.Sleep(time.Until(rules.Timers()[0].At))
 		stop()
 		fired := rules.Rules().Counts["outage"].Fired

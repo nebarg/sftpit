@@ -527,6 +527,27 @@ func nonLoopbackAddress(t *testing.T) string {
 	return ""
 }
 
+func TestServeRecordsEventsThatTheAPIServes(t *testing.T) {
+	s := startServe(t)
+	c := s.dial(t, "test", "test")
+	if _, err := c.Stat("/missing"); err == nil {
+		t.Fatal("Stat of a missing file succeeded")
+	}
+	// The event is recorded just after the client has its reply.
+	var ops []any
+	for deadline := time.Now().Add(startTimeout); len(ops) == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		page := requestJSON(t, "GET", "http://"+s.apiAddr+"/api/v1/runs/"+s.run+"/events?kind=operation&path=/missing", "")
+		ops, _ = page["events"].([]any)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("operations on /missing = %v, want the STAT", ops)
+	}
+	op := ops[0].(map[string]any)
+	if op["request"] != "SSH_FXP_STAT" || op["user"] != "test" || op["reply"] != "SSH_FX_NO_SUCH_FILE" || op["connection"] == nil {
+		t.Errorf("operation = %v, want test's STAT answered no such file", op)
+	}
+}
+
 // requestJSON makes a request to the control API, with the header that a
 // change needs, and decodes its JSON reply, which must be a success.
 func requestJSON(t *testing.T, method, url, body string) map[string]any {

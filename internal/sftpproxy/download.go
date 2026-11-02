@@ -1,7 +1,6 @@
 package sftpproxy
 
 import (
-	"context"
 	"log/slog"
 	"math"
 	"slices"
@@ -83,7 +82,7 @@ func (s *session) corrupt(req *request) bool {
 	if d.Corruption != Truncate {
 		attrs = append(attrs, "length", d.Length)
 	}
-	s.logger.Log(context.Background(), level, "injected fault", append(attrs, "offset", offset)...)
+	s.injected(req, level, append(attrs, "offset", offset)...)
 	return true
 }
 
@@ -184,7 +183,7 @@ func (s *session) cutRead(req *request) bool {
 		if !p.shortened {
 			p.shortened, level = true, slog.LevelInfo
 		}
-		s.logger.Log(context.Background(), level, "injected fault", "request", operation(r), "path", req.path, "fault", "partial_download", "cutoff", p.Cutoff, "offset", r.Offset, "length", r.Length)
+		s.injected(req, level, "request", operation(r), "path", req.path, "fault", "partial_download", "cutoff", p.Cutoff, "offset", r.Offset, "length", r.Length)
 		r.Length = uint32(p.Cutoff - r.Offset)
 		return true
 	}
@@ -193,6 +192,6 @@ func (s *session) cutRead(req *request) bool {
 		p.ended, level = true, slog.LevelInfo
 	}
 	req.action, req.cut, req.cutoff = withWhen(p.Result, Before), true, p.Cutoff
-	s.logger.Log(context.Background(), level, "injected fault", s.faultAttrs(req)...)
+	s.injected(req, level, s.faultAttrs(req)...)
 	return true
 }

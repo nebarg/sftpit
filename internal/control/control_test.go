@@ -27,7 +27,7 @@ func TestHealthReadinessAndStatus(t *testing.T) {
 	want := map[string]any{
 		"sftp":    map[string]any{"state": "up"},
 		"backend": "embedded",
-		"run":     map[string]any{"id": m.Status().Run.ID, "scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1},
+		"run":     map[string]any{"id": m.Status().Run.ID, "scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0},
 	}
 	if code != http.StatusOK || !equalJSON(body, want) {
 		t.Errorf("status = %d %v, want %v", code, body, want)
@@ -51,11 +51,11 @@ func TestResetStartsTheNextRun(t *testing.T) {
 		// leaves out.
 		fresh bool
 	}{
-		{"", map[string]any{"scenario": "chaos", "seed": "7", "seed_pinned": true, "revision": 1}, false},
-		{`{"seed": "8"}`, map[string]any{"scenario": "chaos", "seed": "8", "seed_pinned": true, "revision": 1}, false},
-		{`{"seed": 18446744073709551615}`, map[string]any{"scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1}, false},
-		{`{"scenario": "own", "seed": null}`, map[string]any{"scenario": "own", "seed": "9", "seed_pinned": true, "revision": 1}, false},
-		{`{"scenario": ""}`, map[string]any{"revision": 1}, true},
+		{"", map[string]any{"scenario": "chaos", "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0}, false},
+		{`{"seed": "8"}`, map[string]any{"scenario": "chaos", "seed": "8", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0}, false},
+		{`{"seed": 18446744073709551615}`, map[string]any{"scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0}, false},
+		{`{"scenario": "own", "seed": null}`, map[string]any{"scenario": "own", "seed": "9", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0}, false},
+		{`{"scenario": ""}`, map[string]any{"revision": 1, "stalled": 0, "frozen": 0}, true},
 	}
 	for _, tt := range tests {
 		before := m.Status().Run.ID
@@ -236,7 +236,7 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 	m, api := start(t, runs.Options{Scenario: "chaos"})
 	code, body := call(t, api, "POST", "/api/v1/reset", `{"faults": [`+denyStats+`], "seed": "7"}`)
 	run, _ := body["run"].(map[string]any)
-	if want := map[string]any{"id": m.Status().Run.ID, "inline": true, "seed": "7", "seed_pinned": true, "revision": 1}; code != http.StatusOK || !equalJSON(run, want) {
+	if want := map[string]any{"id": m.Status().Run.ID, "inline": true, "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0}; code != http.StatusOK || !equalJSON(run, want) {
 		t.Errorf("an inline reset = %d %v, want the run %v", code, body, want)
 	}
 	_, rules := call(t, api, "GET", "/api/v1/runs/"+m.Status().Run.ID+"/rules", "")

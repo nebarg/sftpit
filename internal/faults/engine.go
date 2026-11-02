@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
@@ -27,6 +28,7 @@ var ErrStaleRevision = errors.New("stale revision")
 type Engine struct {
 	seed   Seed
 	logger *slog.Logger
+	record func(events.Event)
 
 	mu sync.Mutex
 	// revision numbers the rules: 1 for those the run starts with, and one
@@ -129,18 +131,29 @@ type Counts struct {
 	Fired uint64
 }
 
+// Options configure an Engine.
+type Options struct {
+	// Logger receives the faults the engine injects and, at debug level,
+	// each random decision. Nil means slog.Default().
+	Logger *slog.Logger
+
+	// Record, if set, receives each random decision and each fault a rule
+	// did not inject when its moment came, as events. It must be safe for
+	// concurrent use, and must not block.
+	Record func(events.Event)
+}
+
 // New returns an engine for rules, and for chaos if it is set, for a run
-// that starts now. It draws its random decisions from seed and logs each
-// fault it injects to logger, or to slog.Default() if logger is nil. It logs
-// each random decision at debug level.
-func New(rules []Rule, chaos *Chaos, seed Seed, logger *slog.Logger) (*Engine, error) {
+// that starts now. It draws its random decisions from seed.
+func New(rules []Rule, chaos *Chaos, seed Seed, opts Options) (*Engine, error) {
+	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if err := check(rules, chaos); err != nil {
 		return nil, err
 	}
-	e := &Engine{seed: seed, logger: logger, revision: 1, chaos: chaos, sessions: make(map[*Session]struct{}), stalls: make(chan struct{})}
+	e := &Engine{seed: seed, logger: logger, record: opts.Record, revision: 1, chaos: chaos, sessions: make(map[*Session]struct{}), stalls: make(chan struct{})}
 	start := time.Now()
 	for i, r := range tried(rules, chaos) {
 		ru := newRule(r, 0, start)
@@ -203,7 +216,7 @@ func (e *Engine) runTimers(rules []*rule) []sftpproxy.Timer {
 		after := e.runMoment(ru)
 		action, drawn := e.drawn(ru, Key{Rule: ru.ID, Activation: ru.activation, Ordinal: 1})
 		attrs := append([]any{"rule", ru.ID, "anchor", Run, "at", after}, drawn...)
-		timers = append(timers, sftpproxy.Timer{At: ru.start.Add(after), Action: action, Reserve: e.reserveMoment(ru, attrs, nil)})
+		timers = append(timers, sftpproxy.Timer{At: ru.start.Add(after), Action: action, Reserve: e.reserveMoment(ru, attrs, nil), Rule: ru.ID})
 	}
 	return timers
 }
@@ -380,7 +393,17 @@ func (e *Engine) fires(r *rule, k Key) bool {
 	d := e.seed.Draw(k)
 	fires := d.Fires(*r.Probability)
 	e.logger.Debug("decision", "key", k, "draw", d, "probability", *r.Probability, "fires", fires)
+	e.decided(k, d, events.Decision{Probability: new(*r.Probability), Fired: &fires})
 	return fires
+}
+
+// decided records the decision k, which drew d, as an event.
+func (e *Engine) decided(k Key, d Draw, decision events.Decision) {
+	if e.record == nil {
+		return
+	}
+	decision.Operation, decision.Ordinal, decision.Choice, decision.Draw = k.Operation, k.Ordinal, k.Choice, d.Fraction()
+	e.record(events.Event{Kind: events.DecisionDrawn, Rule: k.Rule, User: k.User, Path: k.Path, Decision: &decision})
 }
 
 // action returns r's action for the request of the decision k, with any
@@ -495,6 +518,7 @@ func drawFrom[T ~int64 | ~uint64](e *Engine, k Key, choice string, r Range[T]) T
 	d := e.seed.Draw(k)
 	v := Between(d, r.Min, r.Max)
 	e.logger.Debug("decision", "key", k, "draw", d, "min", r.Min, "max", r.Max, "value", v)
+	e.decided(k, d, events.Decision{Value: fmt.Sprint(v)})
 	return v
 }
 
@@ -519,11 +543,11 @@ func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) fun
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		if r.isRemoved() {
-			e.logger.Info("rule suppressed", append(attrs, "reason", "removed")...)
+			e.suppressed(r, attrs, "removed")
 			return false
 		}
 		if e.paused(r) {
-			e.logger.Info("rule suppressed", append(attrs, "reason", "paused")...)
+			e.suppressed(r, attrs, "paused")
 			return false
 		}
 		if once != nil {
@@ -536,11 +560,30 @@ func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) fun
 	}
 }
 
+// suppressed logs and records that r did not inject the fault that attrs
+// describe when its moment came, for reason.
+func (e *Engine) suppressed(r *rule, attrs []any, reason string) {
+	e.logger.Info("rule suppressed", append(attrs, "reason", reason)...)
+	if e.record == nil {
+		return
+	}
+	ev := events.Event{Kind: events.Suppressed, Rule: r.ID, Reason: reason}
+	for i := 0; i+1 < len(attrs); i += 2 {
+		switch attrs[i] {
+		case "user":
+			ev.User, _ = attrs[i+1].(string)
+		case "path":
+			ev.Path, _ = attrs[i+1].(string)
+		}
+	}
+	e.record(ev)
+}
+
 // fire counts a firing of r and reports true, unless r has used up its
 // MaxTriggers. e.mu must be held.
 func (e *Engine) fire(r *rule, attrs []any) bool {
 	if r.spent() {
-		e.logger.Info("rule suppressed", append(attrs, "reason", "max_triggers")...)
+		e.suppressed(r, attrs, "max_triggers")
 		return false
 	}
 	r.counts.Fired++

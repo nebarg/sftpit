@@ -73,12 +73,12 @@ func TestCorruptDownloadServesOneFileHoweverItIsRead(t *testing.T) {
 			t.Run(order.String()+"/"+tt.name, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					p := startProxy(t, inMemoryBackend(t), sftpproxy.Options{
-						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+						Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 							if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite == 0 {
 								return tt.corruption
 							}
 							return nil
-						},
+						}),
 						ReplyOrder: order,
 					})
 					p.client.init(t, 3)
@@ -221,7 +221,7 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 					var seen []read
 					corruption := sftpproxy.CorruptDownload{Corruption: tt.corruption, Offset: at, Length: length}
 					p, fb := startProxyOnFake(t, sftpproxy.Options{
-						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+						Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 							switch p := r.Packet.(type) {
 							case *sftpwire.Open:
 								return corruption
@@ -229,7 +229,7 @@ func TestCorruptDownloadForwardsOnlyWhatItNeeds(t *testing.T) {
 								seen = append(seen, read{p.Offset, p.Length})
 							}
 							return nil
-						},
+						}),
 						ReplyOrder: order,
 						Logger:     logs.logger(),
 					})
@@ -411,7 +411,7 @@ func TestSplitReadIsAnsweredBeforeALaterDrop(t *testing.T) {
 		t.Run(order.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
-					Faults: func(r sftpproxy.Request) sftpproxy.Action {
+					Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 						switch r.Packet.(type) {
 						case *sftpwire.Open:
 							return sftpproxy.CorruptDownload{Corruption: sftpproxy.OmitRange, Offset: 100, Length: 50}
@@ -419,7 +419,7 @@ func TestSplitReadIsAnsweredBeforeALaterDrop(t *testing.T) {
 							return sftpproxy.Drop{}
 						}
 						return nil
-					},
+					}),
 					ReplyOrder: order,
 				})
 				openForDownload(t, p, fb)

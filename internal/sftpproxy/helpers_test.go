@@ -368,27 +368,33 @@ func (fb *fakeBackend) assertNoRequest(t *testing.T) {
 }
 
 // onPath returns faults that apply action to every request on path.
-func onPath(path string, action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
+func onPath(path string, action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
+	return faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 		if r.Path == path {
 			return action
 		}
 		return nil
-	}
+	})
 }
 
 // inSequence returns faults that apply actions to requests in the order
 // they arrive: the first action to the first request, and so on. A nil
 // action, or a request beyond the last, gets no fault.
-func inSequence(actions ...sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
+func inSequence(actions ...sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
 	var n int
-	return func(sftpproxy.Request) sftpproxy.Action {
+	return faultsOf(func(sftpproxy.Request) sftpproxy.Action {
 		n++
 		if n > len(actions) {
 			return nil
 		}
 		return actions[n-1]
-	}
+	})
+}
+
+// faultsOf adapts choose, which chooses an action for each request, to
+// Options.Faults, as faults that no rule chose.
+func faultsOf(choose func(sftpproxy.Request) sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
+	return func(r sftpproxy.Request) sftpproxy.Fault { return sftpproxy.Fault{Action: choose(r)} }
 }
 
 func assertPaths(t *testing.T, reqs []backendRequest, paths ...string) {
@@ -503,13 +509,13 @@ func equalReplies(a, b sftpwire.Packet) bool {
 }
 
 // on returns faults that apply action to every request of type P.
-func on[P sftpwire.Packet](action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
+func on[P sftpwire.Packet](action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
+	return faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 		if _, ok := r.Packet.(P); ok {
 			return action
 		}
 		return nil
-	}
+	})
 }
 
 // inMemoryBackend serves pkg/sftp's in-memory filesystem over a pipe and

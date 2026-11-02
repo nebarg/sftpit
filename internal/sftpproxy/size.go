@@ -1,6 +1,7 @@
 package sftpproxy
 
 import (
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -26,7 +27,7 @@ func (s *session) resize(req *request, name string, w WrongSize, attrs *sftpwire
 	if longname != nil {
 		*longname = withSize(*longname, actual, attrs.Size)
 	}
-	s.logger.Info("injected fault", "request", operation(req.packet), "path", name, "fault", "wrong_size", "actual", actual, "reported", attrs.Size)
+	s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", "wrong_size", "actual", actual, "reported", attrs.Size)
 }
 
 // withSize returns longname with its size field changed from actual to

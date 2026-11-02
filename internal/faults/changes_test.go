@@ -20,7 +20,7 @@ func TestAChangeReplacesTheRulesAsTheNextRevision(t *testing.T) {
 	kept := faults.Rule{ID: "kept", Match: faults.Match{Operations: ops(faults.Stat), Occurrence: []uint64{2}}, Action: failure}
 	edited := faults.Rule{ID: "edited", Priority: 1, Match: faults.Match{Operations: ops(faults.LStat), Occurrence: []uint64{1}}, Action: failure}
 	removed := failOn("removed", faults.Match{Operations: ops(faults.Mkdir)})
-	e, err := faults.New([]faults.Rule{edited, kept, removed}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	e, err := faults.New([]faults.Rule{edited, kept, removed}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestATriggerAnchoredToTheRunMeasuresFromTheChange(t *testing.T) {
 func TestReleaseStallsReleasesOnlyThoseInProgress(t *testing.T) {
 	var logs bytes.Buffer
 	stall := sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}
-	e, err := faults.New([]faults.Rule{{ID: "stuck", Match: stat, Action: stall}}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	e, err := faults.New([]faults.Rule{{ID: "stuck", Match: stat, Action: stall}}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestARemovedRuleReleasesItsWaits(t *testing.T) {
 	e := newEngine(t, rules...)
 	s := e.Session(faults.Client{User: "test", Authenticated: time.Now()})
 	defer s.End()
-	decide := s.Decide
+	decide := actions(s)
 	kept := decide(on(&sftpwire.Stat{}, "/f")).(sftpproxy.Delay).Release
 	timers := s.Timers()
 	if len(timers) != 2 {
@@ -257,7 +257,7 @@ func TestARemovedRuleReleasesItsWaits(t *testing.T) {
 		"a freeze at a connection's moment": timers[1].Action.(sftpproxy.Freeze).Release,
 		"a freeze":                          decide(on(&sftpwire.LStat{}, "/f")).(sftpproxy.Freeze).Release,
 		"a partial upload's freeze":         decide(openFor("/f", sftpwire.OpenWrite)).(sftpproxy.PartialUpload).Result.(sftpproxy.Freeze).Release,
-		"a login's delay":                   e.Authenticate(faults.Client{User: "test"}).(sftpproxy.Delay).Release,
+		"a login's delay":                   e.Authenticate(faults.Client{User: "test"}).Action.(sftpproxy.Delay).Release,
 		"a delay of a drawn duration":       decide(on(&sftpwire.Mkdir{}, "/d")).(sftpproxy.Delay).Release,
 		"the freeze of a drawn cutoff":      decide(openFor("/g", sftpwire.OpenWrite)).(sftpproxy.PartialUpload).Result.(sftpproxy.Freeze).Release,
 		"the delay of an edited rule":       decide(on(&sftpwire.Rmdir{}, "/d")).(sftpproxy.Delay).Release,
@@ -293,7 +293,7 @@ func TestTheMomentsOfARemovedRuleDoNotCome(t *testing.T) {
 			{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Action: cutOff},
 			{ID: "corrupt", Match: faults.Match{Operations: ops(faults.Read)}, Action: sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate}},
 		}
-		e, err := faults.New(rules, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+		e, err := faults.New(rules, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,11 +307,11 @@ func TestTheMomentsOfARemovedRuleDoNotCome(t *testing.T) {
 			"the run's outage":        e.Timers()[0].Reserve,
 			"the connection's moment": timers[0].Reserve,
 			"the run's moment":        timers[1].Reserve,
-			"a transfer's moment":     s.Decide(openFor("/t", sftpwire.OpenWrite)).(sftpproxy.Timed).Reserve,
+			"a transfer's moment":     s.Decide(openFor("/t", sftpwire.OpenWrite)).Action.(sftpproxy.Timed).Reserve,
 		}
 		transfers := map[string]func() bool{
-			"a partial upload":   s.Decide(openFor("/w", sftpwire.OpenWrite)).(sftpproxy.PartialUpload).Reserve,
-			"a corrupt download": s.Decide(openFor("/r", sftpwire.OpenRead)).(sftpproxy.CorruptDownload).Reserve,
+			"a partial upload":   s.Decide(openFor("/w", sftpwire.OpenWrite)).Action.(sftpproxy.PartialUpload).Reserve,
+			"a corrupt download": s.Decide(openFor("/r", sftpwire.OpenRead)).Action.(sftpproxy.CorruptDownload).Reserve,
 		}
 		if _, err := e.Replace(1, nil, nil); err != nil {
 			t.Fatal(err)

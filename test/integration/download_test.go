@@ -57,12 +57,12 @@ func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
 				t.Run(c.name+"/"+order.String()+"/"+tt.corruption.Corruption.String(), func(t *testing.T) {
 					t.Parallel()
 					srv := startServer(t, proxied, sftpproxy.Options{
-						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+						Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 							if open, ok := r.Packet.(*sftpwire.Open); ok && r.Path == "/orders.csv" && open.Flags&sftpwire.OpenWrite == 0 {
 								return tt.corruption
 							}
 							return nil
-						},
+						}),
 						ReplyOrder: order,
 					})
 					writeFile(t, srv.path("/orders.csv"), data)

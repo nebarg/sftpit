@@ -748,3 +748,9 @@ const (
 	temporaryPath = "/incoming/orders.csv.part"
 	publishedPath = "/incoming/orders.csv"
 )
+
+// faultsOf adapts choose, which chooses an action for each request, to
+// sftpproxy.Options.Faults, as faults that no rule chose.
+func faultsOf(choose func(sftpproxy.Request) sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
+	return func(r sftpproxy.Request) sftpproxy.Fault { return sftpproxy.Fault{Action: choose(r)} }
+}

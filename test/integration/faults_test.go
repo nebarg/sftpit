@@ -60,12 +60,12 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			srv := startServer(t, proxied, sftpproxy.Options{Faults: func(r sftpproxy.Request) sftpproxy.Action {
+			srv := startServer(t, proxied, sftpproxy.Options{Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 				if r.Target == "/in/orders.csv" {
 					return tt.action
 				}
 				return nil
-			}})
+			})})
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
@@ -129,12 +129,12 @@ func TestPhpseclibRenameFaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			srv := startServer(t, proxied, sftpproxy.Options{Faults: func(r sftpproxy.Request) sftpproxy.Action {
+			srv := startServer(t, proxied, sftpproxy.Options{Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 				if r.Target == "/in/orders.csv" {
 					return tt.action
 				}
 				return nil
-			}})
+			})})
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 

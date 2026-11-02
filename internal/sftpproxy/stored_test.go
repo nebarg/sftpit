@@ -73,12 +73,12 @@ func TestCorruptUploadStoresOneFileHoweverItIsWritten(t *testing.T) {
 					t.Run(name, func(t *testing.T) {
 						synctest.Test(t, func(t *testing.T) {
 							p := startProxy(t, inMemoryBackend(t), sftpproxy.Options{
-								Faults: func(r sftpproxy.Request) sftpproxy.Action {
+								Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 									if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite != 0 {
 										return tt.corruption
 									}
 									return nil
-								},
+								}),
 								ReplyOrder: order,
 							})
 							p.client.init(t, 3)

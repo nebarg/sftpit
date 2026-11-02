@@ -263,7 +263,7 @@ func TestCloseFailedBeforeTheBackendKeepsItsHandle(t *testing.T) {
 			}
 			return nil
 		}
-		p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: faults})
+		p, fb := startProxyOnFake(t, sftpproxy.Options{Faults: faultsOf(faults)})
 		p.client.send(t, 1, &sftpwire.Open{Path: "/a", Flags: sftpwire.OpenRead})
 		fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: "h"})
 		p.client.assertReplies(t, 1)
@@ -290,7 +290,7 @@ func TestFaultsSeeResolvedPaths(t *testing.T) {
 			return nil
 		}
 		fb, backend := startFakeBackend(t, openSSHVersion, "/home/p")
-		p := startProxy(t, backend, sftpproxy.Options{Faults: faults})
+		p := startProxy(t, backend, sftpproxy.Options{Faults: faultsOf(faults)})
 		p.client.init(t, 3)
 		p.client.send(t, 1, &sftpwire.Rename{OldPath: "a.part", NewPath: "../q/a"})
 		fb.next(t)

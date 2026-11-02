@@ -1,7 +1,6 @@
 package sftpproxy
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -44,7 +43,7 @@ func (s *session) cut(req *request) bool {
 		when = After
 	}
 	req.action, req.cut, req.cutoff = withWhen(u.Result, when), true, u.Cutoff
-	s.logger.Log(context.Background(), level, "injected fault", s.faultAttrs(req)...)
+	s.injected(req, level, s.faultAttrs(req)...)
 	return true
 }
 
@@ -113,7 +112,7 @@ func (s *session) corruptStored(req *request) bool {
 	if st.Corruption != Truncate {
 		attrs = append(attrs, "length", st.Length)
 	}
-	s.logger.Log(context.Background(), level, "injected fault", append(attrs, "offset", w.Offset)...)
+	s.injected(req, level, append(attrs, "offset", w.Offset)...)
 	s.tracker.fault(req)
 
 	switch st.Corruption {

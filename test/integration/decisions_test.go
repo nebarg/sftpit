@@ -52,7 +52,8 @@ func TestSeededFailuresRepeat(t *testing.T) {
 			Match:       faults.Match{Operations: []faults.Operation{faults.OpenWrite}},
 			Probability: new(0.5),
 			Action:      sftpproxy.Fail{Status: sftpwire.StatusFailure},
-		}}, nil, 481516, slog.New(slog.DiscardHandler))
+		}}, nil, 481516, faults.Options{Logger: slog.New(slog.DiscardHandler)})
+
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}
@@ -188,23 +189,23 @@ func assertSeedFailsSomeRetries(t *testing.T, decided map[string][]bool, files i
 // uploadOutcomes records, for each path, whether each upload attempt that
 // faults decides fails.
 type uploadOutcomes struct {
-	faults func(sftpproxy.Request) sftpproxy.Action
+	faults func(sftpproxy.Request) sftpproxy.Fault
 
 	mu      sync.Mutex
 	decided map[string][]bool
 }
 
-func (o *uploadOutcomes) decide(r sftpproxy.Request) sftpproxy.Action {
-	a := o.faults(r)
+func (o *uploadOutcomes) decide(r sftpproxy.Request) sftpproxy.Fault {
+	f := o.faults(r)
 	if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite != 0 {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if o.decided == nil {
 			o.decided = make(map[string][]bool)
 		}
-		o.decided[r.Path] = append(o.decided[r.Path], a != nil)
+		o.decided[r.Path] = append(o.decided[r.Path], f.Action != nil)
 	}
-	return a
+	return f
 }
 
 // under returns the decisions for the paths under dir.

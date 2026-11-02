@@ -207,6 +207,9 @@ type Run struct {
 	// see.
 	Dir, Files string
 
+	// Started is when the run started.
+	Started time.Time
+
 	Scenario Scenario
 }
 
@@ -262,7 +265,7 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 		return nil, err
 	}
 	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
-	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Scenario: scenario}, nil
+	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Scenario: scenario}, nil
 }
 
 // prune deletes the oldest runs beyond the newest keptRuns, never current.

@@ -219,7 +219,7 @@ func TestSnapshotWhenTheSessionEnds(t *testing.T) {
 func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 	tests := []struct {
 		name   string
-		faults func(sftpproxy.Request) sftpproxy.Action
+		faults func(sftpproxy.Request) sftpproxy.Fault
 		dir    bool
 		read   bool
 		fstat  bool
@@ -228,7 +228,7 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 		// closed.
 		closedBy []string
 	}{
-		{name: "no fault", faults: func(sftpproxy.Request) sftpproxy.Action { return nil }},
+		{name: "no fault", faults: func(sftpproxy.Request) sftpproxy.Fault { return sftpproxy.Fault{} }},
 		{
 			name:   "cutoff not reached",
 			faults: on[*sftpwire.Open](sftpproxy.PartialUpload{Cutoff: 10, Result: sftpproxy.Drop{}}),
@@ -272,9 +272,9 @@ func TestSnapshotsOnlyFaultedFileHandles(t *testing.T) {
 		{
 			name: "directory",
 			dir:  true,
-			faults: func(sftpproxy.Request) sftpproxy.Action {
+			faults: faultsOf(func(sftpproxy.Request) sftpproxy.Action {
 				return sftpproxy.Delay{When: sftpproxy.After, Duration: time.Second}
-			},
+			}),
 		},
 		{
 			name:   "without a Snapshot",

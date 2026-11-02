@@ -16,6 +16,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
@@ -31,7 +32,9 @@ import (
 // a change applies during the session, and its stalls and freezes end when
 // rules releases them; or they come from opts if rules is nil. The paths
 // that policy makes read-only for the user are its opts.ReadOnly. Each
-// session logs with the connection's ID and user, as the SSH server does.
+// session logs with the connection's ID and user, as the SSH server does,
+// and records its events, if opts.Record is set, with the connection's ID,
+// user and key.
 // Snapshots hold back every session's changes to their file, and keep copies
 // in the run's snapshots directory.
 func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, policy config.Policy, opts sftpproxy.Options) sshfront.Handler {
@@ -46,6 +49,12 @@ func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, policy 
 		opts.Conn, opts.Listener = conn, conn.Server()
 		opts.ReadOnly = policy.ReadOnlyFor(conn.User())
 		opts.Logger = logger.With("conn", conn.ID(), "user", conn.User())
+		if record := opts.Record; record != nil {
+			opts.Record = func(e events.Event) {
+				e.Connection, e.User, e.KeyFingerprint = conn.ID(), conn.User(), conn.KeyFingerprint()
+				record(e)
+			}
+		}
 		if rules != nil {
 			s := rules.Session(faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID(), Authenticated: conn.Authenticated()})
 			defer s.End()

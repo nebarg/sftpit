@@ -74,6 +74,10 @@ type Hooks struct {
 	// Authenticate is called once the server has verified a client's
 	// credentials, before it tells the client that it has logged in.
 	Authenticate func(ctx context.Context, conn *Conn)
+
+	// Disconnect is called once each connection has ended, its handlers
+	// included, before Pause or Close returns.
+	Disconnect func(conn *Conn)
 }
 
 // Config configures a Server.
@@ -531,6 +535,9 @@ func (s *Server) serveConn(g *gate) {
 	defer g.Close()
 
 	conn := &Conn{id: s.nextConnID.Add(1), server: s, gate: g}
+	if s.hooks.Disconnect != nil {
+		defer s.hooks.Disconnect(conn)
+	}
 	channels, requests, ok := s.handshake(conn)
 	if !ok {
 		return

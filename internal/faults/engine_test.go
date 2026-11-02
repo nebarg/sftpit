@@ -2,13 +2,17 @@ package faults_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -228,7 +232,8 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 		MaxTriggers: 1,
 		Match:       faults.Match{Operations: ops(faults.Write), Path: faults.Location{Kind: faults.Exactly, Pattern: "/in/a.csv"}},
 		Action:      cutOff,
-	}}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	}}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +441,8 @@ func TestRangesDrawAValueForEachDecision(t *testing.T) {
 	e, err := faults.New([]faults.Rule{
 		{ID: "slow", Match: faults.Match{Operations: ops(faults.Stat)}, Duration: &durations, Action: sftpproxy.Delay{When: sftpproxy.After}},
 		{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Cutoff: &cutoffs, Action: cutOff},
-	}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +514,8 @@ func TestProbabilityDecisionsAreLogged(t *testing.T) {
 	var logs bytes.Buffer
 	e, err := faults.New([]faults.Rule{
 		{ID: "random", Match: faults.Match{Operations: ops(faults.Remove)}, Probability: new(0.25), Action: failure},
-	}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,10 +588,97 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := faults.New(tt.rules, nil, testSeed, nil)
+			_, err := faults.New(tt.rules, nil, testSeed, faults.Options{})
 			if err == nil || !strings.Contains(err.Error(), tt.err) || !strings.HasPrefix(err.Error(), "faults: ") {
 				t.Errorf("New = %v, want an error about %q", err, tt.err)
 			}
 		})
 	}
+}
+
+func TestEveryFaultNamesItsRule(t *testing.T) {
+	freeze := sftpproxy.Freeze{Limit: time.Minute}
+	e := newEngine(t,
+		failOn("deny-stats", stat),
+		faults.Rule{ID: "cut-uploads", Match: faults.Match{Operations: ops(faults.Write)}, Action: sftpproxy.PartialUpload{Cutoff: 1, Result: failure}},
+		faults.Rule{ID: "slow-connects", Match: faults.Match{Operations: ops(faults.Connect)}, Action: sftpproxy.Delay{Duration: time.Second}},
+		faults.Rule{ID: "slow-logins", Match: faults.Match{Operations: ops(faults.Authenticate)}, Action: sftpproxy.Delay{Duration: time.Second}},
+		faults.Rule{ID: "frozen-in-the-run", Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Hour)}, Action: freeze},
+		faults.Rule{ID: "frozen-after-login", Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Hour)}, Action: freeze},
+	)
+	s := e.Session(faults.Client{User: "test", Connection: 1, Authenticated: time.Now()})
+	defer s.End()
+	got := map[string]string{
+		"a request":  s.Decide(on(&sftpwire.Stat{}, "/f")).Rule,
+		"a transfer": s.Decide(openFor("/f", sftpwire.OpenWrite)).Rule,
+		"a connect":  e.Connect(faults.Client{Connection: 2}).Rule,
+		"a login":    e.Authenticate(faults.Client{User: "test", Connection: 2}).Rule,
+		"no fault":   s.Decide(on(&sftpwire.LStat{}, "/f")).Rule,
+	}
+	for _, timer := range s.Timers() {
+		got["a timer"] += timer.Rule + " "
+	}
+	want := map[string]string{
+		"a request":  "deny-stats",
+		"a transfer": "cut-uploads",
+		"a connect":  "slow-connects",
+		"a login":    "slow-logins",
+		"no fault":   "",
+		"a timer":    "frozen-in-the-run frozen-after-login ",
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("rules = %v, want %v", got, want)
+	}
+}
+
+func TestEngineRecordsItsDecisionsAndSuppressedFaults(t *testing.T) {
+	var recorded []events.Event
+	e, err := faults.New([]faults.Rule{
+		{ID: "flaky", Match: stat, Probability: new(0.5), Action: failure},
+		{ID: "slow", Match: faults.Match{Operations: ops(faults.Mkdir)}, Duration: &faults.Range[time.Duration]{Min: time.Second, Max: time.Minute}, Action: sftpproxy.Delay{}},
+		{ID: "cut-once", Match: faults.Match{Operations: ops(faults.Write)}, MaxTriggers: 1, Action: sftpproxy.PartialUpload{Cutoff: 1, Result: failure}},
+	}, nil, testSeed, faults.Options{
+		Logger: slog.New(slog.DiscardHandler),
+		Record: func(e events.Event) { recorded = append(recorded, e) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s := e.Session(faults.Client{User: "test"})
+	defer s.End()
+
+	failed := s.Decide(on(&sftpwire.Stat{}, "/f")).Action != nil
+	delay := s.Decide(on(&sftpwire.Mkdir{}, "/d")).Action.(sftpproxy.Delay)
+	// Both uploads are selected before either reaches its cutoff, so the
+	// second finds the rule spent.
+	first := s.Decide(openFor("/a", sftpwire.OpenWrite)).Action.(sftpproxy.PartialUpload)
+	second := s.Decide(openFor("/b", sftpwire.OpenWrite)).Action.(sftpproxy.PartialUpload)
+	if !first.Reserve() || second.Reserve() {
+		t.Fatal("want the first upload's cutoff reserved and the second's declined")
+	}
+
+	draw := func(k faults.Key) float64 { return faults.Seed(testSeed).Draw(k).Fraction() }
+	want := []events.Event{
+		{Kind: events.DecisionDrawn, Rule: "flaky", User: "test", Path: "/f", Decision: &events.Decision{
+			Operation: "stat", Ordinal: 1, Choice: "probability", Probability: new(0.5), Fired: &failed,
+			Draw: draw(faults.Key{Rule: "flaky", Choice: "probability", User: "test", Path: "/f", Operation: "stat", Ordinal: 1}),
+		}},
+		{Kind: events.DecisionDrawn, Rule: "slow", User: "test", Path: "/d", Decision: &events.Decision{
+			Operation: "mkdir", Ordinal: 1, Choice: "duration", Value: delay.Duration.String(),
+			Draw: draw(faults.Key{Rule: "slow", Choice: "duration", User: "test", Path: "/d", Operation: "mkdir", Ordinal: 1}),
+		}},
+		{Kind: events.Suppressed, Rule: "cut-once", User: "test", Path: "/b", Reason: "max_triggers"},
+	}
+	if !reflect.DeepEqual(recorded, want) {
+		t.Errorf("recorded:\n%s\nwant:\n%s", eventsJSON(t, recorded), eventsJSON(t, want))
+	}
+}
+
+func eventsJSON(t *testing.T, es []events.Event) string {
+	t.Helper()
+	b, err := json.MarshalIndent(es, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

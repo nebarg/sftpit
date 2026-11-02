@@ -17,7 +17,7 @@ func (s *session) checkMoment(a Action) error {
 // arm takes t's action, which checkMoment has accepted, at its moment,
 // unless the session ends first.
 func (s *session) arm(t Timer) {
-	s.wg.Go(func() { s.at(time.Until(t.At), nil, &request{action: t.Action}, t.Reserve) })
+	s.wg.Go(func() { s.at(time.Until(t.At), nil, &request{action: t.Action, rule: t.Rule}, t.Reserve) })
 }
 
 // armEach arms each timer it receives from timers until the session ends or
@@ -98,7 +98,7 @@ func (s *session) armTimed(req *request, id string) {
 	if h == nil {
 		return
 	}
-	m := &request{action: req.timed.Action, path: req.path, handle: h}
+	m := &request{action: req.timed.Action, path: req.path, handle: h, rule: req.rule}
 	s.wg.Go(func() { s.at(req.timed.After, closing, m, req.timed.Reserve) })
 }
 

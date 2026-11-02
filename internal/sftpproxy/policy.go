@@ -31,6 +31,7 @@ func (s *session) enforce(req *request) *sftpwire.StatusReply {
 				attrs = append(attrs, "target", req.target)
 			}
 			s.logger.Info("policy denied", append(attrs, "read_only", dir)...)
+			req.readOnly = dir
 			return status(sftpwire.StatusPermissionDenied)
 		}
 	}

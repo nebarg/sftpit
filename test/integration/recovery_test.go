@@ -126,13 +126,13 @@ func TestLaravelUploadRecovery(t *testing.T) {
 			var requests requestLog
 			var cutOff atomic.Bool
 			srv := startServer(t, proxied, sftpproxy.Options{
-				Faults: func(r sftpproxy.Request) sftpproxy.Action {
+				Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 					requests.add(r)
 					if _, ok := r.Packet.(*sftpwire.Open); ok && r.Path == temporaryPath && cutOff.CompareAndSwap(false, true) {
 						return sftpproxy.PartialUpload{Cutoff: uploadCutoff, Result: result}
 					}
 					return nil
-				},
+				}),
 				Logger: logs.logger(),
 			})
 			work := t.TempDir()

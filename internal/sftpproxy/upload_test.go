@@ -40,13 +40,13 @@ func TestPartialUploadDecidesEachWriteByItsOffset(t *testing.T) {
 				var seen []sftpwire.Packet
 				fail := sftpproxy.PartialUpload{Cutoff: cutoff, Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}}
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
-					Faults: func(r sftpproxy.Request) sftpproxy.Action {
+					Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 						seen = append(seen, r.Packet)
 						if _, ok := r.Packet.(*sftpwire.Open); ok {
 							return fail
 						}
 						return nil
-					},
+					}),
 					ReplyOrder: order,
 					Logger:     logs.logger(),
 				})

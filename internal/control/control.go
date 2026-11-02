@@ -1,7 +1,7 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
 // alive and ready, the status of the current run, its rules and chaos, which
-// can change during the run, the release of its stalls, and resets that
-// start the next run. Its Client calls the API.
+// can change during the run, the release of its stalls, the events of
+// recent runs, as pages or a stream, and resets that start the next run. Its Client calls the API.
 //
 // The API answers only requests addressed to a loopback host, or to a host
 // name it is given, such as a compose service's, so a web page cannot reach
@@ -55,6 +55,7 @@ func Handler(m *runs.Manager, hosts []string) http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", a.events)
 	return protect(mux, hosts)
 }
 
@@ -113,6 +114,8 @@ func statusFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios):
 		return http.StatusBadRequest
+	case errors.Is(err, runs.ErrUnknownRun):
+		return http.StatusNotFound
 	}
 	return http.StatusInternalServerError
 }
@@ -123,7 +126,7 @@ func (a *api) rules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err)
 		return
 	}
-	writeRules(w, set)
+	a.writeRules(w, r.PathValue("id"), set)
 }
 
 func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +161,7 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err)
 		return
 	}
-	writeRules(w, set)
+	a.writeRules(w, r.PathValue("id"), set)
 }
 
 // inline returns the inline scenario of a reset that gives rules, chaos or
@@ -199,11 +202,16 @@ func (a *api) releaseStalls(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
 }
 
-// writeRules writes set as the reply to a request for a run's rules or a
-// change of them: the revision, the chaos, if any, the rules in the long
-// form, in the order they are tried, and what each rule has done, those of
-// chaos included, by rule ID.
-func writeRules(w http.ResponseWriter, set faults.RuleSet) {
+// writeRules writes set, the rules of run, as the reply to a request for a
+// run's rules or a change of them: the revision, the chaos, if any, the
+// rules in the long form, in the order they are tried, and what each rule
+// has done, those of chaos included, by rule ID.
+func (a *api) writeRules(w http.ResponseWriter, run string, set faults.RuleSet) {
+	rec, err := a.runs.Events(run)
+	if err != nil {
+		writeError(w, statusFor(err), err)
+		return
+	}
 	rules, err := config.RulesJSON(set.Rules)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -218,7 +226,7 @@ func writeRules(w http.ResponseWriter, set faults.RuleSet) {
 	}
 	counts := make(map[string]ruleCounts, len(set.Counts))
 	for id, c := range set.Counts {
-		counts[id] = ruleCounts(c)
+		counts[id] = ruleCounts{Matched: c.Matched, Selected: c.Selected, Fired: c.Fired, Canceled: rec.Canceled(id)}
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Revision uint64                `json:"revision"`
@@ -228,11 +236,13 @@ func writeRules(w http.ResponseWriter, set faults.RuleSet) {
 	}{set.Revision, chaos, rules, counts})
 }
 
-// ruleCounts are what a rule has done in the run, as faults.Counts.
+// ruleCounts are what a rule has done in the run, as faults.Counts, and
+// how many of its faults' waits a change of rules canceled.
 type ruleCounts struct {
 	Matched  uint64 `json:"matched"`
 	Selected uint64 `json:"selected"`
 	Fired    uint64 `json:"fired"`
+	Canceled uint64 `json:"canceled"`
 }
 
 // ResetRequest is the body of a reset, which chooses the next run as
@@ -270,6 +280,11 @@ type RunStatus struct {
 	Seed       Seed   `json:"seed"`
 	SeedPinned bool   `json:"seed_pinned,omitempty"`
 	Revision   uint64 `json:"revision"`
+
+	// Stalled counts the requests and replies that stalls hold, and Frozen
+	// the connections that freezes hold.
+	Stalled int `json:"stalled"`
+	Frozen  int `json:"frozen"`
 }
 
 func newStatus(s runs.Status) Status {
@@ -284,6 +299,8 @@ func newStatus(s runs.Status) Status {
 			Seed:       Seed(sc.Seed),
 			SeedPinned: sc.Pinned,
 			Revision:   s.Revision,
+			Stalled:    s.Stalled,
+			Frozen:     s.Frozen,
 		},
 	}
 	if s.Err != nil {

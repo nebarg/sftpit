@@ -28,6 +28,14 @@ type Request struct {
 	Entry bool
 }
 
+// Fault is what Options.Faults chooses for a request: its Action, or nil to
+// let the request through, and the Rule that chose it, which the session's
+// events name.
+type Fault struct {
+	Action Action
+	Rule   string
+}
+
 // When says whether a fault takes effect before or after the backend acts on
 // a request.
 type When int
@@ -266,10 +274,12 @@ type Timed struct {
 // At, whatever the client is doing, the session takes Action, a Drop,
 // Freeze, EndSession or ListenerDown, whose When is ignored. Reserve, if
 // set, is called as the moment comes; if it returns false, nothing happens.
+// Rule is the rule that timed it, which the session's events name.
 type Timer struct {
 	At      time.Time
 	Action  Action
 	Reserve func() bool
+	Rule    string
 }
 
 // WrongSize is chosen for a STAT, LSTAT or FSTAT, or for an entry of a

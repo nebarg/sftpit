@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"testing"
@@ -237,5 +238,54 @@ func TestHookContextEnds(t *testing.T) {
 				t.Errorf("hook's ctx.Err() = %v, want %v", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestDisconnectRunsOnceEachConnectionHasEnded(t *testing.T) {
+	handlerDone := make(chan struct{})
+	calls := make(chan hookCall, 4)
+	addr, srv := startServer(t, sshfront.Config{
+		Users: []sshfront.User{{Name: "test", Password: testPassword}},
+		Handler: func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
+			defer close(handlerDone)
+			return inMemorySFTP(ctx, conn, channel)
+		},
+		Hooks: sshfront.Hooks{
+			Disconnect: func(conn *sshfront.Conn) {
+				select {
+				case <-handlerDone:
+				default:
+					t.Error("Disconnect ran before the connection's handler returned")
+				}
+				calls <- hookCall{"disconnect", conn.ID(), conn.User(), conn.KeyFingerprint()}
+			},
+		},
+	})
+
+	client := mustDial(t, addr, "test", ssh.Password(testPassword))
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := session.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("RequestSubsystem: %v", err)
+	}
+	client.Close()
+	if got := testutil.Receive(t, calls); got.hook != "disconnect" || got.user != "test" {
+		t.Errorf("hook = %+v, want disconnect of test's connection", got)
+	}
+
+	// A connection that never logs in ends too, at Close at the latest.
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Read(make([]byte, 64)); err != nil {
+		t.Fatalf("reading the server's version: %v", err)
+	}
+	srv.Close()
+	if got := testutil.Receive(t, calls); got.hook != "disconnect" || got.user != "" {
+		t.Errorf("hook = %+v, want disconnect of a connection with no user", got)
 	}
 }

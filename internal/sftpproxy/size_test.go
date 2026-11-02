@@ -36,12 +36,12 @@ func TestWrongSizeMisreportsStatReplies(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					var logs syncBuffer
 					p, fb := startProxyOnFake(t, sftpproxy.Options{
-						Faults: func(r sftpproxy.Request) sftpproxy.Action {
+						Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 							if _, ok := r.Packet.(*sftpwire.Open); !ok && r.Path == "/f" {
 								return tt.wrongSize
 							}
 							return nil
-						},
+						}),
 						Logger: logs.logger(),
 					})
 					openForDownload(t, p, fb)
@@ -92,7 +92,7 @@ func TestWrongSizeMisreportsTheReaddirEntriesFaultsChooses(t *testing.T) {
 		var mu sync.Mutex
 		var asked []sftpproxy.Request
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults: func(r sftpproxy.Request) sftpproxy.Action {
+			Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 				mu.Lock()
 				defer mu.Unlock()
 				asked = append(asked, sftpproxy.Request{Path: r.Path, Entry: r.Entry})
@@ -100,7 +100,7 @@ func TestWrongSizeMisreportsTheReaddirEntriesFaultsChooses(t *testing.T) {
 					return sftpproxy.WrongSize{Delta: -1024}
 				}
 				return nil
-			},
+			}),
 		})
 		openDir(t, p, fb, "/d")
 
@@ -199,12 +199,12 @@ func TestWrongSizeRewritesTheSizeInALongname(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
-					Faults: func(r sftpproxy.Request) sftpproxy.Action {
+					Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 						if r.Entry {
 							return tt.wrongSize
 						}
 						return nil
-					},
+					}),
 				})
 				openDir(t, p, fb, "/d")
 
@@ -223,12 +223,12 @@ func TestWrongSizeRewritesTheSizeInALongname(t *testing.T) {
 func TestOnlyAWrongSizeAppliesToAReaddirEntry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults: func(r sftpproxy.Request) sftpproxy.Action {
+			Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 				if r.Entry {
 					return sftpproxy.Delay{Duration: time.Second}
 				}
 				return nil
-			},
+			}),
 		})
 		openDir(t, p, fb, "/d")
 

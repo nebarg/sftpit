@@ -63,12 +63,12 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 		for _, tt := range results {
 			start := func(t *testing.T) *server {
 				srv := startServer(t, proxied, sftpproxy.Options{
-					Faults: func(r sftpproxy.Request) sftpproxy.Action {
+					Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 						if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite == 0 {
 							return sftpproxy.PartialDownload{Cutoff: uploadCutoff, Result: tt.result}
 						}
 						return nil
-					},
+					}),
 					ReplyOrder: order,
 				})
 				writeFile(t, srv.path("/orders.csv"), data)

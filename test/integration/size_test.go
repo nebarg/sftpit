@@ -103,8 +103,8 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 
 // misreportSizeOf returns faults that misreport the size of name as
 // wrongSize in every reply that gives it.
-func misreportSizeOf(name string, wrongSize sftpproxy.WrongSize) func(sftpproxy.Request) sftpproxy.Action {
-	return func(r sftpproxy.Request) sftpproxy.Action {
+func misreportSizeOf(name string, wrongSize sftpproxy.WrongSize) func(sftpproxy.Request) sftpproxy.Fault {
+	return faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 		if r.Path != name {
 			return nil
 		}
@@ -116,7 +116,7 @@ func misreportSizeOf(name string, wrongSize sftpproxy.WrongSize) func(sftpproxy.
 			return wrongSize
 		}
 		return nil
-	}
+	})
 }
 
 func assertDownloaded(t *testing.T, name string, want []byte) {

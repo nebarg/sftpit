@@ -5,7 +5,9 @@ import (
 	"path"
 	"slices"
 	"sync"
+	"time"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -14,10 +16,18 @@ import (
 type slot chan outcome
 
 // outcome is what the client gets for a request: a reply packet, or a
-// connection drop in its place.
+// connection drop in its place. A reply to a client request carries the
+// request and the reply decoded, for its event.
 type outcome struct {
 	packet []byte
 	drop   *request
+	req    *request
+	reply  sftpwire.Packet
+}
+
+// replyTo returns the outcome of answering req with reply.
+func replyTo(req *request, reply sftpwire.Packet) outcome {
+	return outcome{packet: sftpwire.AppendPacket(nil, req.clientID, reply), req: req, reply: reply}
 }
 
 // request is a client request on its way to the backend, or answered by the
@@ -27,6 +37,21 @@ type request struct {
 	proxyID  uint32
 	packet   sftpwire.Packet
 	action   Action
+
+	// rule is the rule that chose the request's fault: its action, or for
+	// an OPEN, the transfer fault or timed fault its handle will have, or
+	// for a request through such a handle, that fault.
+	rule string
+
+	// received is when the request arrived, and injected is set once a
+	// fault has acted on it.
+	received time.Time
+	injected bool
+
+	// backendReply names the backend's reply, once it has answered, and
+	// readOnly is the read-only path that refused the request, if one did.
+	backendReply string
+	readOnly     string
 
 	// path is the canonical path the request acts on. For a request on a
 	// handle, it is the path the handle was opened with, or empty if the
@@ -107,6 +132,7 @@ type tracker struct {
 // by the tracker's mu.
 type handle struct {
 	path     string
+	rule     string
 	upload   *upload
 	partial  *partial
 	download *download
@@ -125,6 +151,9 @@ type handle struct {
 
 	// closing, if set, is closed when the handle's CLOSE is sent.
 	closing chan struct{}
+
+	// totals sum what the backend read or stored through a file handle.
+	totals events.Totals
 }
 
 // newTracker returns a tracker for a session whose backend default directory
@@ -213,7 +242,7 @@ func (t *tracker) describe(clientID uint32, p sftpwire.Packet) (*request, *sftpw
 // use attributes req to the open handle id, if the proxy knows it.
 func (t *tracker) use(req *request, id string) {
 	if h := t.handles[id]; h != nil {
-		req.handle, req.path = h, h.path
+		req.handle, req.path, req.rule = h, h.path, h.rule
 		req.upload, req.partial, req.download, req.stored = h.upload, h.partial, h.download, h.stored
 	}
 }
@@ -377,8 +406,12 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 		if _, open := t.handles[h.Handle]; open {
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
-		_, file := req.packet.(*sftpwire.Open)
-		t.handles[h.Handle] = &handle{path: req.path, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
+		open, file := req.packet.(*sftpwire.Open)
+		opened := &handle{path: req.path, rule: req.rule, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
+		if file {
+			opened.totals.Mode = mode(open.Flags)
+		}
+		t.handles[h.Handle] = opened
 	}
 	return req, nil
 }
@@ -426,4 +459,28 @@ func operation(p sftpwire.Packet) string {
 		return sftpwire.ExtStatVFS
 	}
 	return p.Type().String()
+}
+
+// mode names how a file was opened, for its transfer's totals.
+func mode(flags uint32) string {
+	switch {
+	case flags&sftpwire.OpenRead != 0 && flags&sftpwire.OpenWrite != 0:
+		return "read_write"
+	case flags&sftpwire.OpenWrite != 0:
+		return "write"
+	}
+	return "read"
+}
+
+// openFiles returns the file handles still open, in no particular order.
+func (t *tracker) openFiles() []*handle {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var files []*handle
+	for _, h := range t.handles {
+		if h.file {
+			files = append(files, h)
+		}
+	}
+	return files
 }

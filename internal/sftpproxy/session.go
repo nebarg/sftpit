@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -66,11 +67,11 @@ type Options struct {
 	// forward, and for each entry of a READDIR reply. It is called once per
 	// request, in request order, and once per entry as each READDIR reply
 	// arrives, so it must be safe for concurrent use. It must not block. A
-	// nil Faults, or a nil Action, lets requests through unchanged. It is
-	// not called for a write that reaches a PartialUpload's cutoff, or a read
-	// that a CorruptDownload changes, which decide those requests
-	// themselves.
-	Faults func(Request) Action
+	// nil Faults, or a Fault with a nil Action, lets requests through
+	// unchanged. It is not called for a write that reaches a
+	// PartialUpload's cutoff, or a read that a CorruptDownload changes,
+	// which decide those requests themselves.
+	Faults func(Request) Fault
 
 	// Timers are the faults for moments in the session, rather than for
 	// requests. A Timer whose moment has passed fires as the session starts.
@@ -121,6 +122,14 @@ type Options struct {
 	// Logger receives injected faults, snapshots and, at debug level, every
 	// request. Nil means slog.Default().
 	Logger *slog.Logger
+
+	// Record, if set, receives the session's events, without the
+	// connection or user, which the caller knows: each request once its
+	// client has the reply, each fault as it takes effect and the end of
+	// each fault's wait, each file handle's transfer, and each snapshot.
+	// It is called from the session's goroutines, so it must be safe for
+	// concurrent use, and must not block.
+	Record func(events.Event)
 }
 
 // Conn is the connection a client's session runs over.
@@ -166,6 +175,8 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		snapshot:  opts.Snapshot,
 		released:  opts.Released,
 		logger:    opts.Logger,
+		record:    opts.Record,
+		waits:     make(map[*request]struct{}),
 		replies:   make(chan slot, maxQueuedReplies),
 		moments:   make(chan *request),
 		done:      make(chan struct{}),
@@ -205,6 +216,10 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 	s.stop(s.relayRequests())
 	s.wg.Wait()
 	s.snapshotRest(closedBySessionEnd)
+	s.endWaits()
+	for _, h := range s.tracker.openFiles() {
+		s.recordTransfer(h, "session_ended")
+	}
 	return s.result()
 }
 
@@ -214,13 +229,14 @@ type session struct {
 	backend   io.ReadWriteCloser
 	backendIn *bufio.Reader
 	readOnly  []string
-	faults    func(Request) Action
+	faults    func(Request) Fault
 	conn      Conn
 	listener  Listener
 	order     ReplyOrder
 	snapshot  func(string) (Snapshot, error)
 	released  func() <-chan struct{}
 	logger    *slog.Logger
+	record    func(events.Event)
 	tracker   *tracker
 
 	// wg tracks every goroutine of the session, including those holding
@@ -242,6 +258,9 @@ type session struct {
 	// drained is closed once the backend has answered every request it was
 	// sent, after forwarding has stopped.
 	drained chan struct{}
+	// waits holds the requests whose faults are waiting, until each wait's
+	// end is recorded.
+	waits map[*request]struct{}
 	// completion is used only in completion order.
 	completion completionState
 
@@ -402,32 +421,33 @@ func (s *session) handleRequest(b []byte) error {
 		if _, err := sftpwire.DecodeInit(b); err != nil {
 			return fmt.Errorf("sftpproxy: client INIT: %w", err)
 		}
-		return s.replyNow(s.version)
+		return s.replyNow(outcome{packet: s.version})
 	}
 
 	clientID, p, err := sftpwire.DecodeRequest(b)
 	if unsupported, ok := errors.AsType[*sftpwire.UnsupportedError](err); ok {
 		s.logger.Info("rejected unsupported sftp request", "err", unsupported)
-		return s.replyNow(sftpwire.AppendPacket(nil, unsupported.ID, status(sftpwire.StatusOpUnsupported)))
+		return s.replyNow(outcome{packet: sftpwire.AppendPacket(nil, unsupported.ID, status(sftpwire.StatusOpUnsupported))})
 	}
 	if err != nil {
 		return fmt.Errorf("sftpproxy: client request: %w", err)
 	}
 
 	req, rejection := s.tracker.describe(clientID, p)
+	req.received = time.Now()
 	if rejection == nil {
 		rejection = s.enforce(req)
 	}
 	if rejection != nil {
 		s.logRequest(req, rejection)
-		return s.replyNow(sftpwire.AppendPacket(nil, clientID, rejection))
+		return s.replyNow(replyTo(req, rejection))
 	}
 	if err := s.decide(req); err != nil {
 		return err
 	}
 	if req.own != nil {
 		s.logRequest(req, req.own)
-		return s.replyNow(sftpwire.AppendPacket(nil, clientID, req.own))
+		return s.replyNow(replyTo(req, req.own))
 	}
 	s.prepareSnapshot(req)
 	req.reply = make(slot, 1)
@@ -448,7 +468,8 @@ func (s *session) decide(req *request) error {
 		return nil
 	}
 	if !s.cut(req) && !s.cutRead(req) && !s.corrupt(req) && !s.corruptStored(req) {
-		req.action = s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
+		f := s.faults(Request{Packet: req.packet, Path: req.path, Target: req.target})
+		req.action, req.rule = f.Action, f.Rule
 		if err := s.checkFault(req.packet, req.action); err != nil {
 			return err
 		}
@@ -566,10 +587,10 @@ func (s *session) process(req *request) error {
 				return err
 			}
 		case Fail:
-			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
+			s.answer(req.reply, replyTo(req, status(a.Status)))
 			return nil
 		case Hide:
-			s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(sftpwire.StatusNoSuchFile))})
+			s.answer(req.reply, replyTo(req, status(sftpwire.StatusNoSuchFile)))
 			return nil
 		case ListenerDown:
 			s.listener.Down(a.Duration, false)
@@ -695,17 +716,25 @@ func (s *session) hold(req *request) error {
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		if (release != nil || released != nil) && !delay {
+		if delay {
+			s.ended(req, "elapsed")
+			return nil
+		}
+		if release != nil || released != nil {
 			s.logger.Info("fault ended at its limit", s.faultAttrs(req)...)
 		}
+		s.ended(req, "limit")
 		return nil
 	case <-release:
 		s.logger.Info("fault released", s.faultAttrs(req)...)
+		s.ended(req, "canceled")
 		return nil
 	case <-released:
 		s.logger.Info("fault released", s.faultAttrs(req)...)
+		s.ended(req, "released")
 		return nil
 	case <-s.done:
+		s.ended(req, "session_ended")
 		return errStopped
 	}
 }
@@ -720,15 +749,15 @@ func (s *session) enqueue(reply slot) error {
 	}
 }
 
-// replyNow answers a request with a reply the proxy already has.
-func (s *session) replyNow(packet []byte) error {
+// replyNow answers a request with an outcome the proxy already has.
+func (s *session) replyNow(out outcome) error {
 	reply := make(slot, 1)
 	if s.order != CompletionOrder {
 		if err := s.enqueue(reply); err != nil {
 			return err
 		}
 	}
-	s.answer(reply, outcome{packet: packet})
+	s.answer(reply, out)
 	return nil
 }
 
@@ -765,6 +794,8 @@ func (s *session) relayReplies() error {
 		}
 		s.logRequest(req, p)
 		if req, p = joinReads(req, p); req != nil {
+			req.backendReply = replyName(p)
+			s.count(req, p)
 			flipBytes(req, p)
 			s.misreport(req, p)
 			emptied, err := s.rewriteEntries(req, p)
@@ -775,7 +806,10 @@ func (s *session) relayReplies() error {
 				s.readOn(req)
 			} else {
 				s.snapshotClosed(req)
-				s.deliver(req, sftpwire.AppendPacket(nil, req.clientID, p))
+				if _, closed := req.packet.(*sftpwire.Close); closed {
+					s.recordTransfer(req.handle, "close")
+				}
+				s.deliver(req, p)
 			}
 		}
 		s.answered()
@@ -785,9 +819,9 @@ func (s *session) relayReplies() error {
 // deliver passes the backend's reply to req on to the client, applying req's
 // fault if that acts after the backend. It never waits, so the backend's
 // later replies keep flowing.
-func (s *session) deliver(req *request, packet []byte) {
+func (s *session) deliver(req *request, reply sftpwire.Packet) {
 	if req.action == nil || req.action.when() != After {
-		s.answer(req.reply, outcome{packet: packet})
+		s.answer(req.reply, replyTo(req, reply))
 		return
 	}
 	s.logFault(req)
@@ -797,12 +831,12 @@ func (s *session) deliver(req *request, packet []byte) {
 	}
 	switch a := req.action.(type) {
 	case Delay, Stall:
-		s.wg.Go(func() { s.holdReply(req, packet) })
+		s.wg.Go(func() { s.holdReply(req, reply) })
 	case Fail:
-		s.answer(req.reply, outcome{packet: sftpwire.AppendPacket(nil, req.clientID, status(a.Status))})
+		s.answer(req.reply, replyTo(req, status(a.Status)))
 	case ListenerDown:
 		s.listener.Down(a.Duration, false)
-		s.answer(req.reply, outcome{packet: packet})
+		s.answer(req.reply, replyTo(req, reply))
 	}
 }
 
@@ -818,9 +852,9 @@ func endsSession(a Action) bool {
 	return false
 }
 
-func (s *session) holdReply(req *request, packet []byte) {
+func (s *session) holdReply(req *request, reply sftpwire.Packet) {
 	if s.hold(req) == nil {
-		s.answer(req.reply, outcome{packet: packet})
+		s.answer(req.reply, replyTo(req, reply))
 	}
 }
 
@@ -848,6 +882,9 @@ func (s *session) writeReplies() error {
 			}
 			if _, err := s.client.Write(out.packet); err != nil {
 				return fmt.Errorf("sftpproxy: write reply: %w", err)
+			}
+			if out.req != nil {
+				s.recordOperation(out.req, out.reply)
 			}
 			if s.order == CompletionOrder {
 				<-s.completion.inFlight
@@ -899,7 +936,7 @@ func (s *session) logFault(req *request) {
 		// cut logged it when it decided the request.
 		return
 	}
-	s.logger.Info("injected fault", s.faultAttrs(req)...)
+	s.injected(req, slog.LevelInfo, s.faultAttrs(req)...)
 }
 
 // faultAttrs describes req's fault. A fault for a moment has no request, and

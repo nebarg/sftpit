@@ -24,28 +24,29 @@ func TestConnectionEventsMatchTheirOwnRules(t *testing.T) {
 		{ID: "second-connect", Match: faults.Match{Operations: ops(faults.Connect), Occurrence: []uint64{2}}, Action: slowLogin},
 		{ID: "partner-login", MaxTriggers: 1, Match: faults.Match{Operations: ops(faults.Authenticate), KeyFingerprint: "SHA256:partner"}, Action: hangUp},
 		{ID: "every-request", Match: faults.Match{Operations: ops(faults.Any)}, Action: failure},
-	}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+	}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+
 	if err != nil {
 		t.Fatal(err)
 	}
 	partner := faults.Client{User: "test", KeyFingerprint: "SHA256:partner", Connection: 2}
 
-	if got := e.Connect(faults.Client{Connection: 1}); got != nil {
+	if got := e.Connect(faults.Client{Connection: 1}).Action; got != nil {
 		t.Errorf("the first connect got %#v, want nothing", got)
 	}
-	if got := e.Connect(faults.Client{Connection: 2}); unreleased(got) != slowLogin {
+	if got := e.Connect(faults.Client{Connection: 2}).Action; unreleased(got) != slowLogin {
 		t.Errorf("the second connect got %#v, want %#v", got, slowLogin)
 	}
-	if got := e.Authenticate(faults.Client{User: "test", Connection: 1}); got != nil {
+	if got := e.Authenticate(faults.Client{User: "test", Connection: 1}).Action; got != nil {
 		t.Errorf("a password login got %#v, want nothing", got)
 	}
-	if got := e.Authenticate(partner); got != hangUp {
+	if got := e.Authenticate(partner).Action; got != hangUp {
 		t.Errorf("the partner's login got %#v, want %#v", got, hangUp)
 	}
-	if got := e.Authenticate(partner); got != nil {
+	if got := e.Authenticate(partner).Action; got != nil {
 		t.Errorf("the partner's second login got %#v, want nothing once max_triggers is used up", got)
 	}
-	if got := e.Session(partner).Decide(on(&sftpwire.Stat{}, "/f")); got != failure {
+	if got := e.Session(partner).Decide(on(&sftpwire.Stat{}, "/f")).Action; got != failure {
 		t.Errorf("a stat got %#v, want the rule for every request", got)
 	}
 
@@ -81,7 +82,7 @@ func TestConnectionEventsDrawTheirDecisions(t *testing.T) {
 		e := newEngine(t, rule)
 		var actions []sftpproxy.Action
 		for range 20 {
-			actions = append(actions, e.Authenticate(faults.Client{User: "test"}))
+			actions = append(actions, e.Authenticate(faults.Client{User: "test"}).Action)
 		}
 		return actions
 	}
@@ -120,10 +121,10 @@ func TestConnectionEventsAreTimedFromTheRun(t *testing.T) {
 			{2 * time.Second, nil, nil},
 		} {
 			time.Sleep(step.sleep)
-			if got := e.Connect(faults.Client{}); got != step.connect {
+			if got := e.Connect(faults.Client{}).Action; got != step.connect {
 				t.Errorf("a connect got %#v, want %#v", got, step.connect)
 			}
-			if got := e.Authenticate(faults.Client{User: "test"}); unreleased(got) != step.login {
+			if got := e.Authenticate(faults.Client{User: "test"}).Action; unreleased(got) != step.login {
 				t.Errorf("a login got %#v, want %#v", got, step.login)
 			}
 		}
@@ -153,7 +154,7 @@ func TestRulesForConnectionEventsThatCannotApplyAreRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.rule.ID = "r"
-			_, err := faults.New([]faults.Rule{tt.rule}, nil, testSeed, nil)
+			_, err := faults.New([]faults.Rule{tt.rule}, nil, testSeed, faults.Options{})
 			if err == nil || !strings.Contains(err.Error(), tt.err) {
 				t.Errorf("New = %v, want an error about %q", err, tt.err)
 			}

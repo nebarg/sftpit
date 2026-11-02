@@ -87,7 +87,7 @@ func (s *Session) time(ru *rule, now time.Time) (sftpproxy.Timer, bool) {
 		}
 		action, drawn := e.drawn(ru, m.key)
 		attrs := append([]any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", m.at.Sub(c.Authenticated)}, drawn...)
-		return sftpproxy.Timer{At: m.at, Action: action, Reserve: e.reserveMoment(ru, attrs, m)}, true
+		return sftpproxy.Timer{At: m.at, Action: action, Reserve: e.reserveMoment(ru, attrs, m), Rule: ru.ID}, true
 	}
 	if !ru.timedBySession() {
 		return sftpproxy.Timer{}, false
@@ -100,7 +100,7 @@ func (s *Session) time(ru *rule, now time.Time) (sftpproxy.Timer, bool) {
 	}
 	ru.counts.Selected++
 	attrs := []any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", after}
-	return sftpproxy.Timer{At: at, Action: ru.released(ru.Action), Reserve: e.reserveMoment(ru, attrs, nil)}, true
+	return sftpproxy.Timer{At: at, Action: ru.released(ru.Action), Reserve: e.reserveMoment(ru, attrs, nil), Rule: ru.ID}, true
 }
 
 // timeAdded times the session for rules, which a change has just applied, as
@@ -143,37 +143,37 @@ func (s *Session) End() {
 }
 
 // Decide returns the action of the first rule that selects r and fires for
-// it, if any, for sftpproxy.Options.Faults. Every rule that matches r counts
+// it, with the rule, if any, for sftpproxy.Options.Faults. Every rule that matches r counts
 // it, whichever rule is chosen, so a rule's attempts, occurrences and draws
 // do not depend on the rules before it. A rule whose trigger is not active,
 // or a rule of chaos while it is paused, does not match.
-func (s *Session) Decide(r sftpproxy.Request) sftpproxy.Action {
+func (s *Session) Decide(r sftpproxy.Request) sftpproxy.Fault {
 	return s.decide(operationOf(r), r)
 }
 
 // Connect returns the action of the first rule that selects a connection of
-// c as it is accepted, before the SSH handshake, if any: a Delay, Drop,
-// Freeze or ListenerDown. The client has not logged in yet, so c has only
+// c as it is accepted, before the SSH handshake, with the rule, if any: a
+// Delay, Drop, Freeze or ListenerDown. The client has not logged in yet, so c has only
 // its Connection.
-func (e *Engine) Connect(c Client) sftpproxy.Action {
+func (e *Engine) Connect(c Client) sftpproxy.Fault {
 	return e.event(Connect, c)
 }
 
 // Authenticate returns the action of the first rule that selects c's login
-// as the server accepts it, before telling the client, if any: a Delay,
-// Drop, Freeze or ListenerDown.
-func (e *Engine) Authenticate(c Client) sftpproxy.Action {
+// as the server accepts it, before telling the client, with the rule, if
+// any: a Delay, Drop, Freeze or ListenerDown.
+func (e *Engine) Authenticate(c Client) sftpproxy.Fault {
 	return e.event(Authenticate, c)
 }
 
 // event decides the connection event op of c, which no rule times from the
 // connection, so it needs none of a session's moments.
-func (e *Engine) event(op Operation, c Client) sftpproxy.Action {
+func (e *Engine) event(op Operation, c Client) sftpproxy.Fault {
 	s := &Session{e: e, client: c}
 	return s.decide(op, sftpproxy.Request{})
 }
 
-func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
+func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Fault {
 	e := s.e
 	now := time.Now()
 	e.mu.Lock()
@@ -195,7 +195,7 @@ func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
 		}
 	}
 	if chosen == nil {
-		return nil
+		return sftpproxy.Fault{}
 	}
 	chosen.counts.Selected++
 	action, drawn := e.action(chosen, key)
@@ -211,27 +211,27 @@ func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Action {
 	case sftpproxy.PartialUpload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
 		e.logger.Debug("rule selected", fired...)
-		return a
+		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.CorruptDownload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
 		e.logger.Debug("rule selected", fired...)
-		return a
+		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.PartialDownload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
 		e.logger.Debug("rule selected", fired...)
-		return a
+		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.CorruptUpload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
 		e.logger.Debug("rule selected", fired...)
-		return a
+		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.Timed:
 		a.Reserve = e.reserveMoment(chosen, fired, nil)
 		e.logger.Debug("rule selected", fired...)
-		return a
+		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	}
 	chosen.counts.Fired++
 	e.logger.Info("rule fired", fired...)
-	return action
+	return sftpproxy.Fault{Action: action, Rule: chosen.ID}
 }
 
 // active reports whether ru's trigger lets it apply to a request at now: in

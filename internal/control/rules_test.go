@@ -29,7 +29,7 @@ func TestRulesChangeThroughTheAPI(t *testing.T) {
 			{"id": "deny-stats", "priority": 0, "max_triggers": 0, "match": {"user": "test", "operation": ["stat"]}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}},
 			{"id": "outage-later", "priority": 0, "max_triggers": 0, "match": {}, "trigger": {"at": "1h0m0s", "anchor": "run"}, "action": {"type": "listener_down", "duration": "1s", "close_existing": false}}
 		],
-		"counts": {"deny-stats": {"matched": 0, "selected": 0, "fired": 0}, "outage-later": {"matched": 1, "selected": 1, "fired": 0}}
+		"counts": {"deny-stats": {"matched": 0, "selected": 0, "fired": 0, "canceled": 0}, "outage-later": {"matched": 1, "selected": 1, "fired": 0, "canceled": 0}}
 	}`), &want); err != nil {
 		t.Fatal(err)
 	}

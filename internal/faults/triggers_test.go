@@ -22,7 +22,7 @@ func TestAWindowLimitsARuleToASpan(t *testing.T) {
 		// 5 seconds into the run, and the run's ten seconds into the run.
 		time.Sleep(5 * time.Second)
 		run := session(e, "test", "")
-		conn := byConn.Session(faults.Client{User: "test", Connection: 1, Authenticated: time.Now()}).Decide
+		conn := actions(byConn.Session(faults.Client{User: "test", Connection: 1, Authenticated: time.Now()}))
 		for _, step := range []struct {
 			sleep     time.Duration
 			run, conn bool
@@ -78,9 +78,9 @@ func TestEachConnectionHasItsOwnMoment(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e := newEngine(t, faults.Rule{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Connection, At: at(time.Second)}, Action: failure})
 		start := time.Now()
-		first := e.Session(faults.Client{User: "test", Connection: 1, Authenticated: start}).Decide
+		first := actions(e.Session(faults.Client{User: "test", Connection: 1, Authenticated: start}))
 		time.Sleep(500 * time.Millisecond)
-		second := e.Session(faults.Client{User: "test", Connection: 2, Authenticated: time.Now()}).Decide
+		second := actions(e.Session(faults.Client{User: "test", Connection: 2, Authenticated: time.Now()}))
 		time.Sleep(600 * time.Millisecond)
 		if first(on(&sftpwire.Stat{}, "/f")) == nil || second(on(&sftpwire.Stat{}, "/f")) != nil {
 			t.Error("1.1s into the first connection and 0.6s into the second, want only the first's moment passed")
@@ -89,7 +89,7 @@ func TestEachConnectionHasItsOwnMoment(t *testing.T) {
 		if first(on(&sftpwire.Stat{}, "/f")) != nil || second(on(&sftpwire.Stat{}, "/f")) == nil {
 			t.Error("want each connection's moment to apply once")
 		}
-		again := e.Session(faults.Client{User: "test", Connection: 1, Authenticated: start}).Decide
+		again := actions(e.Session(faults.Client{User: "test", Connection: 1, Authenticated: start}))
 		if again(on(&sftpwire.Stat{}, "/f")) != nil {
 			t.Error("another session on the first connection applied its moment again")
 		}
@@ -122,7 +122,8 @@ func TestConnectionActionsAreTimedForEachSession(t *testing.T) {
 		e, err := faults.New([]faults.Rule{
 			{ID: "per-connection", Match: faults.Match{User: "a"}, Trigger: &faults.Trigger{Anchor: faults.Connection, At: &atRandom}, Action: reset},
 			{ID: "once-in-the-run", MaxTriggers: 1, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(10 * time.Second)}, Action: sftpproxy.EndSession{}},
-		}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, nil)))
+		}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -205,7 +206,8 @@ func TestAFixedMomentDrawsNothing(t *testing.T) {
 		var logs bytes.Buffer
 		e, err := faults.New([]faults.Rule{
 			{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: failure},
-		}, nil, testSeed, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+
 		if err != nil {
 			t.Fatal(err)
 		}
