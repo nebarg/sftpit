@@ -90,6 +90,6 @@ func (s *session) takeSnapshot(path, closedBy string) {
 		if closedBy == closedBySessionEnd {
 			reason = "session_ended"
 		}
-		s.record(events.Event{Kind: events.Snapshotted, Path: path, Reason: reason, Snapshot: snap.Copy})
+		s.record(events.Event{Kind: events.Snapshotted, Path: path, Reason: reason, Snapshot: &events.Snapshot{Size: snap.Size, SHA256: hex.EncodeToString(snap.SHA256[:]), Copy: snap.Copy}})
 	}
 }

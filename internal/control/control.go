@@ -1,7 +1,7 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
 // alive and ready, the status of the current run, its rules and chaos, which
-// can change during the run, the release of its stalls, the events of
-// recent runs, as pages or a stream, and resets that start the next run. Its Client calls the API.
+// can change during the run, the release of its stalls, the events, files
+// and snapshot copies of recent runs, and resets that start the next run. Its Client calls the API.
 //
 // The API answers only requests addressed to a loopback host, or to a host
 // name it is given, such as a compose service's, so a web page cannot reach
@@ -56,6 +56,10 @@ func Handler(m *runs.Manager, hosts []string) http.Handler {
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", a.events)
+	mux.HandleFunc("GET /api/v1/runs/{id}/files", a.files)
+	mux.HandleFunc("GET /api/v1/runs/{id}/files/content", a.fileContent)
+	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots", a.snapshots)
+	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots/{n}/content", a.snapshotContent)
 	return protect(mux, hosts)
 }
 

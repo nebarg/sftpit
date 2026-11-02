@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -545,6 +546,45 @@ func TestServeRecordsEventsThatTheAPIServes(t *testing.T) {
 	op := ops[0].(map[string]any)
 	if op["request"] != "SSH_FXP_STAT" || op["user"] != "test" || op["reply"] != "SSH_FX_NO_SUCH_FILE" || op["connection"] == nil {
 		t.Errorf("operation = %v, want test's STAT answered no such file", op)
+	}
+}
+
+func TestServeKeepsACopyOfACutOffUploadThatTheAPIServes(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	testutil.WriteFile(t, config, `schema_version: 1
+scenarios:
+  cut:
+    faults:
+      - id: cut
+        fail_upload: {path: /Orders.csv, attempts: [1], after_bytes: 5}
+`)
+	s := startServe(t, "--config", config, "--scenario", "cut")
+	c := s.dial(t, "test", "test")
+	f, err := c.Create("/Orders.csv")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write([]byte("0123456789")); err == nil {
+		t.Error("the upload succeeded, want it cut off")
+	}
+	f.Close()
+
+	api := "http://" + s.apiAddr + "/api/v1/runs/" + s.run
+	page := requestJSON(t, "GET", api+"/snapshots?hash=true", "")
+	copies, _ := page["snapshots"].([]any)
+	if len(copies) != 1 {
+		t.Fatalf("snapshots = %v, want the cut-off upload's", page)
+	}
+	if c := copies[0].(map[string]any); c["number"] != 1.0 || c["path"] != "/Orders.csv" || c["size"] != 5.0 {
+		t.Errorf("snapshot = %v, want 1 of /Orders.csv, 5 bytes", c)
+	}
+	resp, err := http.Get(api + "/snapshots/1/content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if b, err := io.ReadAll(resp.Body); err != nil || resp.StatusCode != http.StatusOK || string(b) != "01234" {
+		t.Errorf("the copy = %s %q (%v), want the 5 bytes below the cutoff", resp.Status, b, err)
 	}
 }
 

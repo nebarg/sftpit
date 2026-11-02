@@ -75,7 +75,9 @@ func summary(e events.Event) string {
 	if t := e.Transfer; t != nil {
 		parts = append(parts, fmt.Sprintf("%s reads=%d/%d writes=%d/%d end=%d closed=%s faulted=%v", t.Mode, t.Reads, t.BytesRead, t.Writes, t.BytesWritten, t.End, t.Closed, t.Faulted))
 	}
-	add("snapshot", e.Snapshot)
+	if s := e.Snapshot; s != nil {
+		parts = append(parts, fmt.Sprintf("size=%d sha256=%s copy=%q", s.Size, s.SHA256, s.Copy))
+	}
 	return strings.Join(parts, " ")
 }
 
@@ -285,7 +287,7 @@ func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 			"fault request=SSH_FXP_WRITE id=3 path=/f rule=cut fault=fail when=after cutoff=100 offset=60 status=SSH_FX_FAILURE",
 			"operation request=SSH_FXP_WRITE id=3 path=/f reply=SSH_FX_FAILURE backend=SSH_FX_OK rule=cut",
 			"operation request=SSH_FXP_WRITE id=4 path=/f reply=SSH_FX_FAILURE rule=cut",
-			"snapshot path=/f reason=client",
+			fmt.Sprintf("snapshot path=/f reason=client size=%d sha256=%x copy=\"\"", cutoff, snapshotOf("/f").SHA256),
 			"transfer path=/f rule=cut write reads=0/0 writes=2/100 end=100 closed=close faulted=true",
 			"operation request=SSH_FXP_CLOSE id=5 path=/f reply=SSH_FX_OK backend=SSH_FX_OK",
 		)

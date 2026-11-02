@@ -390,6 +390,10 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 | `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
 | `GET /api/v1/runs/{id}/events` | what happened in the run, [page by page or as it happens](#events) |
+| `GET /api/v1/runs/{id}/files` | the run's [files](#files), with their sizes, modes, times and, if asked, hashes |
+| `GET /api/v1/runs/{id}/files/content?path=…` | a file of the run, as a download |
+| `GET /api/v1/runs/{id}/snapshots` | the copies the run kept of files that faults left behind |
+| `GET /api/v1/runs/{id}/snapshots/{n}/content` | one of those copies, as a download |
 
 ```bash
 curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
@@ -504,7 +508,7 @@ The kinds of event:
 | `suppressed` | a fault whose rule did not inject it when its moment came: `removed`, `paused` or `max_triggers` |
 | `decision` | each random decision a rule drew from the seed, with its draw from 0 up to 1 and what it decided |
 | `rules_changed` | a change of the run's rules, with the revision it replaced and the new rules and chaos |
-| `snapshot` | a snapshot of a file that a faulted handle left behind, and what closed the handle |
+| `snapshot` | a snapshot of a file that a faulted handle left behind: its size and SHA-256, the path of its copy if the run kept one, and what closed the handle |
 
 - **Reads and writes** that succeed and that no fault touches are summed into their handle's `transfer`, so a large upload is one event, not thousands. One that a fault touches, or that fails, is an `operation` of its own.
 - **A request whose reply never left**, because a fault closed the connection first, has no `operation`; its `fault` explains why.
@@ -512,6 +516,32 @@ The kinds of event:
 - **Live:** with `Accept: text/event-stream`, the same route streams the events as [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html), each with its ID, from `after` or the `Last-Event-ID` a browser sends when it reconnects. A `gap` event says that events it asked for are gone, and an `end` event that the run has ended, after which the next run's events are at its own route.
 
 The events are also the evidence for a run that has ended: a reset keeps them, along with the run's files. Unknown runs, and runs older than the last five, are answered with 404.
+
+### Files
+
+`GET /api/v1/runs/{id}/files` lists a run's files and directories as its clients see them, sorted by path, for the current run or any of the last five that the workspace keeps:
+
+```bash
+curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/files?path=/incoming&hash=true'
+```
+
+```json
+{
+  "live": true,
+  "files": [
+    { "path": "/incoming", "type": "dir", "size": 0, "mode": "0700", "mtime": "2026-10-24T19:25:38.712Z" },
+    { "path": "/incoming/orders.csv", "type": "file", "size": 1048576, "mode": "0644", "mtime": "2026-10-24T19:25:41.204Z", "sha256": "9f2c...", "seed": "changed" }
+  ]
+}
+```
+
+- `path` lists that file or directory and everything beneath it, `/` by default. `hash=true` adds each file's SHA-256, which reads every file listed.
+- `live` is set for the current run, whose files clients can still change, so its sizes and hashes are those of the moment. Nothing is held back while they are read. Those of a run that has ended are final.
+- `seed` marks a file at a path the [seed](#quickstart) also holds: `unchanged`, or `changed` if its size differs, or its hash when hashes are asked for, or otherwise its modification time. A client that rewrites a file with the same content changes its time, so only a hash shows that its content is the same.
+
+`GET /api/v1/runs/{id}/files/content?path=…` sends a file as a download: `application/octet-stream`, as an attachment, with `nosniff` and a content security policy that sandboxes it, so a browser never displays or runs it. It answers range requests, so `Range: bytes=0-4095` previews the start of a file. A missing file is answered with 404, and a directory with 400.
+
+When a fault leaves a file behind, the run [keeps a copy](#faults), up to 64 MiB of copies in all. `GET /api/v1/runs/{id}/snapshots` lists them, numbered in the order they were taken, with the path of the file and the copy's size, time and, with `hash=true`, SHA-256, and `GET /api/v1/runs/{id}/snapshots/{n}/content` downloads one as a file is downloaded. The run's `snapshot` events record every snapshot, with its size and SHA-256, those too large to copy included.
 
 ### In a test harness
 

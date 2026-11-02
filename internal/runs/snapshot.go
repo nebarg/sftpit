@@ -70,7 +70,7 @@ func (s *snapshots) reserve(name string, size int64) string {
 	}
 	s.copied += size
 	s.count++
-	return path.Join("snapshots", strconv.Itoa(s.count), backend.StoredName(name))
+	return path.Join(snapshotsDir, strconv.Itoa(s.count), backend.StoredName(name))
 }
 
 // unreserve returns size bytes that reserve took for a copy that failed,

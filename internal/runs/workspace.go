@@ -42,6 +42,10 @@ const (
 	identityDir = "identity"
 	runsDir     = "runs"
 
+	// snapshotsDir holds a run's copies of the files that faulted handles
+	// left behind, in its directory.
+	snapshotsDir = "snapshots"
+
 	// workspaceVersion is the layout version the marker records.
 	workspaceVersion = 1
 
@@ -266,6 +270,22 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	}
 	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
 	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Scenario: scenario}, nil
+}
+
+// openRun opens sub, a directory of the run id, which must be one of the
+// runs the workspace keeps, or else fails with ErrUnknownRun.
+func (w *Workspace) openRun(id, sub string) (*os.Root, error) {
+	if !runIDPattern.MatchString(id) {
+		return nil, fmt.Errorf("runs: %w %q", ErrUnknownRun, id)
+	}
+	root, err := w.root.OpenRoot(path.Join(runsDir, id, sub))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("runs: %w %s", ErrUnknownRun, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("runs: open run %s: %w", id, err)
+	}
+	return root, nil
 }
 
 // prune deletes the oldest runs beyond the newest keptRuns, never current.

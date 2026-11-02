@@ -117,9 +117,16 @@ type Event struct {
 	Run      *Run      `json:"run,omitempty"`
 	Rules    *Rules    `json:"rules,omitempty"`
 
-	// Snapshot is the path of a snapshot's copy in the workspace, or empty
-	// if the file was not copied.
-	Snapshot string `json:"snapshot,omitempty"`
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
+}
+
+// Snapshot describes a file that a faulted handle left behind: its size
+// and SHA-256, and the path of its copy in the run's directory, if the run
+// kept one.
+type Snapshot struct {
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	Copy   string `json:"copy,omitempty"`
 }
 
 // Fault describes a fault: its Type, as rules name it, such as fail or
