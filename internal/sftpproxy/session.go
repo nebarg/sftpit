@@ -83,7 +83,7 @@ type Options struct {
 	// passed fires as it arrives.
 	MoreTimers <-chan Timer
 
-	// Released, if set, is called as each Stall or Freeze begins, and
+	// Released, if set, is called as each Stall or Freeze is injected, and
 	// returns a channel that is closed to release the stalls and freezes
 	// then in progress, as their own Release does.
 	Released func() <-chan struct{}
@@ -708,10 +708,7 @@ func (s *session) hold(req *request) error {
 	case Freeze:
 		limit, release = a.Limit, a.Release
 	}
-	var released <-chan struct{}
-	if !delay && s.released != nil {
-		released = s.released()
-	}
+	released := req.released
 	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	select {
@@ -880,11 +877,13 @@ func (s *session) writeReplies() error {
 			if s.hasFired() {
 				return s.awaitMoment()
 			}
-			if _, err := s.client.Write(out.packet); err != nil {
-				return fmt.Errorf("sftpproxy: write reply: %w", err)
-			}
+			// Recording first means that a client never has a reply whose
+			// event a facts query cannot see yet.
 			if out.req != nil {
 				s.recordOperation(out.req, out.reply)
+			}
+			if _, err := s.client.Write(out.packet); err != nil {
+				return fmt.Errorf("sftpproxy: write reply: %w", err)
 			}
 			if s.order == CompletionOrder {
 				<-s.completion.inFlight

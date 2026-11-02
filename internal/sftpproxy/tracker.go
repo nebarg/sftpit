@@ -48,6 +48,10 @@ type request struct {
 	received time.Time
 	injected bool
 
+	// released is closed when Options.Released releases the request's
+	// Stall or Freeze.
+	released <-chan struct{}
+
 	// backendReply names the backend's reply, once it has answered, and
 	// readOnly is the read-only path that refused the request, if one did.
 	backendReply string

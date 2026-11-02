@@ -34,6 +34,7 @@ func Explain(opts Options) ([]byte, error) {
 	f := fileConfig{
 		SchemaVersion: schemaVersion,
 		EnvFile:       r.envFiles,
+		ScenariosDir:  cfg.ScenarioFiles.Dir(),
 		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HTTPListen: cfg.HTTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace), ReplyOrder: cfg.ReplyOrder.String()},
 		Storage: storageConfig{
 			DataDir:       cfg.DataDir,
@@ -57,16 +58,9 @@ func Explain(opts Options) ([]byte, error) {
 		f.Scenarios = make(map[string]scenarioConfig, len(cfg.Scenarios))
 	}
 	for name, s := range cfg.Scenarios {
-		rules := slices.Clone(s.Rules)
-		slices.SortStableFunc(rules, func(a, b faults.Rule) int { return cmp.Compare(a.Priority, b.Priority) })
-		sc := scenarioConfig{Seed: s.Seed, Faults: []ruleConfig{}}
-		for _, rule := range rules {
-			sc.Faults = append(sc.Faults, longForm(rule))
-		}
-		if s.Chaos != nil {
-			sc.Chaos = longChaos(s.Chaos)
-		}
-		f.Scenarios[name] = sc
+		s.Rules = slices.Clone(s.Rules)
+		slices.SortStableFunc(s.Rules, func(a, b faults.Rule) int { return cmp.Compare(a.Priority, b.Priority) })
+		f.Scenarios[name] = longScenario(s)
 	}
 
 	var doc yaml.Node
@@ -176,6 +170,19 @@ func (r valueRange[T]) MarshalJSON() ([]byte, error) {
 		Min T `json:"min"`
 		Max T `json:"max"`
 	}{r.Min, r.Max})
+}
+
+// longScenario returns s with every rule in the long form, in the order
+// given.
+func longScenario(s Scenario) scenarioConfig {
+	sc := scenarioConfig{Description: s.Description, Seed: s.Seed, Faults: []ruleConfig{}}
+	for _, rule := range s.Rules {
+		sc.Faults = append(sc.Faults, longForm(rule))
+	}
+	if s.Chaos != nil {
+		sc.Chaos = longChaos(s.Chaos)
+	}
+	return sc
 }
 
 // longForm returns r as a rule in the long form, with every default

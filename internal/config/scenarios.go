@@ -25,9 +25,10 @@ import (
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 type scenarioConfig struct {
-	Seed   *faults.Seed `yaml:"seed,omitempty"`
-	Faults []ruleConfig `yaml:"faults"`
-	Chaos  *chaosConfig `yaml:"chaos,omitempty"`
+	Description string       `yaml:"description,omitempty"`
+	Seed        *faults.Seed `yaml:"seed,omitempty"`
+	Faults      []ruleConfig `yaml:"faults"`
+	Chaos       *chaosConfig `yaml:"chaos,omitempty"`
 }
 
 type ruleConfig struct {
@@ -224,17 +225,9 @@ var corruptions = map[string]sftpproxy.Corruption{
 	"flip_bytes": sftpproxy.FlipBytes,
 }
 
-// scenarios validates every scenario, and checks that selected names one
-// unless it is "". Rules may refer only to users, and keys, that the
-// configuration defines.
-func scenarios(defined map[string]scenarioConfig, selected string, users []sshfront.User) (map[string]Scenario, error) {
-	if _, ok := defined[selected]; selected != "" && !ok {
-		names := slices.Sorted(maps.Keys(defined))
-		if len(names) == 0 {
-			return nil, fmt.Errorf("scenario %q is not defined; the configuration defines no scenarios", selected)
-		}
-		return nil, fmt.Errorf("scenario %q is not defined; the configuration defines %s", selected, strings.Join(names, ", "))
-	}
+// scenarios validates every scenario. Rules may refer only to users, and
+// keys, that the configuration defines.
+func scenarios(defined map[string]scenarioConfig, users []sshfront.User) (map[string]Scenario, error) {
 	valid := make(map[string]Scenario, len(defined))
 	for _, name := range slices.Sorted(maps.Keys(defined)) {
 		field := "scenarios." + name
@@ -250,6 +243,26 @@ func scenarios(defined map[string]scenarioConfig, selected string, users []sshfr
 	return valid, nil
 }
 
+// choose returns the scenario selected, one of the configuration's
+// scenarios or of files, or no scenario if selected is "".
+func choose(selected string, configured map[string]Scenario, files []ScenarioFile) (Scenario, error) {
+	if s, ok := configured[selected]; ok || selected == "" {
+		return s, nil
+	}
+	names := slices.Collect(maps.Keys(configured))
+	for _, f := range files {
+		if f.Name == selected {
+			return f.Scenario, nil
+		}
+		names = append(names, f.Name)
+	}
+	if len(names) == 0 {
+		return Scenario{}, fmt.Errorf("scenario %q is not defined; the configuration defines no scenarios", selected)
+	}
+	slices.Sort(names)
+	return Scenario{}, fmt.Errorf("scenario %q is not defined; the configuration defines %s", selected, strings.Join(names, ", "))
+}
+
 func (s scenarioConfig) scenario(field string, users []sshfront.User) (Scenario, error) {
 	rules, err := parseRules(field+".", s.Faults, users)
 	if err != nil {
@@ -258,7 +271,7 @@ func (s scenarioConfig) scenario(field string, users []sshfront.User) (Scenario,
 	if err := faults.Check(rules); err != nil {
 		return Scenario{}, fmt.Errorf("%s: %w", field, err)
 	}
-	valid := Scenario{Seed: s.Seed, Rules: rules}
+	valid := Scenario{Description: s.Description, Seed: s.Seed, Rules: rules}
 	if s.Chaos != nil {
 		if valid.Chaos, err = s.Chaos.chaos(users); err != nil {
 			return Scenario{}, fmt.Errorf("%s.chaos: %w", field, err)

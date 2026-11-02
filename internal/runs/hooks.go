@@ -45,6 +45,9 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 	if action == nil {
 		return
 	}
+	// Taken before the fault is announced, so that a release that follows
+	// the announcement ends it.
+	released := rules.Released()
 	attrs := []any{"conn", conn.ID(), "operation", event}
 	if conn.User() != "" {
 		attrs = append(attrs, "user", conn.User())
@@ -74,7 +77,7 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 		}
 	case sftpproxy.Freeze:
 		conn.Freeze()
-		ended(wait(ctx, a.Limit, a.Release, rules.Released(), "limit"))
+		ended(wait(ctx, a.Limit, a.Release, released, "limit"))
 		err = conn.Close()
 	case sftpproxy.ListenerDown:
 		conn.Server().Down(a.Duration, a.CloseExisting)

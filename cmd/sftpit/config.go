@@ -87,7 +87,16 @@ func configCommand(args []string, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "sftpit config validate: warning: %s\n", warning)
 	}
-	fmt.Fprintf(stdout, "%s is valid: %s and %s\n", opts.ConfigFile, count(len(cfg.Users), "user"), count(len(cfg.Scenarios), "scenario"))
+	files, err := cfg.ScenarioFiles.List()
+	if err != nil {
+		fmt.Fprintf(stderr, "sftpit config validate: %v\n", err)
+		return exitFailure
+	}
+	summary := count(len(cfg.Users), "user") + " and " + count(len(cfg.Scenarios), "scenario")
+	if len(files) > 0 {
+		summary = count(len(cfg.Users), "user") + ", " + count(len(cfg.Scenarios), "scenario") + " and " + count(len(files), "scenario file")
+	}
+	fmt.Fprintf(stdout, "%s is valid: %s\n", opts.ConfigFile, summary)
 	return exitOK
 }
 

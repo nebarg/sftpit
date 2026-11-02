@@ -20,8 +20,14 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// start starts runs with opts, whose scenarios are chaos, with no seed, and
-// own, which pins seed 9, and returns them with their control API.
+// testScenarios are the scenarios that start configures: chaos, with no
+// seed, and own, which pins seed 9.
+var testScenarios = map[string]config.Scenario{"chaos": {}, "own": {Seed: new(faults.Seed(9))}}
+
+var testUsers = []sshfront.User{{Name: "test", Password: "test", Home: "/"}}
+
+// start starts runs with opts, whose scenarios are testScenarios, and
+// returns them with their control API.
 func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	t.Helper()
 	w, err := runs.TempWorkspace()
@@ -37,9 +43,9 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts.Server = sshfront.Config{HostKeys: []ssh.Signer{hostKey}, Users: []sshfront.User{{Name: "test", Password: "test", Home: "/"}}}
+	opts.Server = sshfront.Config{HostKeys: []ssh.Signer{hostKey}, Users: testUsers}
 	opts.Limits = backend.Limits{MaxFileBytes: 1 << 20, MaxTotalBytes: 1 << 20, MaxFiles: 100, MaxOpenFiles: 10}
-	opts.Scenarios = map[string]config.Scenario{"chaos": {}, "own": {Seed: new(faults.Seed(9))}}
+	opts.Scenarios = testScenarios
 	opts.Logger = slog.New(slog.DiscardHandler)
 	m, err := runs.Start(w, opts)
 	if err != nil {
@@ -72,6 +78,15 @@ func call(t *testing.T, api http.Handler, method, path, body string) (int, map[s
 		t.Fatalf("%s %s = %d %q: %v", method, path, rec.Code, rec.Body, err)
 	}
 	return rec.Code, decoded
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // equalJSON reports whether two decoded JSON values are equal.

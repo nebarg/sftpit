@@ -196,8 +196,8 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 			Action: sftpproxy.Stall{When: sftpproxy.After, Limit: time.Minute},
 		},
 	}
-	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Rules(), want) {
-		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Rules(), want)
+	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Chosen().Rules, want) {
+		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Chosen().Rules, want)
 	}
 	if s := cfg.Scenarios["upload-recovery"].Seed; s == nil || *s != 481516 {
 		t.Errorf("the scenario's Seed = %v, want 481516", s)
@@ -253,8 +253,8 @@ func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Scenario != "" || len(cfg.Rules()) != 0 {
-		t.Errorf("Load chose scenario %q with %d rules, want none without --scenario", cfg.Scenario, len(cfg.Rules()))
+	if cfg.Scenario != "" || len(cfg.Chosen().Rules) != 0 {
+		t.Errorf("Load chose scenario %q with %d rules, want none without --scenario", cfg.Scenario, len(cfg.Chosen().Rules))
 	}
 
 	broken := testutil.WriteFile(t, filepath.Join(dir, "broken.yaml"), withScenarios+valid+`  broken:

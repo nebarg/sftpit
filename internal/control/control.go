@@ -60,6 +60,8 @@ func Handler(m *runs.Manager, hosts []string) http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/files/content", a.fileContent)
 	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots", a.snapshots)
 	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots/{n}/content", a.snapshotContent)
+	mux.HandleFunc("GET /api/v1/scenarios", a.scenarios)
+	mux.HandleFunc("PUT /api/v1/scenarios/{name}", a.saveScenario)
 	return protect(mux, hosts)
 }
 
@@ -116,7 +118,7 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
 		return http.StatusConflict
-	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios):
+	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios), errors.Is(err, config.ErrInvalidScenarioFile):
 		return http.StatusBadRequest
 	case errors.Is(err, runs.ErrUnknownRun):
 		return http.StatusNotFound

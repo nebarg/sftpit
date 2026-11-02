@@ -44,6 +44,18 @@ func TestConfigValidateChecksWithoutStarting(t *testing.T) {
 		t.Errorf("validate left %v in the config's directory (%v), want only the config and env file", entries, err)
 	}
 
+	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "quiet.yaml"), "schema_version: 1\nfaults: []\n")
+	if code, stdout, _ := runConfig(t, "validate", "--config", config); code != exitOK || stdout != config+" is valid: 2 users, 1 scenario and 1 scenario file\n" {
+		t.Errorf("validate = %d with stdout %q, want the scenario file counted", code, stdout)
+	}
+	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "upload-recovery.yaml"), "schema_version: 1\nfaults: []\n")
+	if code, _, stderr := runConfig(t, "validate", "--config", config); code != exitUsage || !strings.Contains(stderr, "the configuration file defines a scenario upload-recovery too") {
+		t.Errorf("validate = %d with stderr %q, want the clash with the configuration reported", code, stderr)
+	}
+	if err := os.Remove(filepath.Join(dir, "scenarios", "upload-recovery.yaml")); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := os.Chmod(filepath.Join(dir, ".env"), 0o644); err != nil {
 		t.Fatal(err)
 	}

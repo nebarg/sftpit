@@ -101,6 +101,7 @@ func writeEveryAction(t *testing.T) Options {
 	testutil.WriteFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "")
 	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: .env
+scenarios_dir: ./saved
 server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys, reply_order: completion}
 storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
 users:
@@ -115,6 +116,7 @@ scenarios:
   empty: {faults: []}
   zero: {seed: 0, faults: []}
   dev-chaos:
+    description: "Heavy chaos for partner-b's orders,\nand no removals."
     chaos: {preset: heavy, scope: {user: partner-b, filename: orders.csv}, extras: [wrong_size, corrupt_download], paused: true}
     faults:
       - {id: deny, match: {operation: remove}, action: {type: fail, when: before, status: permission_denied}}

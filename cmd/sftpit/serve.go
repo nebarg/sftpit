@@ -170,15 +170,16 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 		return err
 	}
 	manager, err := runs.Start(workspace, runs.Options{
-		Server:     sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
-		SeedDir:    cfg.SeedDir,
-		Limits:     cfg.Limits,
-		ReplyOrder: cfg.ReplyOrder,
-		Policy:     cfg.Policy,
-		Scenarios:  cfg.Scenarios,
-		Scenario:   cfg.Scenario,
-		Seed:       cfg.Seed,
-		Logger:     logger,
+		Server:        sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
+		SeedDir:       cfg.SeedDir,
+		Limits:        cfg.Limits,
+		ReplyOrder:    cfg.ReplyOrder,
+		Policy:        cfg.Policy,
+		Scenarios:     cfg.Scenarios,
+		ScenarioFiles: cfg.ScenarioFiles,
+		Scenario:      cfg.Scenario,
+		Seed:          cfg.Seed,
+		Logger:        logger,
 	})
 	if err != nil {
 		return err
@@ -295,8 +296,8 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 	}
 	fmt.Fprintf(w, "  run: %s\n", run.ID)
 	if s := run.Scenario; s.Name != "" {
-		fmt.Fprintf(w, "  scenario: %s (%s)\n", s.Name, count(len(cfg.Rules()), "fault rule"))
-		if c := cfg.Scenarios[s.Name].Chaos; c != nil {
+		fmt.Fprintf(w, "  scenario: %s (%s)\n", s.Name, count(len(cfg.Chosen().Rules), "fault rule"))
+		if c := cfg.Chosen().Chaos; c != nil {
 			paused := ""
 			if c.Paused {
 				paused = ", paused"

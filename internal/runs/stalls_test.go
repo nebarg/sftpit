@@ -2,12 +2,14 @@ package runs
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,6 +93,46 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 		})
 	}
 }
+
+func TestAReleaseAsAFreezeAtConnectIsAnnouncedEndsIt(t *testing.T) {
+	var m atomic.Pointer[Manager]
+	// A release just after the fault is announced must still end it, as
+	// one from the API can.
+	release := logHook(func(msg string) {
+		if msg != "injected fault" {
+			return
+		}
+		if err := m.Load().ReleaseStalls(m.Load().Status().Run.ID); err != nil {
+			t.Errorf("ReleaseStalls: %v", err)
+		}
+	})
+	started, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"held": {Rules: []faults.Rule{connectRule(sftpproxy.Freeze{Limit: time.Minute})}}}, Scenario: "held", Logger: slog.New(release)})
+	m.Store(started)
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer raw.Close()
+	if err := raw.SetDeadline(time.Now().Add(waitTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(raw).ReadString('\n'); line != "" || !errors.Is(err, io.EOF) {
+		t.Errorf("read %q (%v), want the frozen connection closed once released", line, err)
+	}
+}
+
+// logHook is a log handler that calls itself with each message.
+type logHook func(msg string)
+
+func (h logHook) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h logHook) Handle(_ context.Context, r slog.Record) error {
+	h(r.Message)
+	return nil
+}
+
+func (h logHook) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h logHook) WithGroup(string) slog.Handler      { return h }
 
 func TestResetStartsAnInlineScenario(t *testing.T) {
 	var logs testutil.SyncBuffer

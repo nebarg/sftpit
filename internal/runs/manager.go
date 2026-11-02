@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -28,8 +26,8 @@ var (
 	// longer current.
 	ErrStaleRun = errors.New("stale run")
 
-	// ErrUnknownScenario reports a reset to a scenario that the
-	// configuration does not define.
+	// ErrUnknownScenario reports a reset to a scenario that neither the
+	// configuration nor a scenario file defines.
 	ErrUnknownScenario = errors.New("unknown scenario")
 
 	// ErrSeedWithoutScenario reports a reset that pins a seed for a run
@@ -71,6 +69,10 @@ type Options struct {
 
 	// Scenarios are the scenarios whose faults a run can inject, by name.
 	Scenarios map[string]config.Scenario
+
+	// ScenarioFiles, if set, are more scenarios a run can inject the faults
+	// of, each read from its file when a run starts.
+	ScenarioFiles *config.ScenarioFiles
 
 	// Scenario names the first run's scenario, or is "" for a run without
 	// faults. Seed, if set, pins its random decisions in place of the
@@ -483,13 +485,9 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
 		}
 		return choice{scenario: withSeed(Scenario{}, nil)}, nil
 	}
-	s, ok := m.opts.Scenarios[name]
-	if !ok {
-		defined := "no scenarios"
-		if len(m.opts.Scenarios) > 0 {
-			defined = strings.Join(slices.Sorted(maps.Keys(m.opts.Scenarios)), ", ")
-		}
-		return choice{}, fmt.Errorf("runs: %w %q; the configuration defines %s", ErrUnknownScenario, name, defined)
+	s, err := m.named(name)
+	if err != nil {
+		return choice{}, err
 	}
 	return choice{scenario: withSeed(Scenario{Name: name}, cmp.Or(seed, s.Seed)), rules: s.Rules, chaos: s.Chaos}, nil
 }

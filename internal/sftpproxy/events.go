@@ -16,6 +16,14 @@ import (
 // rule.
 func (s *session) injected(req *request, level slog.Level, attrs ...any) {
 	req.injected = true
+	// Taken before the fault is announced, so that a release that follows
+	// the announcement ends it.
+	switch req.action.(type) {
+	case Stall, Freeze:
+		if s.released != nil {
+			req.released = s.released()
+		}
+	}
 	s.logger.Log(context.Background(), level, "injected fault", attrs...)
 	if level < slog.LevelInfo || s.record == nil {
 		return
@@ -110,7 +118,7 @@ func faultType(a Action) string {
 	return ""
 }
 
-// recordOperation records req as an event once the client has its reply.
+// recordOperation records req as an event as its reply is written.
 // A read or write that succeeded and that no fault acted on is summed into
 // its handle's transfer instead.
 func (s *session) recordOperation(req *request, reply sftpwire.Packet) {

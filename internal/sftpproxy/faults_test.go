@@ -14,6 +14,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
@@ -217,6 +218,53 @@ func TestReleasedClosesAFrozenConnection(t *testing.T) {
 			t.Errorf("connection events = %v, want it frozen, then closed", got)
 		}
 	})
+}
+
+func TestAReleaseAsAFaultIsAnnouncedEndsIt(t *testing.T) {
+	tests := []struct {
+		name   string
+		action sftpproxy.Action
+	}{
+		{"a stall", sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}},
+		{"a freeze", sftpproxy.Freeze{When: sftpproxy.Before, Limit: time.Minute}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var mu sync.Mutex
+				current := make(chan struct{})
+				p, fb := startProxyOnFake(t, sftpproxy.Options{
+					Faults: onPath("/a", tt.action),
+					Released: func() <-chan struct{} {
+						mu.Lock()
+						defer mu.Unlock()
+						return current
+					},
+					// A release just after the fault is announced must still
+					// end it, as one from the API can.
+					Record: func(e events.Event) {
+						if e.Kind == events.FaultInjected {
+							mu.Lock()
+							defer mu.Unlock()
+							close(current)
+							current = make(chan struct{})
+						}
+					},
+				})
+				start := time.Now()
+				p.client.send(t, 1, &sftpwire.Stat{Path: "/a"})
+				if _, ok := tt.action.(sftpproxy.Freeze); ok {
+					p.client.assertClosed(t)
+				} else {
+					fb.reply(t, fb.next(t).id, &sftpwire.AttrsReply{})
+					p.client.assertReplies(t, 1)
+				}
+				if got := time.Since(start); got != 0 {
+					t.Errorf("the fault ended after %v, want it released at once", got)
+				}
+			})
+		})
+	}
 }
 
 func TestFailBeforeAnswersWithoutTheBackend(t *testing.T) {

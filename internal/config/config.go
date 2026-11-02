@@ -111,6 +111,10 @@ type Config struct {
 	// Scenarios are the configuration's scenarios, by name.
 	Scenarios map[string]Scenario
 
+	// ScenarioFiles are the scenarios saved as files, one for each, which
+	// are read again each time one is used.
+	ScenarioFiles *ScenarioFiles
+
 	// Scenario names the scenario whose rules inject faults, or is "" for
 	// none.
 	Scenario string
@@ -120,10 +124,23 @@ type Config struct {
 
 	// Warnings describe problems that do not prevent sftpit from starting.
 	Warnings []string
+
+	// chosen is the scenario that Scenario names, as it was read.
+	chosen Scenario
+}
+
+// Chosen returns the scenario that Scenario names, from the configuration
+// file or from its scenario file as it was read, or no scenario if Scenario
+// is "".
+func (c *Config) Chosen() Scenario {
+	return c.chosen
 }
 
 // Scenario is a validated scenario.
 type Scenario struct {
+	// Description says what the scenario is for.
+	Description string
+
 	// Seed is the seed the scenario pins, or nil.
 	Seed *faults.Seed
 
@@ -133,11 +150,6 @@ type Scenario struct {
 	// Chaos is the scenario's chaos, whose rules are tried after its own, or
 	// nil.
 	Chaos *faults.Chaos
-}
-
-// Rules returns the fault rules of the chosen scenario, if any.
-func (c *Config) Rules() []faults.Rule {
-	return c.Scenarios[c.Scenario].Rules
 }
 
 // Options are the command-line settings. They take precedence over the
@@ -183,6 +195,7 @@ type Options struct {
 type fileConfig struct {
 	SchemaVersion int           `yaml:"schema_version"`
 	EnvFile       stringList    `yaml:"env_file,flow,omitempty"`
+	ScenariosDir  string        `yaml:"scenarios_dir,omitempty"`
 	Server        serverConfig  `yaml:"server"`
 	Storage       storageConfig `yaml:"storage"`
 	Users         []userConfig  `yaml:"users,omitempty"`
@@ -422,8 +435,24 @@ func read(opts Options) (*reading, error) {
 	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
 		return nil, err
 	}
-	cfg.Scenarios, err = scenarios(f.Scenarios, opts.Scenario, cfg.Users)
+	if cfg.Scenarios, err = scenarios(f.Scenarios, cfg.Users); err != nil {
+		return nil, err
+	}
+	defaultDir := defaultScenariosDir
+	if opts.ConfigFile == "" {
+		defaultDir = defaultScenariosDirWithoutConfig
+	}
+	cfg.ScenarioFiles = NewScenarioFiles(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), cfg.Users, cfg.Scenarios)
+	files, err := cfg.ScenarioFiles.List()
 	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		if file.Err != nil {
+			return nil, file.Err
+		}
+	}
+	if cfg.chosen, err = choose(opts.Scenario, cfg.Scenarios, files); err != nil {
 		return nil, err
 	}
 	cfg.Scenario, cfg.Seed = opts.Scenario, opts.Seed
@@ -435,26 +464,36 @@ func decodeFile(name string) (*fileConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
 	var f fileConfig
-	if err := dec.Decode(&f); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("%s: the file is empty; it needs at least schema_version: %d", name, schemaVersion)
-		}
+	if err := decodeStrict(data, &f, &f.SchemaVersion); err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%s: expected a single YAML document", name)
+	return &f, nil
+}
+
+// decodeStrict decodes data, a single YAML document, into v, refusing
+// fields that v does not have, and checks the schema version it sets in
+// version.
+func decodeStrict(data []byte, v any, version *int) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("the file is empty; it needs at least schema_version: %d", schemaVersion)
+		}
+		return err
 	}
-	switch f.SchemaVersion {
+	if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
+		return errors.New("expected a single YAML document")
+	}
+	switch *version {
 	case schemaVersion:
 	case 0:
-		return nil, fmt.Errorf("%s: schema_version is required; use schema_version: %d", name, schemaVersion)
+		return fmt.Errorf("schema_version is required; use schema_version: %d", schemaVersion)
 	default:
-		return nil, fmt.Errorf("%s: schema_version %d is not supported; this sftpit reads version %d", name, f.SchemaVersion, schemaVersion)
+		return fmt.Errorf("schema_version %d is not supported; this sftpit reads version %d", *version, schemaVersion)
 	}
-	return &f, nil
+	return nil
 }
 
 // resolvePath resolves a path from the configuration file against the

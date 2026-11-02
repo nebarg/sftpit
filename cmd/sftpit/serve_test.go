@@ -534,18 +534,57 @@ func TestServeRecordsEventsThatTheAPIServes(t *testing.T) {
 	if _, err := c.Stat("/missing"); err == nil {
 		t.Fatal("Stat of a missing file succeeded")
 	}
-	// The event is recorded just after the client has its reply.
-	var ops []any
-	for deadline := time.Now().Add(startTimeout); len(ops) == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
-		page := requestJSON(t, "GET", "http://"+s.apiAddr+"/api/v1/runs/"+s.run+"/events?kind=operation&path=/missing", "")
-		ops, _ = page["events"].([]any)
-	}
+	// The event is recorded before the client has its reply.
+	page := requestJSON(t, "GET", "http://"+s.apiAddr+"/api/v1/runs/"+s.run+"/events?kind=operation&path=/missing", "")
+	ops, _ := page["events"].([]any)
 	if len(ops) != 1 {
 		t.Fatalf("operations on /missing = %v, want the STAT", ops)
 	}
 	op := ops[0].(map[string]any)
 	if op["request"] != "SSH_FXP_STAT" || op["user"] != "test" || op["reply"] != "SSH_FX_NO_SUCH_FILE" || op["connection"] == nil {
 		t.Errorf("operation = %v, want test's STAT answered no such file", op)
+	}
+}
+
+func TestServeRunsScenarioFilesAndSavesThemThroughTheAPI(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "sftpit.yaml")
+	testutil.WriteFile(t, config, "schema_version: 1\nscenarios:\n  configured: {faults: []}\n")
+	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "from-file.yaml"), `schema_version: 1
+faults:
+  - {id: deny-stat, match: {operation: stat}, action: {type: fail, when: before, status: permission_denied}}
+`)
+	s := startServe(t, "--config", config, "--scenario", "from-file")
+	if want := "  scenario: from-file (1 fault rule)\n"; !strings.Contains(s.stdout.String(), want) {
+		t.Errorf("the banner lacks %q:\n%s", want, s.stdout.String())
+	}
+	if _, err := s.dial(t, "test", "test").Stat("/"); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Stat = %v, want the scenario file's fault", err)
+	}
+
+	api := "http://" + s.apiAddr + "/api/v1"
+	req, err := http.NewRequest("PUT", api+"/scenarios/saved", strings.NewReader(`{"faults": [{"id": "deny-mkdir", "match": {"operation": "mkdir"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(control.RequestHeader, "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT scenarios/saved: %v", err)
+	}
+	resp.Body.Close()
+	saved := filepath.Join(dir, "scenarios", "saved.yaml")
+	if _, err := os.Stat(saved); resp.StatusCode != http.StatusCreated || err != nil {
+		t.Fatalf("PUT scenarios/saved = %s, and the file: %v", resp.Status, err)
+	}
+
+	requestJSON(t, "POST", api+"/reset", `{"scenario": "saved"}`)
+	c := s.dial(t, "test", "test")
+	if err := c.Mkdir("/new"); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Mkdir = %v, want the saved scenario's fault", err)
+	}
+	if _, err := c.Stat("/"); err != nil {
+		t.Errorf("Stat = %v, want no fault from the first scenario", err)
 	}
 }
 

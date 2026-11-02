@@ -86,6 +86,7 @@ sftpit serve --config ./sftpit.yaml
 schema_version: 1
 
 env_file: ".env" # optional; a path or a list of paths
+scenarios_dir: "./scenarios" # scenario files, one for each; the default
 
 server:
   sftp_listen: "127.0.0.1:2122"
@@ -149,7 +150,7 @@ sftpit config explain --config ./sftpit.yaml
 
 ## Faults
 
-A scenario in the configuration lists fault rules, and `--scenario` chooses the one a run injects. Without it, sftpit injects nothing. Every scenario is checked at startup, whichever one is chosen.
+A scenario in the configuration lists fault rules, and `--scenario` chooses the one a run injects. Without it, sftpit injects nothing. Every scenario is checked at startup, whichever one is chosen, those in [scenario files](#scenario-files) too.
 
 ```yaml
 scenarios:
@@ -421,7 +422,7 @@ Every field of the body is optional:
 - `faults` and `chaos` give the next run's rules and [chaos](#chaos) in place of a named scenario, as a [change of rules](#changing-the-rules-during-a-run) does, so a test can start from rules of its own. Status then shows `"inline": true`, and a reset without `scenario`, `faults` or `chaos` repeats them.
 - `seed` pins the next run's random decisions. Without it, the scenario's own seed does, or the run draws a fresh one.
 
-An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, or invalid rules or chaos are refused with status 400 and leave the run alone. The scenarios are those of the configuration as it was at startup, so a change to the file needs a restart.
+An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, invalid rules or chaos, or a scenario file that no longer holds a valid scenario are refused with status 400 and leave the run alone. The configuration's scenarios are those of the file as it was at startup, so a change to it needs a restart, but a [scenario file](#scenario-files) is read each time a run starts, so a save or an edit applies at the next reset.
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
@@ -501,7 +502,7 @@ The kinds of event:
 |---|---|
 | `run_started` | the run's ID, scenario and seed, and the rules and chaos it starts with |
 | `connected`, `authenticated`, `disconnected` | each connection as it is accepted, logs in and ends, with the user and, for a key, its fingerprint |
-| `operation` | each request once its client has the reply: the `reply`, what the backend answered as `backend_reply` if the request reached it, how long it took, the `rule` whose fault acted on it, and the `read_only` path that refused it |
+| `operation` | each request as its reply is sent, so a query made once the client has the reply finds it: the `reply`, what the backend answered as `backend_reply` if the request reached it, how long it took, the `rule` whose fault acted on it, and the `read_only` path that refused it |
 | `transfer` | the reads and writes through a file handle, summed once it is closed or its session ends |
 | `fault` | each fault as it takes effect, with its rule, type, when it acts and its settings |
 | `fault_ended` | the end of a delay, stall or freeze: `elapsed`, `limit`, `released` by `release-stalls`, `canceled` by a change of rules, or `session_ended` |
@@ -542,6 +543,51 @@ curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/files?path=/inc
 `GET /api/v1/runs/{id}/files/content?path=…` sends a file as a download: `application/octet-stream`, as an attachment, with `nosniff` and a content security policy that sandboxes it, so a browser never displays or runs it. It answers range requests, so `Range: bytes=0-4095` previews the start of a file. A missing file is answered with 404, and a directory with 400.
 
 When a fault leaves a file behind, the run [keeps a copy](#faults), up to 64 MiB of copies in all. `GET /api/v1/runs/{id}/snapshots` lists them, numbered in the order they were taken, with the path of the file and the copy's size, time and, with `hash=true`, SHA-256, and `GET /api/v1/runs/{id}/snapshots/{n}/content` downloads one as a file is downloaded. The run's `snapshot` events record every snapshot, with its size and SHA-256, those too large to copy included.
+
+### Scenario files
+
+A scenario can also be a file of its own in `scenarios_dir`, named after the scenario: `scenarios/flaky-partner.yaml` holds `flaky-partner`. The directory is `./scenarios` next to the config file by default, or `./sftpit-scenarios` in the working directory without one. Committing it shares the scenarios with a team. A file holds one scenario, as the configuration's `scenarios` give one, with its own `schema_version`:
+
+```yaml
+schema_version: 1
+description: "Partner B's listings fail, then recover." # notes go here, not in comments
+seed: 7 # optional
+faults:
+  - id: "listing"
+    match: { user: "partner-b", operation: "list", occurrence: [1, 2] }
+    action: { type: "fail", when: "before", status: "failure" }
+```
+
+Every file is checked at startup with the configuration, and `serve`, `config validate` and `config explain` refuse a file that holds no valid scenario, or whose name is not a scenario name or is also a scenario of the configuration. Files whose names start with a dot, or do not end in `.yaml`, are not scenarios. `--scenario` and a reset choose a file's scenario as they do the configuration's, but read the file when the run starts, so a reset picks up a save or an edit without a restart.
+
+`GET /api/v1/scenarios` lists the configuration's scenarios and the files, sorted by name, with the directory:
+
+```json
+{
+  "dir": "/home/me/app/tests/sftpit/scenarios",
+  "scenarios": [
+    { "name": "flaky-partner", "source": "file", "path": "/home/me/app/tests/sftpit/scenarios/flaky-partner.yaml", "hash": "5e1a...", "description": "Partner B's listings fail, then recover.", "seed": "7", "faults": [ ... ] },
+    { "name": "upload-recovery", "source": "config", "seed": "481516", "faults": [ ... ] }
+  ]
+}
+```
+
+Each scenario's `faults` are in the long form, as a run's rules are, with its `chaos` if it has one. A file's `hash` is the SHA-256 of its content. A file that holds no valid scenario is listed with its `error` in place of the scenario.
+
+`PUT /api/v1/scenarios/{name}` saves a scenario file. Its body gives the scenario as a [change of rules](#changing-the-rules-during-a-run) does, `faults` and optionally `chaos`, with an optional `description` and `seed`. To replace a file, it gives the file's `hash` too:
+
+```bash
+curl -X PUT http://127.0.0.1:8122/api/v1/scenarios/flaky-partner \
+  -H 'Sftpit-Control: 1' \
+  -d '{"hash": "5e1a...", "description": "Partner B'"'"'s listings fail, then recover.", "seed": 7, "faults": [...]}'
+```
+
+- **It answers** with the saved scenario as the listing gives it, and status 201 for a new file or 200 for one replaced. The run goes on with its rules: the next run of the scenario has the new ones.
+- **A file changed since it was read is never overwritten.** A save without a `hash` over a file that exists, with one that does not match the file, or with one for a file that is gone is refused with 409, and the file is left as it is. List the scenarios again to see the file as it is now.
+- **The configuration is never rewritten.** A save of a scenario that the configuration defines is refused with 409, so a configured scenario is copied to a file under another name to change it there.
+- **sftpit writes the whole file,** with a header saying so, its rules in the long form, through a temporary file renamed over the old one, so a reader never sees half a file. Comments are not kept, so notes belong in `description`.
+- **Saving the live rules:** the body of `GET /api/v1/runs/{id}/rules`, its `faults` and `chaos`, is a valid body for a save, which turns rules changed during a run into a scenario that a reset can repeat.
+- A name holds only lowercase letters, digits and `-`, so a file can never land outside the directory. A bad name, rules or chaos are refused with 400. The directory is made on the first save.
 
 ### In a test harness
 
