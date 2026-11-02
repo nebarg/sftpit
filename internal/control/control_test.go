@@ -28,6 +28,7 @@ func TestHealthReadinessAndStatus(t *testing.T) {
 		"sftp":    map[string]any{"state": "up"},
 		"backend": "embedded",
 		"run":     map[string]any{"id": m.Status().Run.ID, "scenario": "chaos", "seed": "18446744073709551615", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0},
+		"queued":  false,
 	}
 	if code != http.StatusOK || !equalJSON(body, want) {
 		t.Errorf("status = %d %v, want %v", code, body, want)

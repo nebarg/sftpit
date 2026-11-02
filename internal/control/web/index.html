@@ -37,6 +37,9 @@
         <button type="button" role="tab" id="tab-activity" aria-controls="activity" aria-selected="true">Activity</button>
         <button type="button" role="tab" id="tab-files" aria-controls="files" aria-selected="false">Files</button>
         <button type="button" role="tab" id="tab-rules" aria-controls="rules" aria-selected="false">Rules</button>
+        <button type="button" role="tab" id="tab-chaos" aria-controls="chaos" aria-selected="false">Chaos</button>
+        <button type="button" role="tab" id="tab-builder" aria-controls="builder" aria-selected="false">Builder</button>
+        <button type="button" role="tab" id="tab-scenarios" aria-controls="scenarios" aria-selected="false">Scenarios</button>
       </nav>
 
       <section id="activity" role="tabpanel" aria-labelledby="tab-activity">
@@ -85,15 +88,163 @@
       </section>
 
       <section id="rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+        <div class="toolbar">
+          <button id="save-live" type="button">Save as scenario…</button>
+          <span id="rules-saved" class="muted" role="status"></span>
+        </div>
         <p id="rules-note" class="muted"></p>
         <div class="scroll"><table class="rules">
           <thead>
             <tr>
               <th scope="col">Rule</th><th scope="col">Priority</th><th scope="col">Matches</th><th scope="col">Does</th>
               <th scope="col" class="num">Matched</th><th scope="col" class="num">Selected</th><th scope="col" class="num">Fired</th><th scope="col" class="num">Canceled</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
             </tr>
           </thead>
           <tbody id="rule-rows"></tbody>
+        </table></div>
+        <div id="queued"></div>
+      </section>
+
+      <section id="chaos" role="tabpanel" aria-labelledby="tab-chaos" hidden>
+        <form id="chaos-form" class="form">
+          <fieldset>
+            <legend>Chaos</legend>
+            <div class="choices" role="radiogroup" aria-label="Chaos">
+              <label><input type="radio" name="mode" value="off" checked /> Off</label>
+              <label><input type="radio" name="mode" value="on" /> On</label>
+              <label><input type="radio" name="mode" value="paused" /> Paused, keeping its counts</label>
+            </div>
+            <label>Preset
+              <select name="preset">
+                <option value="light">light: delays on 5% of requests, failures on 1%</option>
+                <option value="moderate">moderate: delays on 10%, failures on 3%, drops in 2% of transfers</option>
+                <option value="heavy">heavy: delays on 20%, failures on 8%, drops in 5% of transfers, freezes</option>
+              </select>
+            </label>
+            <div class="row">
+              <label>For
+                <select name="scope"></select>
+              </label>
+              <label>Which <input name="scope_value" autocomplete="off" /></label>
+            </div>
+            <div class="choices">
+              <label><input type="checkbox" name="extras" value="corrupt_download" /> also corrupt downloads</label>
+              <label><input type="checkbox" name="extras" value="wrong_size" /> also report wrong sizes</label>
+            </div>
+          </fieldset>
+          <div class="actions">
+            <button type="button" id="chaos-preview-button">Preview</button>
+            <button type="submit">Apply now</button>
+          </div>
+        </form>
+        <p id="chaos-note" class="muted" role="status"></p>
+        <div id="chaos-preview"></div>
+      </section>
+
+      <section id="builder" role="tabpanel" aria-labelledby="tab-builder" hidden>
+        <form id="builder-form" class="form">
+          <fieldset>
+            <legend>Fault</legend>
+            <div class="row">
+              <label>Rule ID <input name="id" autocomplete="off" placeholder="corrupt-orders" /></label>
+              <label>Fault <select name="fault"></select></label>
+            </div>
+            <div class="row">
+              <label data-setting="operations">Operations <input name="operations" autocomplete="off" placeholder="any, or such as open_write, rename" /></label>
+              <label data-setting="when">When
+                <select name="when">
+                  <option value="before">before the server acts</option>
+                  <option value="after">after the server acts</option>
+                </select>
+              </label>
+              <label data-setting="duration">Duration <input name="duration" autocomplete="off" placeholder="1500ms, or 200ms-3s" /></label>
+              <label data-setting="cutoff">Cut off after <input name="cutoff" autocomplete="off" inputmode="numeric" placeholder="bytes, such as 1048576" /></label>
+              <label data-setting="result">Then
+                <select name="result">
+                  <option value="status">answer with a status</option>
+                  <option value="close_connection">close the connection</option>
+                  <option value="freeze_connection">freeze the connection</option>
+                </select>
+              </label>
+              <label data-setting="status">Status
+                <select name="status">
+                  <option value="failure">failure</option>
+                  <option value="permission_denied">permission denied</option>
+                  <option value="no_such_file">no such file</option>
+                  <option value="eof">end of file</option>
+                  <option value="bad_message">bad message</option>
+                  <option value="op_unsupported">unsupported</option>
+                </select>
+              </label>
+              <label data-setting="mode">Close with
+                <select name="mode">
+                  <option value="fin">FIN, an orderly close</option>
+                  <option value="rst">RST, a reset</option>
+                </select>
+              </label>
+              <label data-setting="max_freeze">Freeze at most <input name="max_freeze" autocomplete="off" value="2m" /></label>
+              <label data-setting="max_stall">Stall at most <input name="max_stall" autocomplete="off" value="2m" /></label>
+              <label data-setting="transform">Corruption
+                <select name="transform">
+                  <option value="flip_bytes">flip bytes</option>
+                  <option value="omit_range">omit a range</option>
+                  <option value="truncate">truncate</option>
+                </select>
+              </label>
+              <label data-setting="offset">At byte <input name="offset" autocomplete="off" inputmode="numeric" value="0" /></label>
+              <label data-setting="length">Bytes <input name="length" autocomplete="off" inputmode="numeric" value="64" /></label>
+              <label data-setting="size_delta">Size change <input name="size_delta" autocomplete="off" value="-1024" /></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Scope</legend>
+            <div class="row">
+              <label>User <input name="user" autocomplete="off" placeholder="any user" /></label>
+              <label>Key fingerprint <input name="key_fingerprint" autocomplete="off" placeholder="any key" /></label>
+              <label>Files
+                <select name="location">
+                  <option value="">any</option>
+                  <option value="path">this path</option>
+                  <option value="path_prefix">under this path</option>
+                  <option value="path_glob">paths matching</option>
+                  <option value="filename">named</option>
+                  <option value="filename_glob">names matching</option>
+                </select>
+              </label>
+              <label>Path or name <input name="location_value" autocomplete="off" placeholder="/incoming/orders.csv" /></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Trigger</legend>
+            <div class="row">
+              <label>Fires at <select name="trigger"></select></label>
+              <label data-trigger="attempts">First attempts <input name="attempts" autocomplete="off" inputmode="numeric" value="1" /></label>
+              <label data-trigger="occurrence">Occurrences <input name="occurrence" autocomplete="off" placeholder="2, or 2, 3" /></label>
+              <label data-trigger="probability">Probability <input name="probability" autocomplete="off" inputmode="decimal" placeholder="0.1" /></label>
+              <label data-trigger="at">At <input name="at" autocomplete="off" placeholder="2s, or 0s-5s" /></label>
+              <label data-trigger="window">From <input name="from" autocomplete="off" placeholder="10s" /></label>
+              <label data-trigger="window">Until <input name="until" autocomplete="off" placeholder="20s" /></label>
+              <label data-trigger="at window">Counting from <select name="anchor"></select></label>
+            </div>
+          </fieldset>
+          <div class="actions">
+            <button type="submit">Preview</button>
+            <button type="button" id="builder-apply" disabled>Apply now</button>
+            <button type="button" id="builder-queue" disabled>Apply at next reset</button>
+          </div>
+        </form>
+        <p id="builder-note" role="status"></p>
+        <div id="builder-preview"></div>
+      </section>
+
+      <section id="scenarios" role="tabpanel" aria-labelledby="tab-scenarios" hidden>
+        <p id="scenarios-note" class="muted"></p>
+        <div class="scroll"><table class="scenarios">
+          <thead>
+            <tr><th scope="col">Scenario</th><th scope="col">From</th><th scope="col">Description</th><th scope="col">Rules</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+          </thead>
+          <tbody id="scenario-rows"></tbody>
         </table></div>
       </section>
     </main>
@@ -110,6 +261,20 @@
         <div class="actions">
           <button type="button" id="reset-cancel">Cancel</button>
           <button type="submit" class="danger">Reset</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="save-dialog" aria-labelledby="save-heading">
+      <form id="save-form" method="dialog">
+        <h2 id="save-heading">Save as scenario</h2>
+        <p id="save-what"></p>
+        <label>Name <input name="name" autocomplete="off" placeholder="flaky-partner" /></label>
+        <label>Description <textarea name="description" rows="3"></textarea></label>
+        <p id="save-error" class="error-text" role="alert"></p>
+        <div class="actions">
+          <button type="button" id="save-cancel">Cancel</button>
+          <button type="submit">Save</button>
         </div>
       </form>
     </dialog>

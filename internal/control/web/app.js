@@ -5,6 +5,7 @@
 import { APIError, get, runPath, send } from "./api.js";
 import { connectCommands, loginMethods } from "./connection.js";
 import { el, show } from "./dom.js";
+import { loadChaos, loadScenarios, removeRule, setup, showQueued } from "./edit.js";
 import { describeEvent, formatBytes, formatDuration, formatElapsed } from "./format.js";
 import { preview, previewBytes } from "./preview.js";
 import { describeChaos, ruleRows } from "./rules.js";
@@ -27,6 +28,8 @@ const state = {
   tab: "activity",
   filters: {},
   timeline: new Timeline(timelineLimit),
+  // rulesKey identifies the rules the rules table shows.
+  rulesKey: null,
   stream: null,
   selectedFile: null,
 };
@@ -92,6 +95,7 @@ function showStatus(status) {
     ["Rules revision", String(run.revision)],
     ["Stalled", String(run.stalled)],
     ["Frozen", String(run.frozen)],
+    ["Next reset", status.queued ? "starts with the queued rules" : "repeats this scenario"],
   ];
   if (sftp.state === "down") {
     facts.push(["Down until", new Date(sftp.down_until).toLocaleTimeString()]);
@@ -372,25 +376,40 @@ async function loadRules() {
     const chaos = reply.chaos ? ` Chaos: ${describeChaos(reply.chaos)}.` : "";
     show($("rules-note"), `Revision ${reply.revision}. Rules are tried in this order; a rule that has never matched is marked.${chaos}`);
     const rows = ruleRows(reply);
+    // The table is shown again only when the rules change. Otherwise only
+    // the counts change, in place, so that a button is never replaced
+    // under a click on it.
+    const key = JSON.stringify([run, rows.map((r) => [r.id, r.priority, r.match, r.action, r.chaos, r.neverMatched])]);
+    if (key === state.rulesKey) {
+      for (const r of rows) {
+        const cells = $("rule-rows").querySelector(`tr[data-rule="${CSS.escape(r.id)}"]`)?.querySelectorAll("td.count") ?? [];
+        ["matched", "selected", "fired", "canceled"].forEach((name, i) => cells[i] && show(cells[i], String(r.counts[name])));
+      }
+      await showQueued(state.status?.queued);
+      return;
+    }
+    state.rulesKey = key;
     show(
       $("rule-rows"),
       rows.length === 0
-        ? el("tr", {}, el("td", { colspan: 8, class: "muted" }, "No rules: sftpit injects no faults in this run."))
+        ? el("tr", {}, el("td", { colspan: 9, class: "muted" }, "No rules: sftpit injects no faults in this run."))
         : rows.map((r) =>
             el(
               "tr",
-              { class: r.neverMatched ? "idle" : "" },
+              { class: r.neverMatched ? "idle" : "", "data-rule": r.id },
               el("td", {}, el("code", {}, r.id), r.neverMatched ? el("span", { class: "tag" }, "never matched") : ""),
               el("td", { class: "num" }, r.priority ?? ""),
               el("td", {}, r.match),
               el("td", {}, r.action),
-              el("td", { class: "num" }, String(r.counts.matched)),
-              el("td", { class: "num" }, String(r.counts.selected)),
-              el("td", { class: "num" }, String(r.counts.fired)),
-              el("td", { class: "num" }, String(r.counts.canceled)),
+              el("td", { class: "num count" }, String(r.counts.matched)),
+              el("td", { class: "num count" }, String(r.counts.selected)),
+              el("td", { class: "num count" }, String(r.counts.fired)),
+              el("td", { class: "num count" }, String(r.counts.canceled)),
+              el("td", {}, r.chaos ? "" : el("button", { type: "button", title: `Remove ${r.id} from the current run`, onclick: () => removeRule(r.id) }, "Remove")),
             ),
           ),
     );
+    await showQueued(state.status?.queued);
   } catch (err) {
     // A reset between the status and this request makes the run stale;
     // the next poll follows the new one.
@@ -402,9 +421,11 @@ async function loadRules() {
 
 // --- Tabs ---
 
+const tabs = ["activity", "files", "rules", "chaos", "builder", "scenarios"];
+
 function selectTab(tab) {
   state.tab = tab;
-  for (const name of ["activity", "files", "rules"]) {
+  for (const name of tabs) {
     const selected = name === tab;
     $(`tab-${name}`).setAttribute("aria-selected", String(selected));
     $(`tab-${name}`).tabIndex = selected ? 0 : -1;
@@ -414,11 +435,14 @@ function selectTab(tab) {
     loadFiles();
   } else if (tab === "rules") {
     loadRules();
+  } else if (tab === "chaos") {
+    loadChaos();
+  } else if (tab === "scenarios") {
+    loadScenarios();
   }
 }
 
 function onTabKey(ev) {
-  const tabs = ["activity", "files", "rules"];
   const i = tabs.indexOf(state.tab);
   const next = { ArrowRight: tabs[(i + 1) % tabs.length], ArrowLeft: tabs[(i + tabs.length - 1) % tabs.length] }[ev.key];
   if (next) {
@@ -493,10 +517,18 @@ $("filters").addEventListener("submit", (ev) => {
 $("filters").addEventListener("reset", () => setTimeout(applyFilters));
 $("files-refresh").addEventListener("click", loadFiles);
 $("files-hash").addEventListener("change", loadFiles);
-for (const name of ["activity", "files", "rules"]) {
+for (const name of tabs) {
   $(`tab-${name}`).addEventListener("click", () => selectTab(name));
   $(`tab-${name}`).addEventListener("keydown", onTabKey);
 }
+setup({
+  run: () => state.run,
+  showError,
+  changed: () => {
+    poll();
+    loadRules();
+  },
+});
 selectTab("activity");
 loadServer().catch(showError);
 poll();

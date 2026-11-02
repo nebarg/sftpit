@@ -114,6 +114,8 @@ type Manager struct {
 	// failed, until another succeeds.
 	inReset bool
 	failed  error
+	// queued is what Queue set for the next reset, or nil.
+	queued *InlineScenario
 }
 
 // recentRun is the events of a run.
@@ -205,7 +207,8 @@ type ResetRequest struct {
 
 	// Scenario, if set, names the next run's scenario, or is "" for a run
 	// without faults. If neither Scenario nor Inline is set, the next run
-	// repeats the current run's scenario, and its seed if that was pinned.
+	// starts with what Queue set, or else repeats the current run's
+	// scenario, and its seed if that was pinned.
 	Scenario *string
 
 	// Inline, if set, is the next run's scenario, given in place of one the
@@ -261,7 +264,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 	if err != nil {
 		m.failed = err
 	} else {
-		m.current, m.failed = next, nil
+		m.current, m.failed, m.queued = next, nil, nil
 		m.keep(next)
 	}
 	m.mu.Unlock()
@@ -425,12 +428,15 @@ type Status struct {
 	// Stalled counts the requests or replies that stalls hold now, and
 	// Frozen the connections that freezes hold.
 	Stalled, Frozen int
+
+	// Queued reports whether Queue has set the next run's rules.
+	Queued bool
 }
 
 // Status describes the current run.
 func (m *Manager) Status() Status {
 	m.mu.Lock()
-	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision()}
+	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision(), Queued: m.queued != nil}
 	s.Stalled, s.Frozen = m.current.events.Waiting("stall"), m.current.events.Waiting("freeze_connection")
 	switch {
 	case m.inReset:
@@ -464,6 +470,9 @@ func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
 		return m.scenario(*req.Scenario, req.Seed)
 	case req.Inline != nil:
 		return inline(*req.Inline, req.Seed)
+	}
+	if queued := m.Queued(); queued != nil {
+		return inline(*queued, req.Seed)
 	}
 	last := current.run.Scenario
 	seed := req.Seed

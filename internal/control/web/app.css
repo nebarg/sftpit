@@ -228,6 +228,7 @@ select {
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.25rem;
   border-bottom: 1px solid var(--border);
 }
@@ -274,6 +275,8 @@ table {
 
 .scroll {
   overflow-x: auto;
+  /* So that a visually hidden header is clipped with its table. */
+  position: relative;
 }
 
 th,
@@ -282,6 +285,16 @@ td {
   padding: 0.3rem 0.5rem;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+  overflow-wrap: break-word;
+}
+
+th,
+td.num,
+td button {
+  white-space: nowrap;
+}
+
+.timeline td {
   overflow-wrap: anywhere;
 }
 
@@ -450,4 +463,80 @@ dialog label {
 
 .error-text:empty {
   display: none;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.form {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 60rem;
+}
+
+.form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.5rem 1rem 0.9rem;
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.form legend {
+  font-weight: 600;
+  padding: 0 0.25rem;
+}
+
+.form .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+}
+
+.form label {
+  display: grid;
+  gap: 0.15rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.form label,
+.form select,
+.form input {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.form label[hidden] {
+  display: none;
+}
+
+.form .choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+}
+
+.form .choices label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text);
+  font-size: inherit;
+}
+
+.form .actions {
+  justify-content: flex-start;
+}
+
+.scenarios tr.broken {
+  background: var(--fault-bg);
 }

@@ -40,11 +40,10 @@ type Scenario struct {
 // is "" for a new file. The other fields give the scenario as a reset's
 // inline scenario does, with a description and a seed to pin.
 type SaveScenarioRequest struct {
-	Hash        string          `json:"hash,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Seed        *Seed           `json:"seed,omitempty"`
-	Faults      json.RawMessage `json:"faults"`
-	Chaos       json.RawMessage `json:"chaos,omitempty"`
+	Hash        string `json:"hash,omitempty"`
+	Description string `json:"description,omitempty"`
+	Seed        *Seed  `json:"seed,omitempty"`
+	RulesRequest
 }
 
 // scenarios answers with the configuration's scenarios and the scenario
@@ -88,16 +87,7 @@ func (a *api) saveScenario(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if !given(body.Faults) {
-		writeError(w, http.StatusBadRequest, errors.New("faults is required: the list of rules, or [] for none"))
-		return
-	}
-	rules, err := config.ParseRules(body.Faults, a.runs.Users())
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	chaos, err := a.chaos(body.Chaos)
+	rules, chaos, err := a.parseRules(body.RulesRequest)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

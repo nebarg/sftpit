@@ -59,6 +59,10 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/ready", a.ready)
 	mux.HandleFunc("GET /api/v1/status", a.status)
 	mux.HandleFunc("POST /api/v1/reset", a.reset)
+	mux.HandleFunc("GET /api/v1/next", a.next)
+	mux.HandleFunc("PUT /api/v1/next", a.queue)
+	mux.HandleFunc("DELETE /api/v1/next", a.unqueue)
+	mux.HandleFunc("POST /api/v1/rules/check", a.checkRules)
 	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
@@ -145,27 +149,17 @@ func (a *api) rules(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Revision *uint64         `json:"revision"`
-		Faults   json.RawMessage `json:"faults"`
-		Chaos    json.RawMessage `json:"chaos"`
+		Revision *uint64 `json:"revision"`
+		RulesRequest
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	switch {
-	case body.Revision == nil:
+	if body.Revision == nil {
 		writeError(w, http.StatusBadRequest, errors.New("revision is required: the revision of the rules that the change replaces"))
 		return
-	case !given(body.Faults):
-		writeError(w, http.StatusBadRequest, errors.New("faults is required: the list of rules, or [] for none"))
-		return
 	}
-	rules, err := config.ParseRules(body.Faults, a.runs.Users())
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	chaos, err := a.chaos(body.Chaos)
+	rules, chaos, err := a.parseRules(body.RulesRequest)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -276,6 +270,10 @@ type Status struct {
 	SFTP    SFTPStatus `json:"sftp"`
 	Backend string     `json:"backend"`
 	Run     RunStatus  `json:"run"`
+
+	// Queued reports whether the next reset's rules are queued, as
+	// GET /api/v1/next gives them.
+	Queued bool `json:"queued"`
 }
 
 // SFTPStatus says whether clients can reach the current run.
@@ -316,6 +314,7 @@ func newStatus(s runs.Status) Status {
 			Stalled:    s.Stalled,
 			Frozen:     s.Frozen,
 		},
+		Queued: s.Queued,
 	}
 	if s.Err != nil {
 		body.SFTP.Error = s.Err.Error()

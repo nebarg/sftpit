@@ -385,7 +385,12 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 - **Connect:** the SFTP address, an `sftp` command that logs in, the users and how each logs in, never with what, unless the only user is the built-in `test`, the host-key fingerprints, the read-only paths and the workspace. In the [container profile](#with-laravel-sail-or-docker-compose), the command uses each `--control-host` name, as an application in the same compose network would.
 - **Activity:** the run's events as they happen, newest first. A fault that a rule injected is red, with its rule, a request that the read-only policy refused is amber, a failure that sftpit did not inject is purple, and changes to the run are blue, so a failure during development is easy to attribute to sftpit or not. Filters narrow it to a kind, user, path, connection or rule, and clicking a user, connection or rule filters by it. Clicking an event shows all of it. The page keeps the latest 2,000 events and says how many older ones it dropped, and a gap in the run's own record of events shows as a gap.
 - **Files:** the run's files as a tree, with sizes, modes, times and, on request, hashes, and which files the seed holds and whether clients changed them. Selecting a file previews its first 4 KiB as text, or as hex if it is not text, and offers a download. The copies that faults left behind are listed for download too.
-- **Rules:** the run's rules in the order they are tried, what each matches and does, and how many times each has matched, been selected, fired and been canceled, with any rule that has never matched marked, as a mistyped or shadowed rule would be, and chaos's own rules after them. While chaos is on, a banner says so on every view.
+- **Rules:** the run's rules in the order they are tried, what each matches and does, and how many times each has matched, been selected, fired and been canceled, with any rule that has never matched marked, as a mistyped or shadowed rule would be, and chaos's own rules after them. Each of the run's own rules can be removed now, and **Save as scenario** writes the rules and chaos as they are, with the run's seed if it is pinned, to a [scenario file](#scenario-files) and shows its path, asking first if the file exists. What is [queued](#queuing-the-next-run) for the next reset is listed below, with a button to clear it.
+- **Chaos:** a switch to turn [chaos](#chaos) on, off or pause it, keeping its counts, with a preset, a scope of everyone, a user, a path prefix or a filename, and the extras that corrupt downloads or report wrong sizes. **Preview** shows the rules it compiles to, and **Apply now** changes the current run, keeping its own rules. While chaos is on, a banner says so on every view.
+- **Builder:** a form that makes a rule from a fault (a delay, failure, dropped or frozen connection, stall, partial upload or download, download or upload corruption, wrong size, random failures, a read-only path or a missing file), a scope (a user, a key, an exact path, a path prefix or glob, or a filename or filename glob) and a trigger (every match, the first attempts, an occurrence, a probability, a moment or a time window), offering only the triggers a fault can take. **Preview** has sftpit check the rule and shows it in the long form, as the engine runs it. **Apply now** adds it to the current run, and **Apply at next reset** queues the current run's rules with it for the next reset.
+- **Scenarios:** the configuration's scenarios and the scenario files, with their descriptions and rules, and any file's error. A configured scenario can be duplicated to a file, since the configuration is never rewritten.
+
+Every change says whether it applies now or at the next reset. One that applies now asks first, since transfers already open keep the faults chosen when they opened.
 
 The page follows the current run, so after a reset, from the dashboard or elsewhere, it shows the next one. It escapes everything it shows, and it runs under a content security policy that allows only its own files and API, so a file name or file content a client uploaded can never run as a script. It works at phone width and in dark mode.
 
@@ -400,6 +405,8 @@ The page follows the current run, so after a reset, from the dashboard or elsewh
 | `GET /api/v1/server` | how to connect: the SFTP address and profile, the control hosts, the host keys, the users and how each logs in, the default login if it is in use, the read-only paths and the workspace |
 | `GET /api/v1/status` | the state of the SFTP server, the backend and the current run |
 | `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
+| `GET`, `PUT`, `DELETE /api/v1/next` | the rules and chaos [queued for the next reset](#queuing-the-next-run), which `PUT` sets and `DELETE` clears |
+| `POST /api/v1/rules/check` | checks rules and chaos as a change of rules would, without applying them, and answers with them in the long form |
 | `GET /api/v1/runs/{id}/rules` | the run's rules and chaos, their revision and what each rule has done |
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 | `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
@@ -420,11 +427,12 @@ curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
 {
   "sftp": { "state": "up" },
   "backend": "embedded",
-  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0 }
+  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0 },
+  "queued": false
 }
 ```
 
-The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold.
+The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold. `queued` says whether rules are [queued for the next reset](#queuing-the-next-run).
 
 **A reset:**
 - **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
@@ -433,11 +441,17 @@ The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `
 
 Every field of the body is optional:
 - `run` is the run the reset expects to end. If another run is current, the reset is refused with status 409.
-- `scenario` names the next run's scenario, or `""` for none. Without it, the next run repeats the current scenario, and its seed if that was pinned.
+- `scenario` names the next run's scenario, or `""` for none. Without it, the next run starts with the [queued](#queuing-the-next-run) rules if any are queued, or else repeats the current scenario, and its seed if that was pinned.
 - `faults` and `chaos` give the next run's rules and [chaos](#chaos) in place of a named scenario, as a [change of rules](#changing-the-rules-during-a-run) does, so a test can start from rules of its own. Status then shows `"inline": true`, and a reset without `scenario`, `faults` or `chaos` repeats them.
 - `seed` pins the next run's random decisions. Without it, the scenario's own seed does, or the run draws a fresh one.
 
 An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, invalid rules or chaos, or a scenario file that no longer holds a valid scenario are refused with status 400 and leave the run alone. The configuration's scenarios are those of the file as it was at startup, so a change to it needs a restart, but a [scenario file](#scenario-files) is read each time a run starts, so a save or an edit applies at the next reset.
+
+### Queuing the next run
+
+`PUT /api/v1/next` queues rules and chaos, as a [change of rules](#changing-the-rules-during-a-run) gives them, for the next reset that names no scenario and gives none inline, whether that reset comes from the dashboard, `sftpit reset` or a test suite. The current run is left as it is. `GET /api/v1/next` answers with what is queued, in the long form, or 404, and `DELETE /api/v1/next` clears it. Every reset that succeeds clears the queue, one that names a scenario too, and a refused reset leaves it. The run it starts shows `"inline": true`, and the reset's `seed` pins it as for any inline scenario.
+
+`POST /api/v1/rules/check` takes the same body and answers with the rules and chaos in the long form, recipes written out, with the rules a chaos compiles to as `compiled_chaos`, or with 400 and the error a change would give. Nothing changes, so the dashboard previews a rule with it before applying it.
 
 If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
 
