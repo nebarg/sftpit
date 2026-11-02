@@ -2,7 +2,7 @@
 
 Mailpit for SFTP: a local SFTP server for developing and testing file integrations, with faults you can inject on demand — slow responses, dropped connections, random failures and simulated corruption.
 
-**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration, which `sftpit config` checks and explains. Its [control API](#control-api) reports on the run and resets it.
+**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration, which `sftpit config` checks and explains. Its [dashboard](#dashboard) and [control API](#control-api) report on the run and reset it.
 
 ## Quickstart
 
@@ -10,7 +10,7 @@ Mailpit for SFTP: a local SFTP server for developing and testing file integratio
 go run ./cmd/sftpit serve
 ```
 
-sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
+sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. The [dashboard](#dashboard) is at `http://127.0.0.1:8122/`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
 
 `--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces, except in a container with [`--profile container`](#with-laravel-sail-or-docker-compose). The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
 
@@ -377,6 +377,18 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 - **Names:** `sftpit config explain` shows the rules a preset compiles to. Rule IDs that start with `chaos-` are kept for them.
 - **Pausing:** with `paused: true`, chaos's rules match nothing, and a drop it chose does not come, until a [change of rules](#changing-the-rules-during-a-run) resumes them with their counts. A delay or freeze already under way runs its course.
 
+## Dashboard
+
+`sftpit serve` serves a dashboard on the control API's address, `http://127.0.0.1:8122/` by default, which the banner shows. It needs nothing from the internet: its files are in the binary.
+
+- **Run:** the server's state, the current run, its scenario, seed and rules revision, and how many requests are stalled and connections frozen, with buttons to release them and to reset. A reset can repeat the current scenario, choose another or none, and pin a seed, and the dialog says which run it ends.
+- **Connect:** the SFTP address, an `sftp` command that logs in, the users and how each logs in, never with what, unless the only user is the built-in `test`, the host-key fingerprints, the read-only paths and the workspace. In the [container profile](#with-laravel-sail-or-docker-compose), the command uses each `--control-host` name, as an application in the same compose network would.
+- **Activity:** the run's events as they happen, newest first. A fault that a rule injected is red, with its rule, a request that the read-only policy refused is amber, a failure that sftpit did not inject is purple, and changes to the run are blue, so a failure during development is easy to attribute to sftpit or not. Filters narrow it to a kind, user, path, connection or rule, and clicking a user, connection or rule filters by it. Clicking an event shows all of it. The page keeps the latest 2,000 events and says how many older ones it dropped, and a gap in the run's own record of events shows as a gap.
+- **Files:** the run's files as a tree, with sizes, modes, times and, on request, hashes, and which files the seed holds and whether clients changed them. Selecting a file previews its first 4 KiB as text, or as hex if it is not text, and offers a download. The copies that faults left behind are listed for download too.
+- **Rules:** the run's rules in the order they are tried, what each matches and does, and how many times each has matched, been selected, fired and been canceled, with any rule that has never matched marked, as a mistyped or shadowed rule would be, and chaos's own rules after them. While chaos is on, a banner says so on every view.
+
+The page follows the current run, so after a reset, from the dashboard or elsewhere, it shows the next one. It escapes everything it shows, and it runs under a content security policy that allows only its own files and API, so a file name or file content a client uploaded can never run as a script. It works at phone width and in dark mode.
+
 ## Control API
 
 `sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names, or [in a container](#with-laravel-sail-or-docker-compose) on `:8122`. Port `0` picks a free port, and the banner shows the address.
@@ -385,6 +397,7 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 |---|---|
 | `GET /api/v1/health` | `{"status": "ok"}` while sftpit runs |
 | `GET /api/v1/ready` | `{"ready": true}`, or status 503 with the error once a reset has failed |
+| `GET /api/v1/server` | how to connect: the SFTP address and profile, the control hosts, the host keys, the users and how each logs in, the default login if it is in use, the read-only paths and the workspace |
 | `GET /api/v1/status` | the state of the SFTP server, the backend and the current run |
 | `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
 | `GET /api/v1/runs/{id}/rules` | the run's rules and chaos, their revision and what each rule has done |
@@ -395,6 +408,8 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 | `GET /api/v1/runs/{id}/files/content?path=…` | a file of the run, as a download |
 | `GET /api/v1/runs/{id}/snapshots` | the copies the run kept of files that faults left behind |
 | `GET /api/v1/runs/{id}/snapshots/{n}/content` | one of those copies, as a download |
+| `GET /api/v1/scenarios` | the configuration's scenarios and the [scenario files](#scenario-files) |
+| `PUT /api/v1/scenarios/{name}` | saves a scenario file |
 
 ```bash
 curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
@@ -649,13 +664,15 @@ sftpit runs on Linux and macOS, and building it requires Go 1.26 or later.
 make check
 ```
 
-`make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, golangci-lint with the linters in `.golangci.yml`, staticcheck's full checks among them, and the tests with the race detector. `make lint` builds the version of golangci-lint that the Makefile pins, so it needs no install. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
+`make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, golangci-lint with the linters in `.golangci.yml`, staticcheck's full checks among them, the tests with the race detector, and the dashboard's tests, which need Node 20 or later and use only its own test runner. `make lint` builds the version of golangci-lint that the Makefile pins, so it needs no install. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
 
 The integration tests in `test/integration` drive the OpenSSH `sftp` client, phpseclib, and a Laravel application that publishes through Laravel's filesystem against sftpit, and are skipped when a client is missing. The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there. The PHP clients need PHP 8.3 or later and Composer:
 
 ```bash
 make integration-deps
 ```
+
+The dashboard is plain HTML, CSS and JavaScript modules in `internal/control/web`, with no build step and no packages, embedded in the binary, so a change to it needs a rebuild of sftpit. Its logic is in modules that do not touch the page, tested in `internal/control/web/test`.
 
 `make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the PHP clients that `make integration-deps` installed.
 

@@ -28,6 +28,10 @@ jobs:
           php-version: "8.4"
           extensions: gmp, mbstring
           tools: composer
+      # For the dashboard's tests, which use only Node's own test runner.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
       # The conformance tests compare with OpenSSH's sftp-server on Linux.
       - name: Install OpenSSH's sftp-server
         if: runner.os == 'Linux'

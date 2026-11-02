@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/nebarg/sftpit/internal/control"
 )
 
 // readyFile is what serve writes to --ready-file once it listens, so that a
@@ -18,23 +20,14 @@ import (
 // stays the same while serve runs, and no secrets; the current run comes
 // from the control API.
 type readyFile struct {
-	SFTPAddress string    `json:"sftp_address"`
-	HTTPAddress string    `json:"http_address"`
-	Workspace   string    `json:"workspace"`
-	HostKeys    []hostKey `json:"host_keys"`
-}
-
-type hostKey struct {
-	Type        string `json:"type"`
-	Fingerprint string `json:"fingerprint"`
+	SFTPAddress string            `json:"sftp_address"`
+	HTTPAddress string            `json:"http_address"`
+	Workspace   string            `json:"workspace"`
+	HostKeys    []control.HostKey `json:"host_keys"`
 }
 
 func newReadyFile(sftpAddr, httpAddr, workspace string, hostKeys []ssh.Signer) readyFile {
-	rf := readyFile{SFTPAddress: sftpAddr, HTTPAddress: httpAddr, Workspace: workspace}
-	for _, key := range hostKeys {
-		rf.HostKeys = append(rf.HostKeys, hostKey{Type: key.PublicKey().Type(), Fingerprint: ssh.FingerprintSHA256(key.PublicKey())})
-	}
-	return rf
+	return readyFile{SFTPAddress: sftpAddr, HTTPAddress: httpAddr, Workspace: workspace, HostKeys: hostKeysOf(hostKeys)}
 }
 
 // readReadyFile reads the ready file name. It fails with a "not a ready

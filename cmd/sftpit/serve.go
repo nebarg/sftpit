@@ -191,7 +191,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 	sftpServed := make(chan error, 1)
 	go func() { sftpServed <- srv.Serve(sftp) }()
 	api := &http.Server{
-		Handler:           control.Handler(manager, cfg.ControlHosts),
+		Handler:           control.Handler(manager, control.Options{Hosts: cfg.ControlHosts, Server: serverInfo(cfg, sftpLn.Addr().String(), workspace.Dir(), hostKeys)}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -282,6 +282,7 @@ func listen(profile config.Profile, setting, addr string) (net.Listener, error) 
 
 func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, run runs.Run, hostKeys []ssh.Signer, cfg *config.Config) {
 	fmt.Fprintf(w, "sftpit is serving SFTP on %s\n", addr)
+	fmt.Fprintf(w, "  dashboard: http://%s/\n", apiAddr)
 	fmt.Fprintf(w, "  control API: http://%s/api/v1/\n", apiAddr)
 	if cfg.Profile == config.Container {
 		fmt.Fprintln(w, "  profile: container (every interface in the container; publish ports on host loopback)")
@@ -338,6 +339,38 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 		fmt.Fprintf(w, "  users: %s\n", strings.Join(users, ", "))
 	}
 	fmt.Fprintln(w, "Press Ctrl+C to stop.")
+}
+
+// serverInfo describes the server that serves SFTP on sftpAddr, from the
+// workspace dir, as the control API reports it.
+func serverInfo(cfg *config.Config, sftpAddr, dir string, hostKeys []ssh.Signer) control.Server {
+	s := control.Server{
+		SFTPAddress:  sftpAddr,
+		Profile:      cfg.Profile.String(),
+		ControlHosts: append([]string{}, cfg.ControlHosts...),
+		HostKeys:     hostKeysOf(hostKeys),
+		Users:        []control.User{},
+		ReadOnly:     []control.ReadOnly{},
+		Workspace:    dir,
+	}
+	for _, u := range cfg.Users {
+		s.Users = append(s.Users, control.User{Name: u.Name, Home: u.Home, Password: u.Password != "", Keys: len(u.AuthorizedKeys)})
+	}
+	if cfg.DefaultCredentials {
+		s.DefaultLogin = &control.Login{User: config.DefaultUser, Password: config.DefaultPassword}
+	}
+	for _, r := range cfg.Policy.ReadOnly {
+		s.ReadOnly = append(s.ReadOnly, control.ReadOnly{PathPrefix: r.PathPrefix, Users: r.Users})
+	}
+	return s
+}
+
+func hostKeysOf(keys []ssh.Signer) []control.HostKey {
+	described := make([]control.HostKey, 0, len(keys))
+	for _, key := range keys {
+		described = append(described, control.HostKey{Type: key.PublicKey().Type(), Fingerprint: ssh.FingerprintSHA256(key.PublicKey())})
+	}
+	return described
 }
 
 func loginMethods(u sshfront.User) string {

@@ -1,7 +1,9 @@
 // Package control serves sftpit's control API over HTTP: whether sftpit is
-// alive and ready, the status of the current run, its rules and chaos, which
-// can change during the run, the release of its stalls, the events, files
-// and snapshot copies of recent runs, and resets that start the next run. Its Client calls the API.
+// alive and ready, how to connect to the SFTP server, the status of the
+// current run, its rules and chaos, which can change during the run, the
+// release of its stalls, the events, files and snapshot copies of recent
+// runs, the scenarios, and resets that start the next run. It serves the
+// dashboard, which uses the API, too. Its Client calls the API.
 //
 // The API answers only requests addressed to a loopback host, or to a host
 // name it is given, such as a compose service's, so a web page cannot reach
@@ -43,12 +45,17 @@ const (
 	maxBodyBytes = 64 << 10
 )
 
-// Handler returns the control API for the runs that m manages. It answers
-// requests addressed to localhost, a loopback address or one of hosts.
-func Handler(m *runs.Manager, hosts []string) http.Handler {
-	a := &api{runs: m}
+// Handler returns the control API and the dashboard for the runs that m
+// manages. It answers requests addressed to localhost, a loopback address or
+// one of opts.Hosts.
+func Handler(m *runs.Manager, opts Options) http.Handler {
+	a := &api{runs: m, opts: opts}
 	mux := http.NewServeMux()
+	ui := dashboard()
+	mux.Handle("GET /{$}", ui)
+	mux.Handle("GET /ui/", http.StripPrefix("/ui", ui))
 	mux.HandleFunc("GET /api/v1/health", a.health)
+	mux.HandleFunc("GET /api/v1/server", a.server)
 	mux.HandleFunc("GET /api/v1/ready", a.ready)
 	mux.HandleFunc("GET /api/v1/status", a.status)
 	mux.HandleFunc("POST /api/v1/reset", a.reset)
@@ -62,11 +69,12 @@ func Handler(m *runs.Manager, hosts []string) http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots/{n}/content", a.snapshotContent)
 	mux.HandleFunc("GET /api/v1/scenarios", a.scenarios)
 	mux.HandleFunc("PUT /api/v1/scenarios/{name}", a.saveScenario)
-	return protect(mux, hosts)
+	return protect(mux, opts.Hosts)
 }
 
 type api struct {
 	runs *runs.Manager
+	opts Options
 }
 
 func (a *api) health(w http.ResponseWriter, _ *http.Request) {

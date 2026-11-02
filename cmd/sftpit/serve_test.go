@@ -528,6 +528,58 @@ func nonLoopbackAddress(t *testing.T) string {
 	return ""
 }
 
+func TestServeReportsHowToConnectAndServesTheDashboard(t *testing.T) {
+	s := startServe(t)
+	if want := "  dashboard: http://" + s.apiAddr + "/\n"; !strings.Contains(s.stdout.String(), want) {
+		t.Errorf("the banner lacks %q:\n%s", want, s.stdout.String())
+	}
+	resp, err := http.Get("http://" + s.apiAddr + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+		t.Errorf("GET / = %s with %q, want the dashboard", resp.Status, resp.Header.Get("Content-Type"))
+	}
+
+	server := requestJSON(t, "GET", "http://"+s.apiAddr+"/api/v1/server", "")
+	if server["sftp_address"] != s.addr || server["profile"] != "loopback" || server["workspace"] != s.workspace {
+		t.Errorf("server = %v, want %s in the loopback profile, with workspace %s", server, s.addr, s.workspace)
+	}
+	if login, _ := server["default_login"].(map[string]any); login["user"] != "test" || login["password"] != "test" {
+		t.Errorf("default_login = %v, want test/test", server["default_login"])
+	}
+	var keys []string
+	for _, k := range server["host_keys"].([]any) {
+		keys = append(keys, k.(map[string]any)["fingerprint"].(string))
+	}
+	if got, want := strings.Join(keys, " "), fingerprints(s.stdout.String()); got != want {
+		t.Errorf("server's host keys are %s, want the banner's, %s", got, want)
+	}
+}
+
+func TestServeKeepsConfiguredPasswordsOutOfTheAPI(t *testing.T) {
+	t.Setenv("SFTPIT_SERVE_TEST_PASSWORD", "a-real-secret")
+	config := filepath.Join(t.TempDir(), "sftpit.yaml")
+	testutil.WriteFile(t, config, "schema_version: 1\nusers:\n  - {name: partner, password_env: SFTPIT_SERVE_TEST_PASSWORD, home: /partner}\n")
+	s := startServe(t, "--config", config)
+	resp, err := http.Get("http://" + s.apiAddr + "/api/v1/server")
+	if err != nil {
+		t.Fatalf("GET /api/v1/server: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "a-real-secret") || strings.Contains(string(raw), "default_login") {
+		t.Errorf("server shows a password: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"users":[{"name":"partner","home":"/partner","password":true,"keys":0}]`) {
+		t.Errorf("server = %s, want partner with a password", raw)
+	}
+}
+
 func TestServeRecordsEventsThatTheAPIServes(t *testing.T) {
 	s := startServe(t)
 	c := s.dial(t, "test", "test")

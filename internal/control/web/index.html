@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sftpit</title>
+    <link rel="stylesheet" href="/ui/app.css" />
+    <script type="module" src="/ui/app.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <h1>sftpit</h1>
+      <span id="state" class="pill" role="status" aria-live="polite">connecting</span>
+      <span id="run-id" class="muted"></span>
+    </header>
+    <div id="chaos-banner" class="banner" role="status" hidden></div>
+    <div id="error" class="banner error" role="alert" hidden></div>
+
+    <main>
+      <section class="card" aria-labelledby="run-heading">
+        <div class="card-head">
+          <h2 id="run-heading">Run</h2>
+          <div class="actions">
+            <button id="release" type="button" disabled>Release stalls</button>
+            <button id="reset" type="button">Reset…</button>
+          </div>
+        </div>
+        <dl id="run" class="facts"></dl>
+      </section>
+
+      <section class="card" aria-labelledby="connect-heading">
+        <h2 id="connect-heading">Connect</h2>
+        <dl id="connect" class="facts"></dl>
+      </section>
+
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button type="button" role="tab" id="tab-activity" aria-controls="activity" aria-selected="true">Activity</button>
+        <button type="button" role="tab" id="tab-files" aria-controls="files" aria-selected="false">Files</button>
+        <button type="button" role="tab" id="tab-rules" aria-controls="rules" aria-selected="false">Rules</button>
+      </nav>
+
+      <section id="activity" role="tabpanel" aria-labelledby="tab-activity">
+        <form id="filters" class="filters">
+          <label>Kind
+            <select name="kind">
+              <option value="">all</option>
+              <option value="operation,transfer,fault,fault_ended">operations and faults</option>
+              <option value="fault,fault_ended,suppressed,decision">faults and decisions</option>
+              <option value="run_started,connected,authenticated,disconnected,rules_changed,snapshot">runs and connections</option>
+            </select>
+          </label>
+          <label>User <input name="user" autocomplete="off" /></label>
+          <label>Path <input name="path" autocomplete="off" /></label>
+          <label>Connection <input name="connection" inputmode="numeric" autocomplete="off" /></label>
+          <label>Rule <input name="rule" autocomplete="off" /></label>
+          <button type="submit">Filter</button>
+          <button type="reset">Clear</button>
+        </form>
+        <p id="timeline-note" class="muted"></p>
+        <div class="scroll"><table class="timeline">
+          <thead>
+            <tr><th scope="col">Time</th><th scope="col">Conn</th><th scope="col">User</th><th scope="col">Event</th><th scope="col">Rule</th></tr>
+          </thead>
+          <tbody id="timeline"></tbody>
+        </table></div>
+      </section>
+
+      <section id="files" role="tabpanel" aria-labelledby="tab-files" hidden>
+        <div class="toolbar">
+          <button id="files-refresh" type="button">Refresh</button>
+          <label><input id="files-hash" type="checkbox" /> Hashes</label>
+          <span id="files-note" class="muted"></span>
+        </div>
+        <div class="split">
+          <div class="scroll"><table class="files">
+            <thead>
+              <tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mode</th><th scope="col">Modified</th><th scope="col">Seed</th></tr>
+            </thead>
+            <tbody id="file-rows"></tbody>
+          </table></div>
+          <aside id="file-detail" class="detail" aria-live="polite"></aside>
+        </div>
+        <h3>Snapshot copies</h3>
+        <ul id="snapshots" class="plain"></ul>
+      </section>
+
+      <section id="rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+        <p id="rules-note" class="muted"></p>
+        <div class="scroll"><table class="rules">
+          <thead>
+            <tr>
+              <th scope="col">Rule</th><th scope="col">Priority</th><th scope="col">Matches</th><th scope="col">Does</th>
+              <th scope="col" class="num">Matched</th><th scope="col" class="num">Selected</th><th scope="col" class="num">Fired</th><th scope="col" class="num">Canceled</th>
+            </tr>
+          </thead>
+          <tbody id="rule-rows"></tbody>
+        </table></div>
+      </section>
+    </main>
+
+    <dialog id="reset-dialog" aria-labelledby="reset-heading">
+      <form id="reset-form" method="dialog">
+        <h2 id="reset-heading">Reset</h2>
+        <p id="reset-what"></p>
+        <label>Scenario
+          <select name="scenario" id="reset-scenario"></select>
+        </label>
+        <label>Seed <input name="seed" inputmode="numeric" autocomplete="off" placeholder="fresh, or the scenario's own" /></label>
+        <p id="reset-error" class="error-text" role="alert"></p>
+        <div class="actions">
+          <button type="button" id="reset-cancel">Cancel</button>
+          <button type="submit" class="danger">Reset</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

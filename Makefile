@@ -1,4 +1,4 @@
-.PHONY: build image test vet lint vuln fmt-check fix-check tidy-check check linux-check container-check integration-deps
+.PHONY: build image test js-test vet lint vuln fmt-check fix-check tidy-check check linux-check container-check integration-deps
 
 # golangci-lint is run at this version, built in isolation rather than
 # added to go.mod, as its authors advise.
@@ -12,6 +12,10 @@ image:
 
 test:
 	go test -race ./...
+
+# The dashboard's logic, with Node's own test runner and no packages.
+js-test:
+	node --test internal/control/web/test/*.test.js
 
 vet:
 	go vet ./...
@@ -34,7 +38,7 @@ fix-check:
 tidy-check:
 	go mod tidy -diff
 
-check: fmt-check fix-check tidy-check vet lint test
+check: fmt-check fix-check tidy-check vet lint test js-test
 
 linux-check:
 	docker build --tag sftpit-linux-check test/linux

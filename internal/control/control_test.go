@@ -212,7 +212,7 @@ func TestTheAPIRefusesRequestsFromElsewhere(t *testing.T) {
 
 func TestTheAPIAnswersTheHostsItIsGiven(t *testing.T) {
 	m, _ := start(t, runs.Options{})
-	api := control.Handler(m, []string{"sftpit", "fd00::1"})
+	api := control.Handler(m, control.Options{Hosts: []string{"sftpit", "fd00::1"}})
 	for host, want := range map[string]int{
 		"sftpit:8122":             http.StatusOK,
 		"SFTPIT":                  http.StatusOK,
