@@ -457,7 +457,7 @@ func TestServeAnswersTheControlHostsItIsGiven(t *testing.T) {
 		t.Errorf("banner does not list the control hosts:\n%s", s.stdout.String())
 	}
 	for host, want := range map[string]int{"sftpit:8122": http.StatusOK, "FILES.test": http.StatusOK, "other:8122": http.StatusForbidden} {
-		req, err := http.NewRequest("GET", "http://"+s.apiAddr+"/api/v1/status", nil)
+		req, err := http.NewRequest(http.MethodGet, "http://"+s.apiAddr+"/api/v1/status", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -615,7 +615,7 @@ faults:
 	}
 
 	api := "http://" + s.apiAddr + "/api/v1"
-	req, err := http.NewRequest("PUT", api+"/scenarios/saved", strings.NewReader(`{"faults": [{"id": "deny-mkdir", "match": {"operation": "mkdir"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}]}`))
+	req, err := http.NewRequest(http.MethodPut, api+"/scenarios/saved", strings.NewReader(`{"faults": [{"id": "deny-mkdir", "match": {"operation": "mkdir"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}

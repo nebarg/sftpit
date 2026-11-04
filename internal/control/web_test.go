@@ -36,7 +36,7 @@ func TestTheDashboardIsServedUnderItsPolicy(t *testing.T) {
 			t.Errorf("GET %s = %s, want 404", path, resp.Status)
 		}
 	}
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "attacker.example"
 	rec := httptest.NewRecorder()
 	api.ServeHTTP(rec, req)

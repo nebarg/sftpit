@@ -119,7 +119,7 @@ type eventStream struct {
 
 func openStream(t *testing.T, url, lastEventID string) *eventStream {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), "GET", url, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

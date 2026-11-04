@@ -127,7 +127,7 @@ func describeFile(f config.ScenarioFile) (Scenario, error) {
 	d := Scenario{Name: f.Name, Source: "file", Path: f.Path, Hash: f.Hash}
 	if f.Err != nil {
 		d.Error = f.Err.Error()
-		return d, nil
+		return d, nil //nolint:nilerr // A listing reports a bad file in its reply.
 	}
 	return describeScenario(d, f.Scenario)
 }

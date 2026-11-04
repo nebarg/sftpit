@@ -185,7 +185,7 @@ func queryPath(r *http.Request, def string) (string, error) {
 	case name == "" && def != "":
 		return def, nil
 	case name == "":
-		return "", fmt.Errorf("path is required: the file's absolute path")
+		return "", errors.New("path is required: the file's absolute path")
 	case !path.IsAbs(name):
 		return "", fmt.Errorf("path %q is not absolute", name)
 	}

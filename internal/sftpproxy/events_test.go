@@ -3,6 +3,7 @@ package sftpproxy_test
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,7 +51,7 @@ func summary(e events.Event) string {
 	}
 	add("request", e.Request)
 	if e.RequestID != nil {
-		add("id", fmt.Sprint(*e.RequestID))
+		add("id", strconv.FormatUint(uint64(*e.RequestID), 10))
 	}
 	add("path", e.Path)
 	add("target", e.Target)
@@ -122,7 +123,7 @@ func TestEventsSumAHandleStillOpenAsItsSessionEnds(t *testing.T) {
 		fb.reply(t, fb.next(t).id, &sftpwire.DataReply{Data: make([]byte, 10)})
 		p.client.assertReplies(t, 2)
 		p.client.conn.Close()
-		p.result.wait(t)
+		_ = p.result.wait(t)
 
 		assertSummaries(t, rec.summaries(),
 			"operation request=SSH_FXP_OPEN id=1 path=/f reply=SSH_FXP_HANDLE backend=SSH_FXP_HANDLE",
@@ -230,7 +231,7 @@ func TestEventsRecordHowEachWaitEnds(t *testing.T) {
 				}
 				synctest.Wait()
 				p.cancel()
-				p.result.wait(t)
+				_ = p.result.wait(t)
 
 				got := rec.summaries()
 				var ended []string

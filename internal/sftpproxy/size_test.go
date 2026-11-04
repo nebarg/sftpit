@@ -102,7 +102,7 @@ func TestWrongSizeMisreportsTheReaddirEntriesFaultsChooses(t *testing.T) {
 				return nil
 			}),
 		})
-		openDir(t, p, fb, "/d")
+		openDir(t, p, fb)
 
 		p.client.send(t, 2, &sftpwire.ReadDir{Handle: "h"})
 		fb.reply(t, fb.next(t).id, &sftpwire.NameReply{Entries: []sftpwire.NameEntry{
@@ -206,7 +206,7 @@ func TestWrongSizeRewritesTheSizeInALongname(t *testing.T) {
 						return nil
 					}),
 				})
-				openDir(t, p, fb, "/d")
+				openDir(t, p, fb)
 
 				entry := sftpwire.NameEntry{Filename: "f", Longname: tt.longname, Attrs: sftpwire.Attrs{Flags: sftpwire.AttrSize, Size: actual}}
 				p.client.send(t, 2, &sftpwire.ReadDir{Handle: "h"})
@@ -230,7 +230,7 @@ func TestOnlyAWrongSizeAppliesToAReaddirEntry(t *testing.T) {
 				return nil
 			}),
 		})
-		openDir(t, p, fb, "/d")
+		openDir(t, p, fb)
 
 		p.client.send(t, 2, &sftpwire.ReadDir{Handle: "h"})
 		fb.reply(t, fb.next(t).id, &sftpwire.NameReply{Entries: []sftpwire.NameEntry{lsEntry("f", 1, 1)}})
@@ -242,9 +242,10 @@ func TestOnlyAWrongSizeAppliesToAReaddirEntry(t *testing.T) {
 	})
 }
 
-func openDir(t *testing.T, p *proxy, fb *fakeBackend, dir string) {
+// openDir opens /d as request 1, with the backend answering handle h.
+func openDir(t *testing.T, p *proxy, fb *fakeBackend) {
 	t.Helper()
-	p.client.send(t, 1, &sftpwire.OpenDir{Path: dir})
+	p.client.send(t, 1, &sftpwire.OpenDir{Path: "/d"})
 	fb.reply(t, fb.next(t).id, &sftpwire.HandleReply{Handle: "h"})
 	p.client.assertReplies(t, 1)
 }

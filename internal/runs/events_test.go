@@ -137,7 +137,7 @@ func TestStatusCountsWaitsAndEventsCountCancellations(t *testing.T) {
 		t.Fatalf("ChangeRules: %v", err)
 	}
 	c, _ := dialSFTP(t, addr)
-	go c.Stat("/")
+	go func() { _, _ = c.Stat("/") }()
 	awaitFired(t, m, "stuck", 1)
 	if s := m.Status(); s.Stalled != 1 || s.Frozen != 0 {
 		t.Errorf("status with a stall: %d stalled, %d frozen; want 1 and 0", s.Stalled, s.Frozen)

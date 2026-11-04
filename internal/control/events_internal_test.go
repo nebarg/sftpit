@@ -1,6 +1,7 @@
 package control
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ func TestAStreamSaysWhenEventsItAskedForAreGone(t *testing.T) {
 	}
 	rec.Close()
 	w := httptest.NewRecorder()
-	stream(w, httptest.NewRequest("GET", "/", nil), rec, eventQuery{after: 1, limit: 10})
+	stream(w, httptest.NewRequest(http.MethodGet, "/", nil), rec, eventQuery{after: 1, limit: 10})
 
 	var got []string
 	for block := range strings.SplitSeq(strings.TrimSpace(w.Body.String()), "\n\n") {

@@ -124,7 +124,7 @@ func TestSnapshotsOfARunWithoutAny(t *testing.T) {
 // get makes a GET request to api with headers, as the command line would.
 func get(t *testing.T, api http.Handler, path string, headers map[string]string) *http.Response {
 	t.Helper()
-	req := httptest.NewRequest("GET", path, nil)
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Host = host
 	for k, v := range headers {
 		req.Header.Set(k, v)

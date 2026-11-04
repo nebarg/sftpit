@@ -490,7 +490,7 @@ func (s *session) decide(req *request) error {
 	}
 	// A download's cutoff changes no file, so, like a corruption, it leaves
 	// nothing to snapshot.
-	if _, read := req.packet.(*sftpwire.Read); req.action != nil && !(req.cut && read) {
+	if _, read := req.packet.(*sftpwire.Read); req.action != nil && (!req.cut || !read) {
 		s.tracker.fault(req)
 	}
 	return nil

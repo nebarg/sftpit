@@ -70,7 +70,7 @@ func TestHideLeavesOutTheReaddirEntriesFaultsChooses(t *testing.T) {
 			}),
 			Logger: logs.logger(),
 		})
-		openDir(t, p, fb, "/d")
+		openDir(t, p, fb)
 
 		p.client.send(t, 2, &sftpwire.ReadDir{Handle: "h"})
 		fb.reply(t, fb.next(t).id, &sftpwire.NameReply{Entries: []sftpwire.NameEntry{
@@ -101,7 +101,7 @@ func TestHideReadsOnPastAReplyWhoseEveryEntryItLeavesOut(t *testing.T) {
 					}),
 					ReplyOrder: order,
 				})
-				openDir(t, p, fb, "/d")
+				openDir(t, p, fb)
 
 				// The client sees neither the reply that holds only hidden
 				// entries nor a reply with none.
@@ -149,7 +149,7 @@ func TestHideAnswersEOFRatherThanReadOnPastADrop(t *testing.T) {
 				return nil
 			}),
 		})
-		openDir(t, p, fb, "/d")
+		openDir(t, p, fb)
 
 		p.client.sendTogether(t, &sftpwire.ReadDir{Handle: "h"}, &sftpwire.Stat{Path: "/f"})
 		readdir := fb.next(t)

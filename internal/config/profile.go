@@ -83,11 +83,13 @@ func checkControlHost(name string) error {
 	if _, err := netip.ParseAddr(name); err == nil {
 		return nil
 	}
-	valid := name != "" && !strings.ContainsFunc(name, func(r rune) bool {
-		return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || r == '-' || r == '.' || r == '_')
-	})
+	valid := name != "" && !strings.ContainsFunc(name, func(r rune) bool { return !isHostNameRune(r) })
 	if !valid || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
 		return fmt.Errorf("control host %q is not a host name or IP address without a port, such as sftpit", name)
 	}
 	return nil
+}
+
+func isHostNameRune(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || r == '-' || r == '.' || r == '_'
 }

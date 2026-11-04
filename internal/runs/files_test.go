@@ -36,7 +36,9 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create %s: %v", name, err)
 		}
-		f.Write([]byte(content))
+		if _, err := f.Write([]byte(content)); err != nil {
+			t.Fatalf("Write %s: %v", name, err)
+		}
 		f.Close()
 	}
 

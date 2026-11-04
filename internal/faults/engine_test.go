@@ -657,7 +657,7 @@ func TestEngineRecordsItsDecisionsAndSuppressedFaults(t *testing.T) {
 		t.Fatal("want the first upload's cutoff reserved and the second's declined")
 	}
 
-	draw := func(k faults.Key) float64 { return faults.Seed(testSeed).Draw(k).Fraction() }
+	draw := func(k faults.Key) float64 { return testSeed.Draw(k).Fraction() }
 	want := []events.Event{
 		{Kind: events.DecisionDrawn, Rule: "flaky", User: "test", Path: "/f", Decision: &events.Decision{
 			Operation: "stat", Ordinal: 1, Choice: "probability", Probability: new(0.5), Fired: &failed,

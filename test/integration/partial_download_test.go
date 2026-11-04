@@ -62,6 +62,7 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 	for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
 		for _, tt := range results {
 			start := func(t *testing.T) *server {
+				t.Helper()
 				srv := startServer(t, proxied, sftpproxy.Options{
 					Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
 						if open, ok := r.Packet.(*sftpwire.Open); ok && open.Flags&sftpwire.OpenWrite == 0 {
@@ -79,6 +80,7 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 			// What the server delivers, read in order one read at a time.
 			if tt.name != "reset" {
 				t.Run("delivered/"+name, func(t *testing.T) {
+					t.Parallel()
 					srv := start(t)
 					c := pkgSFTPClient(t, srv, ssh.Password(testPassword))
 					defer c.Close()
@@ -105,6 +107,7 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 			}
 
 			t.Run("OpenSSH/"+name, func(t *testing.T) {
+				t.Parallel()
 				sftpPath := openSSHOrSkip(t)
 				srv := start(t)
 				work := t.TempDir()
@@ -120,6 +123,7 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 			})
 
 			t.Run("phpseclib/"+name, func(t *testing.T) {
+				t.Parallel()
 				php := phpseclibOrSkip(t)
 				srv := start(t)
 				work := t.TempDir()

@@ -26,7 +26,9 @@ func TestListDescribesWhatClientsSee(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create %s: %v", name, err)
 		}
-		f.Write([]byte(content))
+		if _, err := f.Write([]byte(content)); err != nil {
+			t.Fatalf("Write %s: %v", name, err)
+		}
 		f.Close()
 	}
 	if err := c.Chmod("/Incoming/Orders.CSV", 0o640); err != nil {
@@ -92,7 +94,9 @@ func TestOpenReadsAStoredFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Write([]byte("id,total\n"))
+	if _, err := f.Write([]byte("id,total\n")); err != nil {
+		t.Fatal(err)
+	}
 	f.Close()
 	if err := c.Mkdir("/dir"); err != nil {
 		t.Fatal(err)

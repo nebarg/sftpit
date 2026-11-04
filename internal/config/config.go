@@ -433,7 +433,8 @@ func read(opts Options) (*reading, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Warnings = append(warnings, secrets.warnings...)
+	warnings = append(warnings, secrets.warnings...)
+	cfg.Warnings = warnings
 
 	if len(f.Users) == 0 {
 		cfg.Users = []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}

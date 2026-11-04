@@ -78,11 +78,11 @@ func TestLaravelConsumerAcknowledgementDenied(t *testing.T) {
 
 // step returns the line of JSON that a Laravel script prints for the
 // outcome of one step.
-func step(t testing.TB, op string, result any) line {
-	t.Helper()
+func step(tb testing.TB, op string, result any) line {
+	tb.Helper()
 	out, err := json.Marshal(map[string]any{"op": op, "result": result})
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return line(out)
 }

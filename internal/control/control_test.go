@@ -225,7 +225,7 @@ func TestTheAPIAnswersTheHostsItIsGiven(t *testing.T) {
 		"other:8122":              http.StatusForbidden,
 		"":                        http.StatusForbidden,
 	} {
-		req := httptest.NewRequest("GET", "/api/v1/status", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 		req.Host = host
 		rec := httptest.NewRecorder()
 		api.ServeHTTP(rec, req)
