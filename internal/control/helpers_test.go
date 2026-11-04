@@ -95,3 +95,16 @@ func equalJSON(a, b any) bool {
 	y, errY := json.Marshal(b)
 	return errX == nil && errY == nil && string(x) == string(y)
 }
+
+// takeTrace checks that run, the run of a status, has a complete trace
+// holding at least the run's start, and removes it, since its size depends
+// on the run's events.
+func takeTrace(t *testing.T, run any) {
+	t.Helper()
+	r, _ := run.(map[string]any)
+	trace, _ := r["trace"].(map[string]any)
+	if bytes, _ := trace["bytes"].(float64); trace["complete"] != true || bytes <= 0 || trace["error"] != nil {
+		t.Errorf("the run's trace is %v, want it complete and holding the run's start", trace)
+	}
+	delete(r, "trace")
+}

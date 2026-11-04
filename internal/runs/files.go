@@ -226,3 +226,29 @@ func hashOf(root *os.Root, name string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// OpenTrace opens the trace of run, one of the runs the workspace keeps,
+// for reading, and returns the size of the whole lines in it. The trace of
+// a run whose events the Manager keeps, the current run's among them, may
+// end in part of a line still being written, which size leaves out. A run
+// the workspace does not keep fails with ErrUnknownRun, and one without a
+// trace, from an older sftpit, with an error wrapping fs.ErrNotExist.
+func (m *Manager) OpenTrace(run string) (f *os.File, size int64, err error) {
+	dir, err := m.workspace.openRun(run, ".")
+	if err != nil {
+		return nil, 0, err
+	}
+	defer dir.Close()
+	if f, err = dir.Open(traceFile); err != nil {
+		return nil, 0, fmt.Errorf("runs: open the trace: %w", err)
+	}
+	if rec, err := m.Events(run); err == nil {
+		return f, rec.Trace().Size, nil
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, fmt.Errorf("runs: open the trace: %w", err)
+	}
+	return f, info.Size(), nil
+}

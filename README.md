@@ -103,6 +103,9 @@ storage:
   max_files: 10000 # files and directories
   max_open_files: 256
 
+events:
+  max_disk_bytes: 67108864 # 64 MiB; bounds each run's trace, shown with its default
+
 users:
   - name: "test"
     password_env: "SFTPIT_TEST_PASSWORD"
@@ -411,6 +414,7 @@ The page follows the current run, so after a reset, from the dashboard or elsewh
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 | `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
 | `GET /api/v1/runs/{id}/events` | what happened in the run, [page by page or as it happens](#events) |
+| `GET /api/v1/runs/{id}/trace` | every event of the run, as a [JSON Lines download](#the-trace) |
 | `GET /api/v1/runs/{id}/files` | the run's [files](#files), with their sizes, modes, times and, if asked, hashes |
 | `GET /api/v1/runs/{id}/files/content?path=…` | a file of the run, as a download |
 | `GET /api/v1/runs/{id}/snapshots` | the copies the run kept of files that faults left behind |
@@ -427,12 +431,12 @@ curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
 {
   "sftp": { "state": "up" },
   "backend": "embedded",
-  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0 },
+  "run": { "id": "20261022-164637.981-f6dc", "scenario": "upload-recovery", "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0, "trace": { "bytes": 219, "complete": true } },
   "queued": false
 }
 ```
 
-The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold. `queued` says whether rules are [queued for the next reset](#queuing-the-next-run).
+The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold. `trace` describes the run's [trace](#the-trace). `queued` says whether rules are [queued for the next reset](#queuing-the-next-run).
 
 **A reset:**
 - **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
@@ -546,6 +550,12 @@ The kinds of event:
 - **Live:** with `Accept: text/event-stream`, the same route streams the events as [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html), each with its ID, from `after` or the `Last-Event-ID` a browser sends when it reconnects. A `gap` event says that events it asked for are gone, and an `end` event that the run has ended, after which the next run's events are at its own route.
 
 The events are also the evidence for a run that has ended: a reset keeps them, along with the run's files. Unknown runs, and runs older than the last five, are answered with 404.
+
+### The trace
+
+Each run also writes every event to `events.jsonl` in its directory, one JSON object a line, in the form the events route gives them. `GET /api/v1/runs/{id}/trace` downloads it, for the current run or any of the last five that the workspace keeps, those of an earlier `serve` with `--data-dir` too. While a run is writing, the download holds the whole lines so far.
+
+The trace stops at `events.max_disk_bytes`, 64 MiB by default, so the last five runs take at most about five times that. A trace that reaches its bound ends with a `trace_full` line whose `id` is the first event it left out, and `complete` is `false` in the status of the current run. An error writing the file stops the trace too, and `error` in the status gives it. The dashboard and the events route still have the latest 10,000 events either way.
 
 ### Files
 

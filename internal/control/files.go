@@ -3,6 +3,7 @@ package control
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -134,6 +135,24 @@ func fileStatus(err error) int {
 	return statusFor(err)
 }
 
+// trace answers with a run's trace, as JSON Lines: the whole lines written
+// so far, for a run still writing it.
+func (a *api) trace(w http.ResponseWriter, r *http.Request) {
+	run := r.PathValue("id")
+	f, size, err := a.runs.OpenTrace(run)
+	if err != nil {
+		writeError(w, fileStatus(err), err)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	serveDownload(w, r, "events-"+run+".jsonl", "application/jsonl", info.ModTime(), io.NewSectionReader(f, 0, size))
+}
+
 // serveFile sends the content of f, the file name, as a download that a
 // browser neither displays nor runs, and answers range requests, so a
 // preview can ask for the start of a file.
@@ -143,12 +162,19 @@ func serveFile(w http.ResponseWriter, r *http.Request, f *os.File, name string) 
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	serveDownload(w, r, path.Base(name), "application/octet-stream", info.ModTime(), f)
+}
+
+// serveDownload sends content as the download filename, of type
+// contentType, which a browser neither displays nor runs, answering range
+// requests.
+func serveDownload(w http.ResponseWriter, r *http.Request, filename, contentType string, modTime time.Time, content io.ReadSeeker) {
 	h := w.Header()
-	h.Set("Content-Type", "application/octet-stream")
-	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
+	h.Set("Content-Type", contentType)
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	h.Set("Cache-Control", "no-store")
-	http.ServeContent(w, r, "", info.ModTime(), f)
+	http.ServeContent(w, r, "", modTime, content)
 }
 
 // queryPath returns the clean absolute path that the query's path gives,

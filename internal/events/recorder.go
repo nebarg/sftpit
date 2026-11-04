@@ -7,12 +7,13 @@ import (
 )
 
 // Recorder keeps the latest events of a run, numbering and timing each as
-// it is recorded, and counts the faults whose waits are in progress and
-// those that a change of rules canceled. Its methods are safe for
-// concurrent use.
+// it is recorded, writes every event to the run's trace, if it has one, and
+// counts the faults whose waits are in progress and those that a change of
+// rules canceled. Its methods are safe for concurrent use.
 type Recorder struct {
 	start time.Time
 	limit int
+	trace *Trace
 
 	mu sync.Mutex
 	// ring holds the latest events, oldest first from head once it is
@@ -31,11 +32,13 @@ type Recorder struct {
 }
 
 // NewRecorder returns a recorder for a run that started at start, which
-// keeps its latest limit events.
-func NewRecorder(start time.Time, limit int) *Recorder {
+// keeps its latest limit events and writes every event to trace, unless it
+// is nil.
+func NewRecorder(start time.Time, limit int, trace *Trace) *Recorder {
 	return &Recorder{
 		start:    start,
 		limit:    limit,
+		trace:    trace,
 		next:     1,
 		changed:  make(chan struct{}),
 		waiting:  make(map[string]int),
@@ -52,6 +55,9 @@ func (r *Recorder) Record(e Event) {
 	e.ID, e.Time, e.Elapsed = r.next, now.UTC(), Millis(now.Sub(r.start))
 	r.next++
 	r.count(e)
+	if r.trace != nil {
+		r.trace.write(e)
+	}
 	if len(r.ring) < r.limit {
 		r.ring = append(r.ring, e)
 	} else {
@@ -144,15 +150,30 @@ func (r *Recorder) Changed() <-chan struct{} {
 	return r.changed
 }
 
-// Close marks the end of the run, waking every reader waiting on Changed.
-// The recorder keeps its events, and records any more it is given.
+// Close marks the end of the run, waking every reader waiting on Changed,
+// and closes its trace. The recorder keeps its events, and records any more
+// it is given, but an event after Close leaves the trace incomplete.
 func (r *Recorder) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.closed {
 		r.closed = true
 		close(r.changed)
+		if r.trace != nil {
+			r.trace.close()
+		}
 	}
+}
+
+// Trace describes the recorder's trace, or is the zero TraceStatus for a
+// recorder without one.
+func (r *Recorder) Trace() TraceStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.trace == nil {
+		return TraceStatus{}
+	}
+	return r.trace.status()
 }
 
 // Closed reports whether Close has been called.

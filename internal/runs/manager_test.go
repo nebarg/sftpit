@@ -138,7 +138,12 @@ func TestResetRefusesARunItCannotStart(t *testing.T) {
 			if _, err := m.Reset(t.Context(), tt.req); !errors.Is(err, tt.err) || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Reset = %v, want %v saying %q", err, tt.err, tt.want)
 			}
-			if got := m.Status(); got != first {
+			// The connection's events grow the trace.
+			got := m.Status()
+			if !got.Trace.Complete || got.Trace.Size <= first.Trace.Size {
+				t.Errorf("after the refused reset, the trace is %+v, want it complete and larger than %+v", got.Trace, first.Trace)
+			}
+			if got.Trace = first.Trace; got != first {
 				t.Errorf("after the refused reset, the status is %+v, want %+v", got, first)
 			}
 			select {

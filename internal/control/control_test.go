@@ -24,6 +24,7 @@ func TestHealthReadinessAndStatus(t *testing.T) {
 		t.Errorf("ready = %d %v", code, body)
 	}
 	code, body := call(t, api, "GET", "/api/v1/status", "")
+	takeTrace(t, body["run"])
 	want := map[string]any{
 		"sftp":    map[string]any{"state": "up"},
 		"backend": "embedded",
@@ -65,6 +66,7 @@ func TestResetStartsTheNextRun(t *testing.T) {
 			t.Fatalf("reset with %q = %d %v", tt.body, code, body)
 		}
 		run := body["run"].(map[string]any)
+		takeTrace(t, run)
 		id := run["id"]
 		delete(run, "id")
 		if seed, _ := run["seed"].(string); tt.fresh && seed != "" && strings.Trim(seed, "0123456789") == "" {
@@ -237,6 +239,7 @@ func TestResetStartsAnInlineScenario(t *testing.T) {
 	m, api := start(t, runs.Options{Scenario: "chaos"})
 	code, body := call(t, api, "POST", "/api/v1/reset", `{"faults": [`+denyStats+`], "seed": "7"}`)
 	run, _ := body["run"].(map[string]any)
+	takeTrace(t, run)
 	if want := map[string]any{"id": m.Status().Run.ID, "inline": true, "seed": "7", "seed_pinned": true, "revision": 1, "stalled": 0, "frozen": 0}; code != http.StatusOK || !equalJSON(run, want) {
 		t.Errorf("an inline reset = %d %v, want the run %v", code, body, want)
 	}

@@ -67,6 +67,7 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", a.events)
+	mux.HandleFunc("GET /api/v1/runs/{id}/trace", a.trace)
 	mux.HandleFunc("GET /api/v1/runs/{id}/files", a.files)
 	mux.HandleFunc("GET /api/v1/runs/{id}/files/content", a.fileContent)
 	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots", a.snapshots)
@@ -297,6 +298,18 @@ type RunStatus struct {
 	// the connections that freezes hold.
 	Stalled int `json:"stalled"`
 	Frozen  int `json:"frozen"`
+
+	Trace TraceStatus `json:"trace"`
+}
+
+// TraceStatus describes a run's trace, the file of its events that
+// GET /api/v1/runs/{id}/trace serves: its size, and whether it holds every
+// event so far. A trace stops at its limit, or at the first error writing
+// it, which Error gives.
+type TraceStatus struct {
+	Bytes    int64  `json:"bytes"`
+	Complete bool   `json:"complete"`
+	Error    string `json:"error,omitempty"`
 }
 
 func newStatus(s runs.Status) Status {
@@ -313,11 +326,15 @@ func newStatus(s runs.Status) Status {
 			Revision:   s.Revision,
 			Stalled:    s.Stalled,
 			Frozen:     s.Frozen,
+			Trace:      TraceStatus{Bytes: s.Trace.Size, Complete: s.Trace.Complete},
 		},
 		Queued: s.Queued,
 	}
 	if s.Err != nil {
 		body.SFTP.Error = s.Err.Error()
+	}
+	if s.Trace.Err != nil {
+		body.Run.Trace.Error = s.Trace.Err.Error()
 	}
 	return body
 }

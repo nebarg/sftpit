@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -59,6 +60,10 @@ type Options struct {
 
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
+
+	// MaxTraceBytes bounds each run's trace, the file of its events, or is
+	// 0 for no bound.
+	MaxTraceBytes int64
 
 	// ReplyOrder is the order in which each session's replies reach its
 	// client.
@@ -193,6 +198,7 @@ func (m *Manager) Close() error {
 	defer m.resetting.Unlock()
 	m.closed = true
 	m.current.stopTimers()
+	m.current.events.Close()
 	if closeErr := m.current.root.Close(); closeErr != nil {
 		err = errors.Join(err, fmt.Errorf("runs: close the run's files: %w", closeErr))
 	}
@@ -431,6 +437,9 @@ type Status struct {
 
 	// Queued reports whether Queue has set the next run's rules.
 	Queued bool
+
+	// Trace describes the run's trace, the file of its events.
+	Trace events.TraceStatus
 }
 
 // Status describes the current run.
@@ -438,6 +447,7 @@ func (m *Manager) Status() Status {
 	m.mu.Lock()
 	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision(), Queued: m.queued != nil}
 	s.Stalled, s.Frozen = m.current.events.Waiting("stall"), m.current.events.Waiting("freeze_connection")
+	s.Trace = m.current.events.Trace()
 	switch {
 	case m.inReset:
 		s.State = StateResetting
@@ -558,9 +568,23 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		}
 	}
 
+	trace, err := m.workspace.createTrace(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			trace.Close()
+		}
+	}()
+	limit := m.opts.MaxTraceBytes
+	if limit == 0 {
+		limit = math.MaxInt64
+	}
+
 	// A run without a scenario has an engine too, for rules applied to it
 	// later.
-	rec := events.NewRecorder(run.Started, maxEvents)
+	rec := events.NewRecorder(run.Started, maxEvents, events.NewTrace(trace, limit))
 	rules, err := faults.New(chosen.rules, chosen.chaos, chosen.scenario.Seed, faults.Options{Logger: m.logger, Record: rec.Record})
 	if err != nil {
 		return nil, err

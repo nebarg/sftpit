@@ -44,6 +44,7 @@ func Explain(opts Options) ([]byte, error) {
 			MaxFiles:      &cfg.Limits.MaxFiles,
 			MaxOpenFiles:  &cfg.Limits.MaxOpenFiles,
 		},
+		Events: eventsConfig{MaxDiskBytes: &cfg.MaxTraceBytes},
 	}
 	for i, u := range r.file.Users {
 		f.Users = append(f.Users, userConfig{Name: u.Name, PasswordEnv: u.PasswordEnv, Home: cfg.Users[i].Home})

@@ -104,6 +104,7 @@ env_file: .env
 scenarios_dir: ./saved
 server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys, reply_order: completion}
 storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
+events: {max_disk_bytes: 1048576}
 users:
   - {name: test, password_env: P}
   - {name: partner-b, password_env: P2, authorized_keys: keys/partner-b.pub, home: /partner-b}

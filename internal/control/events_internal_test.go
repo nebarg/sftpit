@@ -10,7 +10,7 @@ import (
 )
 
 func TestAStreamSaysWhenEventsItAskedForAreGone(t *testing.T) {
-	rec := events.NewRecorder(time.Now(), 2)
+	rec := events.NewRecorder(time.Now(), 2, nil)
 	for range 5 {
 		rec.Record(events.Event{Kind: events.Connected})
 	}

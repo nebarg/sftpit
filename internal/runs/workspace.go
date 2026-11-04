@@ -46,6 +46,9 @@ const (
 	// left behind, in its directory.
 	snapshotsDir = "snapshots"
 
+	// traceFile holds a run's events, in its directory.
+	traceFile = "events.jsonl"
+
 	// workspaceVersion is the layout version the marker records.
 	workspaceVersion = 1
 
@@ -270,6 +273,15 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	}
 	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
 	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Scenario: scenario}, nil
+}
+
+// createTrace creates the file of the run id's trace, for writing.
+func (w *Workspace) createTrace(id string) (*os.File, error) {
+	f, err := w.root.OpenFile(path.Join(runsDir, id, traceFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("runs: create the run's trace: %w", err)
+	}
+	return f, nil
 }
 
 // openRun opens sub, a directory of the run id, which must be one of the

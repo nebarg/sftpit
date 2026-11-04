@@ -61,6 +61,10 @@ func DefaultLimits() backend.Limits {
 	return backend.Limits{MaxFileBytes: 1 << 30, MaxTotalBytes: 4 << 30, MaxFiles: 10000, MaxOpenFiles: 256}
 }
 
+// DefaultMaxTraceBytes bounds each run's trace, the file of its events, when
+// the configuration sets no bound.
+const DefaultMaxTraceBytes = 64 << 20
+
 // hostKeyWorkspace selects the host keys kept in the workspace.
 const hostKeyWorkspace = "workspace"
 
@@ -96,6 +100,9 @@ type Config struct {
 
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
+
+	// MaxTraceBytes bounds each run's trace, the file of its events.
+	MaxTraceBytes int64
 
 	// Users are the configured users, with their passwords resolved and
 	// their homes cleaned, or the built-in test user if none are configured.
@@ -200,6 +207,7 @@ type fileConfig struct {
 	Storage       storageConfig `yaml:"storage"`
 	Users         []userConfig  `yaml:"users,omitempty"`
 	Policy        policyConfig  `yaml:"policy,omitempty"`
+	Events        eventsConfig  `yaml:"events,omitempty"`
 
 	Scenarios map[string]scenarioConfig `yaml:"scenarios,omitempty"`
 }
@@ -211,6 +219,10 @@ type storageConfig struct {
 	MaxTotalBytes *int64 `yaml:"max_total_bytes,omitempty"`
 	MaxFiles      *int64 `yaml:"max_files,omitempty"`
 	MaxOpenFiles  *int64 `yaml:"max_open_files,omitempty"`
+}
+
+type eventsConfig struct {
+	MaxDiskBytes *int64 `yaml:"max_disk_bytes,omitempty"`
 }
 
 type serverConfig struct {
@@ -399,6 +411,9 @@ func read(opts Options) (*reading, error) {
 		return nil, err
 	}
 	cfg.Limits = limits
+	if cfg.MaxTraceBytes, err = f.Events.maxTraceBytes(); err != nil {
+		return nil, err
+	}
 
 	if err := validateUsers(f.Users); err != nil {
 		return nil, err
@@ -579,6 +594,18 @@ func (s storageConfig) limits() (backend.Limits, error) {
 		*setting.limit = *setting.value
 	}
 	return limits, nil
+}
+
+// maxTraceBytes returns the configured bound on each run's trace, or the
+// default if none is set. Like a storage limit, it cannot be turned off.
+func (e eventsConfig) maxTraceBytes() (int64, error) {
+	if e.MaxDiskBytes == nil {
+		return DefaultMaxTraceBytes, nil
+	}
+	if *e.MaxDiskBytes < 1 {
+		return 0, fmt.Errorf("events.max_disk_bytes is %d; it must be at least 1 and cannot be turned off", *e.MaxDiskBytes)
+	}
+	return *e.MaxDiskBytes, nil
 }
 
 func sameFile(a, b string) bool {

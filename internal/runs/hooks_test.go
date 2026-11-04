@@ -95,7 +95,7 @@ func TestArmTimersStartsNoOutageOnceStopped(t *testing.T) {
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}
-		stop := armTimers(rules.Timers(), srv, logger, events.NewRecorder(time.Now(), 10).Record)
+		stop := armTimers(rules.Timers(), srv, logger, events.NewRecorder(time.Now(), 10, nil).Record)
 		time.Sleep(time.Until(rules.Timers()[0].At))
 		stop()
 		fired := rules.Rules().Counts["outage"].Fired

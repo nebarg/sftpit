@@ -173,6 +173,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout
 		Server:        sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
 		SeedDir:       cfg.SeedDir,
 		Limits:        cfg.Limits,
+		MaxTraceBytes: cfg.MaxTraceBytes,
 		ReplyOrder:    cfg.ReplyOrder,
 		Policy:        cfg.Policy,
 		Scenarios:     cfg.Scenarios,

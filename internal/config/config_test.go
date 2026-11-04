@@ -60,6 +60,21 @@ storage:
 	}
 }
 
+func TestLoadBoundsEachRunsTrace(t *testing.T) {
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\n")
+	cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxTraceBytes != DefaultMaxTraceBytes {
+		t.Errorf("MaxTraceBytes = %d, want the default %d", cfg.MaxTraceBytes, DefaultMaxTraceBytes)
+	}
+	config = testutil.WriteFile(t, config, "schema_version: 1\nevents:\n  max_disk_bytes: 4096\n")
+	if cfg, err = Load(Options{ConfigFile: config, LookupEnv: noEnv}); err != nil || cfg.MaxTraceBytes != 4096 {
+		t.Errorf("Load with max_disk_bytes 4096 = %v, %v; want 4096", cfg, err)
+	}
+}
+
 func TestLoadReadsAFullConfig(t *testing.T) {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "keys", "partner-b.pub"), "")
@@ -258,6 +273,7 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{"limit turned off", "schema_version: 1\nstorage:\n  max_files: 0\n", "max_files is 0; storage limits must be at least 1"},
 		{"negative limit", "schema_version: 1\nstorage:\n  max_open_files: -1\n", "max_open_files is -1"},
 		{"limit with a unit", "schema_version: 1\nstorage:\n  max_total_bytes: 64MiB\n", "cannot unmarshal"},
+		{"trace bound turned off", "schema_version: 1\nevents:\n  max_disk_bytes: 0\n", "events.max_disk_bytes is 0; it must be at least 1"},
 		{"user without a name", "schema_version: 1\nusers:\n  - password_env: P\n", "users[0]: name is required"},
 		{"duplicate user", "schema_version: 1\nusers:\n  - {name: a, password_env: P}\n  - {name: a, password_env: P}\n", "users[1] (a): users[0] has the same name"},
 		{"user without credentials", "schema_version: 1\nusers:\n  - name: a\n", "set password_env, authorized_keys or both"},
