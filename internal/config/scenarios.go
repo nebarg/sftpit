@@ -29,6 +29,8 @@ type scenarioConfig struct {
 	Seed        *faults.Seed `yaml:"seed,omitempty"`
 	Faults      []ruleConfig `yaml:"faults"`
 	Chaos       *chaosConfig `yaml:"chaos,omitempty"`
+
+	Assertions []assertionConfig `yaml:"assertions,omitempty"`
 }
 
 type ruleConfig struct {
@@ -226,15 +228,16 @@ var corruptions = map[string]sftpproxy.Corruption{
 }
 
 // scenarios validates every scenario. Rules may refer only to users, and
-// keys, that the configuration defines.
-func scenarios(defined map[string]scenarioConfig, users []sshfront.User) (map[string]Scenario, error) {
+// keys, that the configuration defines, and assertions only to fixtures
+// under expectedDir.
+func scenarios(defined map[string]scenarioConfig, users []sshfront.User, expectedDir string) (map[string]Scenario, error) {
 	valid := make(map[string]Scenario, len(defined))
 	for _, name := range slices.Sorted(maps.Keys(defined)) {
 		field := "scenarios." + name
 		if !namePattern.MatchString(name) {
 			return nil, fmt.Errorf("%s: a scenario name may hold only lowercase letters, digits and -, starting with a letter or digit", field)
 		}
-		s, err := defined[name].scenario(field, users)
+		s, err := defined[name].scenario(field, users, expectedDir)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +266,7 @@ func choose(selected string, configured map[string]Scenario, files []ScenarioFil
 	return Scenario{}, fmt.Errorf("scenario %q is not defined; the configuration defines %s", selected, strings.Join(names, ", "))
 }
 
-func (s scenarioConfig) scenario(field string, users []sshfront.User) (Scenario, error) {
+func (s scenarioConfig) scenario(field string, users []sshfront.User, expectedDir string) (Scenario, error) {
 	rules, err := parseRules(field+".", s.Faults, users)
 	if err != nil {
 		return Scenario{}, err
@@ -276,6 +279,9 @@ func (s scenarioConfig) scenario(field string, users []sshfront.User) (Scenario,
 		if valid.Chaos, err = s.Chaos.chaos(users); err != nil {
 			return Scenario{}, fmt.Errorf("%s.chaos: %w", field, err)
 		}
+	}
+	if valid.Assertions, err = parseAssertions(field+".", s.Assertions, rules, valid.Chaos, expectedDir); err != nil {
+		return Scenario{}, err
 	}
 	return valid, nil
 }

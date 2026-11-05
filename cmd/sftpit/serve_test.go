@@ -640,6 +640,34 @@ faults:
 	}
 }
 
+func TestServeKeepsAScenariosAssertionsAndItsExpectedFixtures(t *testing.T) {
+	dir := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(dir, "expected", "orders.csv"), "id,total\n")
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
+storage: {data_dir: ./work, expected_dir: ./expected}
+scenarios:
+  recovery:
+    faults: []
+    assertions:
+      - {type: file_equals_fixture, path: /orders.csv, fixture: orders.csv}
+`)
+	s := startServe(t, "--config", config, "--scenario", "recovery")
+	got, err := os.ReadFile(filepath.Join(dir, "work", "fixtures", "expected", "orders.csv"))
+	if err != nil || string(got) != "id,total\n" {
+		t.Errorf("the workspace's expected fixture holds %q, %v", got, err)
+	}
+	if _, err := s.dial(t, "test", "test").Stat("/orders.csv"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat of the fixture = %v, want a client not to see it", err)
+	}
+	api := "http://" + s.apiAddr + "/api/v1"
+	status := requestJSON(t, "GET", api+"/status", "")
+	rules := requestJSON(t, "GET", api+"/runs/"+status["run"].(map[string]any)["id"].(string)+"/rules", "")
+	assertions, _ := rules["assertions"].([]any)
+	if len(assertions) != 1 || assertions[0].(map[string]any)["fixture"] != "orders.csv" {
+		t.Errorf("the run's assertions are %v, want the scenario's", rules["assertions"])
+	}
+}
+
 func TestServeKeepsACopyOfACutOffUploadThatTheAPIServes(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	testutil.WriteFile(t, config, `schema_version: 1

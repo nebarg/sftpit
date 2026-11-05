@@ -11,6 +11,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/runs"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 // startWithScenarioFiles starts runs as start does, with scenario files in
@@ -18,7 +19,7 @@ import (
 func startWithScenarioFiles(t *testing.T) (*runs.Manager, http.Handler, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "scenarios")
-	m, api := start(t, runs.Options{ScenarioFiles: config.NewScenarioFiles(dir, testUsers, testScenarios)})
+	m, api := start(t, runs.Options{ScenarioFiles: config.NewScenarioFiles(dir, testUsers, testScenarios, "")})
 	return m, api, dir
 }
 
@@ -123,5 +124,38 @@ func TestSaveScenarioRefusesABadRequest(t *testing.T) {
 				t.Errorf("a refused save made the scenarios directory (%v)", err)
 			}
 		})
+	}
+}
+
+func TestScenariosKeepTheirAssertions(t *testing.T) {
+	expected := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(expected, "orders.csv"), "id\n")
+	dir := filepath.Join(t.TempDir(), "scenarios")
+	_, api := start(t, runs.Options{ExpectedDir: expected, ScenarioFiles: config.NewScenarioFiles(dir, testUsers, testScenarios, expected)})
+	assertions := `[{"type": "rule_fired", "rule_id": "deny-stats"}, {"type": "file_equals_fixture", "path": "/in/orders.csv", "fixture": "orders.csv"}]`
+	want := []any{
+		map[string]any{"type": "rule_fired", "rule_id": "deny-stats", "at_least": 1},
+		map[string]any{"type": "file_equals_fixture", "path": "/in/orders.csv", "fixture": "orders.csv"},
+	}
+
+	code, saved := call(t, api, "PUT", "/api/v1/scenarios/saved", `{"faults": [`+denyStats+`], "assertions": `+assertions+`}`)
+	if code != http.StatusCreated || !equalJSON(saved["assertions"], want) {
+		t.Fatalf("a save with assertions = %d %v, want %v", code, saved, want)
+	}
+	_, body := call(t, api, "GET", "/api/v1/scenarios", "")
+	for _, s := range body["scenarios"].([]any) {
+		listed := s.(map[string]any)
+		if listed["name"] == "saved" && !equalJSON(listed["assertions"], want) {
+			t.Errorf("the listing has %v, want %v", listed["assertions"], want)
+		}
+		if listed["name"] == "chaos" && listed["assertions"] != nil {
+			t.Errorf("a scenario without assertions lists %v", listed["assertions"])
+		}
+	}
+	if code, body := call(t, api, "PUT", "/api/v1/scenarios/typo", `{"faults": [`+denyStats+`], "assertions": [{"type": "rule_fired", "rule_id": "typo"}]}`); code != http.StatusBadRequest || !strings.Contains(body["error"].(string), `rule_id "typo"`) {
+		t.Errorf("a save naming a rule it lacks = %d %v, want 400", code, body)
+	}
+	if code, body := call(t, api, "PUT", "/api/v1/scenarios/missing", `{"faults": [], "assertions": [{"type": "file_equals_fixture", "path": "/a", "fixture": "missing.csv"}]}`); code != http.StatusBadRequest || !strings.Contains(body["error"].(string), `fixture "missing.csv"`) {
+		t.Errorf("a save naming a fixture that is not there = %d %v, want 400", code, body)
 	}
 }

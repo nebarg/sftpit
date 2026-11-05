@@ -97,6 +97,7 @@ server:
 storage:
   data_dir: "./sandbox-data" # a workspace to keep; temporary by default
   seed_dir: "./seed" # every run starts with a copy, taken at startup
+  expected_dir: "./expected" # fixtures for assertions, copied at startup; clients never see them
   # Limits on each run's files, shown with their defaults:
   max_file_bytes: 1073741824 # 1 GiB
   max_total_bytes: 4294967296 # 4 GiB
@@ -379,6 +380,38 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 - **Seeds:** without a pinned seed, each run draws a fresh one, so chaos differs from run to run. The banner shows the preset, and the logs name the rule behind each fault, such as `rule fired rule=chaos-fail`.
 - **Names:** `sftpit config explain` shows the rules a preset compiles to. Rule IDs that start with `chaos-` are kept for them.
 - **Pausing:** with `paused: true`, chaos's rules match nothing, and a drop it chose does not come, until a [change of rules](#changing-the-rules-during-a-run) resumes them with their counts. A delay or freeze already under way runs its course.
+
+## Assertions
+
+A scenario can say what a run of it must have done, or left behind:
+
+```yaml
+scenarios:
+  upload-recovery:
+    faults:
+      - id: first-upload-cutoff
+        fail_upload: { path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576 }
+    assertions:
+      - { type: rule_fired, rule_id: first-upload-cutoff, exactly: 1 }
+      - { type: successful_operation, operation: rename, source: /incoming/orders.csv.part, target: /incoming/orders.csv }
+      - { type: file_equals_fixture, path: /incoming/orders.csv, fixture: orders.csv }
+      - { type: path_absent, path: /incoming/orders.csv.part }
+```
+
+| Type | Fields | Checks |
+|---|---|---|
+| `rule_fired` | `rule_id`, a count | how many times a rule of the scenario or its chaos fired |
+| `successful_operation` | `operation`, `path`, a count | how many requests got a successful reply: `remove`, `mkdir`, `rmdir`, `setstat`, `stat` or `lstat` |
+| `successful_operation` | `operation: rename`, `source`, `target` or both, a count | the same for a rename |
+| `file_equals_fixture` | `path`, `fixture` | the file holds the content of a fixture, given by its path under `storage.expected_dir` |
+| `file_hash` | `path`, `sha256` | the file has this SHA-256, for a file not worth committing |
+| `path_absent` | `path` | nothing is left at the path |
+
+A count is `exactly`, or `at_least`, `at_most` or both, and is at least 1 if not given. Reads and writes are not counted by request, so assert on the file they should have left. A scenario may hold only assertions, with `faults: []`, to check a workflow with no faults.
+
+`config validate` and `serve` check assertions as they check rules: `rule_id` must name a rule of the scenario, and `fixture` a regular file in `expected_dir`, which `serve` copies into the workspace at startup, so later changes to it have no effect. `expected_dir` may not lie inside `seed_dir`, whose files clients can see. An inline [reset](#control-api), a [queued run](#queuing-the-next-run) and a [saved scenario file](#scenario-files) take `assertions` too, in the same form as JSON. Changing a run's rules does not change its assertions.
+
+sftpit keeps a run's assertions, which `GET /api/v1/runs/{id}/rules` lists, and does not evaluate them yet.
 
 ## Dashboard
 

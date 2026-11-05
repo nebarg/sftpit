@@ -17,7 +17,7 @@ import (
 func TestResetReadsAScenarioFileAsItIsThen(t *testing.T) {
 	dir := t.TempDir()
 	configured := map[string]config.Scenario{"configured": {}}
-	files := config.NewScenarioFiles(dir, []sshfront.User{{Name: testUser}}, configured)
+	files := config.NewScenarioFiles(dir, []sshfront.User{{Name: testUser}}, configured, "")
 	m, _ := startManager(t, Options{Scenarios: configured, ScenarioFiles: files})
 
 	deny := faults.Rule{ID: "deny", Match: faults.Match{Operations: []faults.Operation{faults.Remove}}, Action: sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied}}
@@ -71,7 +71,7 @@ func TestResetReadsAScenarioFileAsItIsThen(t *testing.T) {
 func TestScenariosListsTheConfigurationsAndTheFiles(t *testing.T) {
 	dir := t.TempDir()
 	configured := map[string]config.Scenario{"configured": {Description: "from the config"}}
-	files := config.NewScenarioFiles(dir, []sshfront.User{{Name: testUser}}, configured)
+	files := config.NewScenarioFiles(dir, []sshfront.User{{Name: testUser}}, configured, "")
 	m := newManager(t, Options{Scenarios: configured, ScenarioFiles: files})
 	if _, err := m.SaveScenario("saved", config.Scenario{}, ""); err != nil {
 		t.Fatalf("SaveScenario: %v", err)

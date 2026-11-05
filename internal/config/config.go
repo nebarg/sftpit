@@ -94,6 +94,11 @@ type Config struct {
 	// workspace at startup, or "" for an empty workspace.
 	SeedDir string
 
+	// ExpectedDir is the absolute path of the directory of the fixtures that
+	// assertions compare files with, or "" for none. It is copied into the
+	// workspace at startup, where no client can see it.
+	ExpectedDir string
+
 	// DataDir is the absolute path of the workspace to keep, or "" for a
 	// temporary one.
 	DataDir string
@@ -157,6 +162,10 @@ type Scenario struct {
 	// Chaos is the scenario's chaos, whose rules are tried after its own, or
 	// nil.
 	Chaos *faults.Chaos
+
+	// Assertions are what a run of the scenario must have done, or left
+	// behind, once it is over.
+	Assertions []Assertion
 }
 
 // Options are the command-line settings. They take precedence over the
@@ -215,6 +224,7 @@ type fileConfig struct {
 type storageConfig struct {
 	DataDir       string `yaml:"data_dir,omitempty"`
 	SeedDir       string `yaml:"seed_dir,omitempty"`
+	ExpectedDir   string `yaml:"expected_dir,omitempty"`
 	MaxFileBytes  *int64 `yaml:"max_file_bytes,omitempty"`
 	MaxTotalBytes *int64 `yaml:"max_total_bytes,omitempty"`
 	MaxFiles      *int64 `yaml:"max_files,omitempty"`
@@ -389,7 +399,7 @@ func read(opts Options) (*reading, error) {
 		seedDir = resolvePath(dir, f.Storage.SeedDir)
 	}
 	if seedDir != "" {
-		resolved, err := checkSeedDir(seedDir)
+		resolved, err := checkFixtureDir("seed_dir", seedDir)
 		if err != nil {
 			return nil, err
 		}
@@ -451,14 +461,19 @@ func read(opts Options) (*reading, error) {
 	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
 		return nil, err
 	}
-	if cfg.Scenarios, err = scenarios(f.Scenarios, cfg.Users); err != nil {
+	if f.Storage.ExpectedDir != "" {
+		if cfg.ExpectedDir, err = checkExpectedDir(resolvePath(dir, f.Storage.ExpectedDir), cfg.SeedDir); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.Scenarios, err = scenarios(f.Scenarios, cfg.Users, cfg.ExpectedDir); err != nil {
 		return nil, err
 	}
 	defaultDir := defaultScenariosDir
 	if opts.ConfigFile == "" {
 		defaultDir = defaultScenariosDirWithoutConfig
 	}
-	cfg.ScenarioFiles = NewScenarioFiles(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), cfg.Users, cfg.Scenarios)
+	cfg.ScenarioFiles = NewScenarioFiles(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), cfg.Users, cfg.Scenarios, cfg.ExpectedDir)
 	files, err := cfg.ScenarioFiles.List()
 	if err != nil {
 		return nil, err
@@ -521,22 +536,37 @@ func resolvePath(dir, name string) string {
 	return filepath.Join(dir, name)
 }
 
-// checkSeedDir requires the seed directory to exist and refuses the
+// checkFixtureDir requires field's directory to exist and refuses the
 // filesystem root and the home directory, whose whole trees would be copied.
-func checkSeedDir(name string) (string, error) {
+func checkFixtureDir(field, name string) (string, error) {
 	abs, err := filepath.Abs(name)
 	if err != nil {
-		return "", fmt.Errorf("seed_dir: %w", err)
+		return "", fmt.Errorf("%s: %w", field, err)
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Errorf("seed_dir: %w", err)
+		return "", fmt.Errorf("%s: %w", field, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("seed_dir %s is not a directory", abs)
+		return "", fmt.Errorf("%s %s is not a directory", field, abs)
 	}
 	if isRootOrHome(abs) {
-		return "", fmt.Errorf("seed_dir %s would copy the whole tree under it; use a directory of test fixtures", abs)
+		return "", fmt.Errorf("%s %s would copy the whole tree under it; use a directory of test fixtures", field, abs)
+	}
+	return abs, nil
+}
+
+// checkExpectedDir checks the expected directory as checkFixtureDir does,
+// and refuses one inside the seed, whose files clients can see.
+func checkExpectedDir(name, seedDir string) (string, error) {
+	abs, err := checkFixtureDir("expected_dir", name)
+	if err != nil {
+		return "", err
+	}
+	if seedDir != "" {
+		if rel, err := filepath.Rel(seedDir, abs); err == nil && filepath.IsLocal(rel) {
+			return "", fmt.Errorf("expected_dir %s is inside seed_dir %s, so clients would see its fixtures", abs, seedDir)
+		}
 	}
 	return abs, nil
 }

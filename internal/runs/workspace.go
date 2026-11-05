@@ -27,10 +27,10 @@ var (
 	// ErrInUse reports a workspace that another process has locked.
 	ErrInUse = errors.New("workspace in use by another sftpit process")
 
-	// ErrSeedOverlapsWorkspace reports a seed directory that holds the
-	// workspace or lies within its fixtures, so that snapshotting it would
-	// copy it into itself or delete it.
-	ErrSeedOverlapsWorkspace = errors.New("the seed directory overlaps the workspace, so it would be copied into itself or deleted")
+	// ErrSeedOverlapsWorkspace reports a seed or expected directory that
+	// holds the workspace or lies within its fixtures, so that snapshotting
+	// it would copy it into itself or delete it.
+	ErrSeedOverlapsWorkspace = errors.New("the directory overlaps the workspace, so it would be copied into itself or deleted")
 
 	// errLocked reports a lock that another process holds.
 	errLocked = errors.New("runs: file locked")

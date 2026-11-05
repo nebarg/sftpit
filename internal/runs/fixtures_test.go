@@ -234,7 +234,7 @@ func newBackend(t *testing.T, w *Workspace) (*backend.Embedded, string) {
 }
 
 // restore restores s into a new run in w, returning the run's files.
-func restore(t *testing.T, w *Workspace, s *seedSnapshot) string {
+func restore(t *testing.T, w *Workspace, s *fixtureSnapshot) string {
 	t.Helper()
 	embedded, files := newBackend(t, w)
 	if err := s.restore(embedded); err != nil {

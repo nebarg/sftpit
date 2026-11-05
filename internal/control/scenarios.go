@@ -33,6 +33,7 @@ type Scenario struct {
 	Seed        *Seed           `json:"seed,omitempty"`
 	Faults      json.RawMessage `json:"faults,omitempty"`
 	Chaos       json.RawMessage `json:"chaos,omitempty"`
+	Assertions  json.RawMessage `json:"assertions,omitempty"`
 }
 
 // SaveScenarioRequest is the body of a save of a scenario file. Hash is
@@ -43,7 +44,7 @@ type SaveScenarioRequest struct {
 	Hash        string `json:"hash,omitempty"`
 	Description string `json:"description,omitempty"`
 	Seed        *Seed  `json:"seed,omitempty"`
-	RulesRequest
+	QueueRequest
 }
 
 // scenarios answers with the configuration's scenarios and the scenario
@@ -92,7 +93,12 @@ func (a *api) saveScenario(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s := config.Scenario{Description: body.Description, Seed: (*faults.Seed)(body.Seed), Rules: rules, Chaos: chaos}
+	assertions, err := a.assertions(body.Assertions, rules, chaos)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s := config.Scenario{Description: body.Description, Seed: (*faults.Seed)(body.Seed), Rules: rules, Chaos: chaos, Assertions: assertions}
 	file, err := a.runs.SaveScenario(r.PathValue("name"), s, body.Hash)
 	if err != nil {
 		writeError(w, scenarioStatus(err), err)
@@ -142,6 +148,11 @@ func describeScenario(d Scenario, s config.Scenario) (Scenario, error) {
 	}
 	if s.Chaos != nil {
 		if d.Chaos, err = config.ChaosJSON(s.Chaos); err != nil {
+			return Scenario{}, err
+		}
+	}
+	if len(s.Assertions) > 0 {
+		if d.Assertions, err = config.AssertionsJSON(s.Assertions); err != nil {
 			return Scenario{}, err
 		}
 	}

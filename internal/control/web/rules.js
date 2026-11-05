@@ -111,3 +111,11 @@ function range(v) {
   }
   return String(v);
 }
+
+// keptAssertions returns the assertions of scenario, a reply that gives its
+// rules, chaos and assertions, that it can still be saved or queued with:
+// a change of rules during a run can leave rule_fired naming a rule gone.
+export function keptAssertions(scenario) {
+  const ids = new Set(scenario.faults.map((rule) => rule.id));
+  return (scenario.assertions ?? []).filter((a) => a.type !== "rule_fired" || ids.has(a.rule_id) || (scenario.chaos && a.rule_id.startsWith("chaos-")));
+}

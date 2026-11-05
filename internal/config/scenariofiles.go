@@ -61,15 +61,20 @@ type ScenarioFiles struct {
 	// file may have.
 	configured map[string]Scenario
 
+	// expectedDir is the directory of the fixtures that assertions may
+	// refer to, or "" for none.
+	expectedDir string
+
 	// saving serialises saves, so that each checks the file it replaces.
 	saving sync.Mutex
 }
 
 // NewScenarioFiles returns the scenarios saved in dir, an absolute path,
-// whose rules may refer only to users, and keys, that users has, and which
-// may not have the names of the scenarios configured.
-func NewScenarioFiles(dir string, users []sshfront.User, configured map[string]Scenario) *ScenarioFiles {
-	return &ScenarioFiles{dir: dir, users: users, configured: configured}
+// whose rules may refer only to users, and keys, that users has, whose
+// assertions may refer only to fixtures under expectedDir, and which may not
+// have the names of the scenarios configured.
+func NewScenarioFiles(dir string, users []sshfront.User, configured map[string]Scenario, expectedDir string) *ScenarioFiles {
+	return &ScenarioFiles{dir: dir, users: users, configured: configured, expectedDir: expectedDir}
 }
 
 // ScenarioFile is a scenario saved as a file.
@@ -191,7 +196,7 @@ func (f *ScenarioFiles) read(name string) ScenarioFile {
 		file.Err = fmt.Errorf("%w %s: %w", ErrInvalidScenarioFile, file.Path, err)
 		return file
 	}
-	if file.Scenario, err = sf.scenario("scenario "+name, f.users); err != nil {
+	if file.Scenario, err = sf.scenario("scenario "+name, f.users, f.expectedDir); err != nil {
 		file.Err = fmt.Errorf("%w %s: %w", ErrInvalidScenarioFile, file.Path, err)
 	}
 	return file

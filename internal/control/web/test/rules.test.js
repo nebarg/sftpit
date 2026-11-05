@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describeAction, describeChaos, describeMatch, ruleRows } from "../rules.js";
+import { describeAction, describeChaos, describeMatch, keptAssertions, ruleRows } from "../rules.js";
 
 const cut = {
   id: "cut",
@@ -40,4 +40,15 @@ test("rows show what each rule did, chaos's after the run's own", () => {
 test("chaos is spelt out with its scope", () => {
   assert.equal(describeChaos({ preset: "heavy", scope: { user: "partner-b", path_prefix: "/in" }, extras: ["wrong_size"], paused: true }), "heavy chaos with wrong_size for user partner-b, path prefix /in, paused");
   assert.equal(describeChaos({ preset: "light", scope: {}, extras: [], paused: false }), "light chaos for everyone");
+});
+
+test("assertions naming a rule that has gone are not saved or queued", () => {
+  const kept = { type: "rule_fired", rule_id: "cut", exactly: 1 };
+  const gone = { type: "rule_fired", rule_id: "removed" };
+  const chaos = { type: "rule_fired", rule_id: "chaos-delay" };
+  const file = { type: "path_absent", path: "/a" };
+  const assertions = [kept, gone, chaos, file];
+  assert.deepEqual(keptAssertions({ faults: [cut], assertions }), [kept, file]);
+  assert.deepEqual(keptAssertions({ faults: [cut], chaos: { preset: "light" }, assertions }), [kept, chaos, file]);
+  assert.deepEqual(keptAssertions({ faults: [cut] }), []);
 });

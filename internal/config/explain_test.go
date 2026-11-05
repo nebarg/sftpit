@@ -99,11 +99,12 @@ func writeEveryAction(t *testing.T) Options {
 	writeAuthorizedKeys(t, filepath.Join(dir, "keys", "robot.pub"), "")
 	testutil.WriteFile(t, filepath.Join(dir, ".env"), "P2=second-secret\n")
 	testutil.WriteFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "")
+	testutil.WriteFile(t, filepath.Join(dir, "expected", "out", "orders.csv"), "id,total\n")
 	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: .env
 scenarios_dir: ./saved
 server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys, reply_order: completion}
-storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
+storage: {data_dir: ./data, seed_dir: ./seed, expected_dir: ./expected, max_files: 500}
 events: {max_disk_bytes: 1048576}
 users:
   - {name: test, password_env: P}
@@ -167,6 +168,18 @@ scenarios:
         fail_randomly: {operations: [write, rename], path_glob: /incoming/*, probability: 0.05}
       - id: missing-chunk
         corrupt_download: {path_glob: /outgoing/*.csv, attempts: [1], transform: omit_range, offset: 1048576, length: 4096}
+    assertions:
+      - {type: rule_fired, rule_id: first-upload-cutoff, exactly: 1}
+      - {type: rule_fired, rule_id: fin, exactly: 0}
+      - {type: rule_fired, rule_id: slow-stat}
+      - {type: rule_fired, rule_id: random-failures, at_least: 2, at_most: 9}
+      - {type: rule_fired, rule_id: gone, at_most: 3}
+      - {type: successful_operation, operation: rename, source: /in/orders.csv.part, target: /in/orders.csv, at_least: 1}
+      - {type: successful_operation, operation: rename, target: /in/orders.csv}
+      - {type: successful_operation, operation: remove, path: /in/old.csv, exactly: 2}
+      - {type: file_equals_fixture, path: /in/orders.csv, fixture: out/orders.csv}
+      - {type: file_hash, path: /in/orders.csv, sha256: E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855}
+      - {type: path_absent, path: /in/orders.csv.part}
 `)
 	return Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "first-secret"}.lookup}
 }

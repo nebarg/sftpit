@@ -58,6 +58,11 @@ type Options struct {
 	// "" for none.
 	SeedDir string
 
+	// ExpectedDir is the host directory of the fixtures that assertions
+	// compare files with, or "" for none. A snapshot is taken at the start,
+	// as of the seed, so later changes to it reach no assertion.
+	ExpectedDir string
+
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
 
@@ -95,7 +100,8 @@ type Options struct {
 // concurrent use.
 type Manager struct {
 	workspace *Workspace
-	fixtures  *seedSnapshot
+	fixtures  *fixtureSnapshot
+	expected  *fixtureSnapshot
 	opts      Options
 	logger    *slog.Logger
 	srv       *sshfront.Server
@@ -144,6 +150,10 @@ type activeRun struct {
 	startRules []faults.Rule
 	startChaos *faults.Chaos
 
+	// assertions are what the run must have done once it is over. No change
+	// of its rules changes them.
+	assertions []config.Assertion
+
 	// stops stop the timers armed for the run: those it started with, and
 	// those of each change of its rules. They are guarded by the Manager's
 	// resetting.
@@ -167,7 +177,11 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{workspace: w, fixtures: fixtures, opts: opts, logger: logger}
+	expected, err := w.snapshotExpected(opts.ExpectedDir)
+	if err != nil {
+		return nil, err
+	}
+	m := &Manager{workspace: w, fixtures: fixtures, expected: expected, opts: opts, logger: logger}
 	cfg := opts.Server
 	cfg.Handler, cfg.Hooks = m.handle, m.hooks()
 	cfg.Logger = cmp.Or(cfg.Logger, logger)
@@ -227,10 +241,11 @@ type ResetRequest struct {
 }
 
 // InlineScenario is a scenario given at a reset rather than named in the
-// configuration: its rules, and its chaos, or nil.
+// configuration: its rules, its chaos, or nil, and its assertions.
 type InlineScenario struct {
-	Rules []faults.Rule
-	Chaos *faults.Chaos
+	Rules      []faults.Rule
+	Chaos      *faults.Chaos
+	Assertions []config.Assertion
 }
 
 // Reset ends the current run and starts the run that req chooses. It first
@@ -303,6 +318,20 @@ func (m *Manager) Rules(run string) (faults.RuleSet, error) {
 	}
 	return current.rules.Rules(), nil
 }
+
+// Assertions returns the assertions of run, which must be the current run,
+// or else fails with ErrStaleRun.
+func (m *Manager) Assertions(run string) ([]config.Assertion, error) {
+	current := m.active()
+	if run != current.run.ID {
+		return nil, staleRun(current, run)
+	}
+	return current.assertions, nil
+}
+
+// ExpectedDir returns the host directory of the fixtures that assertions may
+// refer to, or "" if there is none.
+func (m *Manager) ExpectedDir() string { return m.opts.ExpectedDir }
 
 // ChangeRules replaces the rules of run, which must be the current run, with
 // rules, and its chaos with chaos, as faults.Engine.Replace does if revision
@@ -469,6 +498,8 @@ type choice struct {
 	scenario Scenario
 	rules    []faults.Rule
 	chaos    *faults.Chaos
+
+	assertions []config.Assertion
 }
 
 // next chooses the scenario of the run after current, as req asks.
@@ -490,7 +521,7 @@ func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
 		seed = &last.Seed
 	}
 	if last.Inline {
-		return inline(InlineScenario{Rules: current.startRules, Chaos: current.startChaos}, seed)
+		return inline(InlineScenario{Rules: current.startRules, Chaos: current.startChaos, Assertions: current.assertions}, seed)
 	}
 	return m.scenario(last.Name, seed)
 }
@@ -508,7 +539,7 @@ func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
 	if err != nil {
 		return choice{}, err
 	}
-	return choice{scenario: withSeed(Scenario{Name: name}, cmp.Or(seed, s.Seed)), rules: s.Rules, chaos: s.Chaos}, nil
+	return choice{scenario: withSeed(Scenario{Name: name}, cmp.Or(seed, s.Seed)), rules: s.Rules, chaos: s.Chaos, assertions: s.Assertions}, nil
 }
 
 // inline chooses a run of the inline scenario s, whose random decisions
@@ -522,7 +553,7 @@ func inline(s InlineScenario, seed *faults.Seed) (choice, error) {
 			return choice{}, fmt.Errorf("runs: %w", err)
 		}
 	}
-	return choice{scenario: withSeed(Scenario{Inline: true}, seed), rules: s.Rules, chaos: s.Chaos}, nil
+	return choice{scenario: withSeed(Scenario{Inline: true}, seed), rules: s.Rules, chaos: s.Chaos, assertions: s.Assertions}, nil
 }
 
 // withSeed returns s with its random decisions pinned by seed if set, or
@@ -604,6 +635,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		hooks:      connectionHooks(rules, m.logger, rec.Record),
 		startRules: chosen.rules,
 		startChaos: chosen.chaos,
+		assertions: chosen.assertions,
 	}, nil
 }
 

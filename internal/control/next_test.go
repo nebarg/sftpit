@@ -72,3 +72,52 @@ func TestCheckRulesValidatesWithoutApplying(t *testing.T) {
 		t.Errorf("PUT next with a rule ID twice = %d, want 400 and nothing queued", code)
 	}
 }
+
+func TestAResetAndTheQueueCarryAssertions(t *testing.T) {
+	m, api := start(t, runs.Options{Scenario: "chaos"})
+	rules := func() map[string]any {
+		t.Helper()
+		_, body := call(t, api, "GET", "/api/v1/runs/"+m.Status().Run.ID+"/rules", "")
+		return body
+	}
+	if got := rules(); got["assertions"] != nil {
+		t.Errorf("a run without assertions has %v", got["assertions"])
+	}
+	absent := `[{"type": "path_absent", "path": "/in/a.part"}]`
+	want := []any{map[string]any{"type": "path_absent", "path": "/in/a.part"}}
+
+	code, status := call(t, api, "POST", "/api/v1/reset", `{"assertions": `+absent+`}`)
+	if run, _ := status["run"].(map[string]any); code != http.StatusOK || run["inline"] != true {
+		t.Fatalf("a reset with only assertions = %d %v, want an inline run", code, status)
+	}
+	got := rules()
+	if !equalJSON(got["assertions"], want) || !equalJSON(got["faults"], []any{}) {
+		t.Errorf("the run's rules are %v, want no faults and %v", got, want)
+	}
+
+	before := m.Status().Run.ID
+	if code, body := call(t, api, "POST", "/api/v1/reset", `{"faults": [`+denyStats+`], "assertions": [{"type": "rule_fired", "rule_id": "typo"}]}`); code != http.StatusBadRequest || !strings.Contains(body["error"].(string), `rule_id "typo"`) {
+		t.Errorf("a reset naming a rule it lacks = %d %v, want 400", code, body)
+	}
+	if m.Status().Run.ID != before {
+		t.Error("a refused reset started a run")
+	}
+	if code, body := call(t, api, "POST", "/api/v1/reset", `{"scenario": "chaos", "assertions": `+absent+`}`); code != http.StatusBadRequest {
+		t.Errorf("a reset naming a scenario and giving assertions = %d %v, want 400", code, body)
+	}
+
+	code, queued := call(t, api, "PUT", "/api/v1/next", `{"faults": [`+denyStats+`], "assertions": [{"type": "rule_fired", "rule_id": "deny-stats", "exactly": 1}]}`)
+	wantQueued := []any{map[string]any{"type": "rule_fired", "rule_id": "deny-stats", "exactly": 1}}
+	if code != http.StatusOK || !equalJSON(queued["assertions"], wantQueued) {
+		t.Fatalf("PUT next with assertions = %d %v", code, queued)
+	}
+	if code, body := call(t, api, "PUT", "/api/v1/next", `{"faults": [], "assertions": [{"type": "rule_fired", "rule_id": "deny-stats"}]}`); code != http.StatusBadRequest {
+		t.Errorf("PUT next naming a rule it lacks = %d %v, want 400", code, body)
+	}
+	if code, body := call(t, api, "POST", "/api/v1/reset", ""); code != http.StatusOK {
+		t.Fatalf("a bare reset = %d %v", code, body)
+	}
+	if got := rules(); !equalJSON(got["assertions"], wantQueued) {
+		t.Errorf("the queued run has %v, want %v", got["assertions"], wantQueued)
+	}
+}

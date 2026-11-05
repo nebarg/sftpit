@@ -106,8 +106,8 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := runs.ResetRequest{Run: body.Run, Scenario: body.Scenario, Seed: (*faults.Seed)(body.Seed)}
-	if given(body.Faults) || given(body.Chaos) {
-		inline, err := a.inline(body.Faults, body.Chaos)
+	if given(body.Faults) || given(body.Chaos) || given(body.Assertions) {
+		inline, err := a.inline(body.Faults, body.Chaos, body.Assertions)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -175,7 +175,7 @@ func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
 
 // inline returns the inline scenario of a reset that gives rules, chaos or
 // both.
-func (a *api) inline(rules, chaos json.RawMessage) (*runs.InlineScenario, error) {
+func (a *api) inline(rules, chaos, assertions json.RawMessage) (*runs.InlineScenario, error) {
 	s := &runs.InlineScenario{}
 	var err error
 	if given(rules) {
@@ -184,6 +184,9 @@ func (a *api) inline(rules, chaos json.RawMessage) (*runs.InlineScenario, error)
 		}
 	}
 	if s.Chaos, err = a.chaos(chaos); err != nil {
+		return nil, err
+	}
+	if s.Assertions, err = a.assertions(assertions, s.Rules, s.Chaos); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -233,6 +236,18 @@ func (a *api) writeRules(w http.ResponseWriter, run string, set faults.RuleSet) 
 			return
 		}
 	}
+	var assertions json.RawMessage
+	stated, err := a.runs.Assertions(run)
+	if err != nil {
+		writeError(w, statusFor(err), err)
+		return
+	}
+	if len(stated) > 0 {
+		if assertions, err = config.AssertionsJSON(stated); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	counts := make(map[string]ruleCounts, len(set.Counts))
 	for id, c := range set.Counts {
 		counts[id] = ruleCounts{Matched: c.Matched, Selected: c.Selected, Fired: c.Fired, Canceled: rec.Canceled(id)}
@@ -242,7 +257,9 @@ func (a *api) writeRules(w http.ResponseWriter, run string, set faults.RuleSet) 
 		Chaos    json.RawMessage       `json:"chaos,omitempty"`
 		Faults   json.RawMessage       `json:"faults"`
 		Counts   map[string]ruleCounts `json:"counts"`
-	}{set.Revision, chaos, rules, counts})
+
+		Assertions json.RawMessage `json:"assertions,omitempty"`
+	}{set.Revision, chaos, rules, counts, assertions})
 }
 
 // ruleCounts are what a rule has done in the run, as faults.Counts, and
@@ -256,14 +273,16 @@ type ruleCounts struct {
 
 // ResetRequest is the body of a reset, which chooses the next run as
 // runs.ResetRequest does. Every field is optional, so an empty body repeats
-// the current run. Faults and Chaos, if either is given, are an inline
-// scenario's rules and chaos, as a change of rules gives them.
+// the current run. Faults, Chaos and Assertions, if any is given, are an
+// inline scenario's rules and chaos, as a change of rules gives them, and
+// its assertions, as a scenario gives them.
 type ResetRequest struct {
-	Run      string          `json:"run,omitempty"`
-	Scenario *string         `json:"scenario,omitempty"`
-	Faults   json.RawMessage `json:"faults,omitempty"`
-	Chaos    json.RawMessage `json:"chaos,omitempty"`
-	Seed     *Seed           `json:"seed,omitempty"`
+	Run        string          `json:"run,omitempty"`
+	Scenario   *string         `json:"scenario,omitempty"`
+	Faults     json.RawMessage `json:"faults,omitempty"`
+	Chaos      json.RawMessage `json:"chaos,omitempty"`
+	Assertions json.RawMessage `json:"assertions,omitempty"`
+	Seed       *Seed           `json:"seed,omitempty"`
 }
 
 // Status is the reply to a status request, a reset or a release of stalls.

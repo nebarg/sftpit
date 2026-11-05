@@ -62,7 +62,7 @@ func TestSavedScenariosLoadAsTheSame(t *testing.T) {
 }
 
 func TestSaveReplacesOnlyTheFileItWasGiven(t *testing.T) {
-	files := NewScenarioFiles(filepath.Join(t.TempDir(), "made", "on", "save"), testUsers, nil)
+	files := NewScenarioFiles(filepath.Join(t.TempDir(), "made", "on", "save"), testUsers, nil, "")
 	first, err := files.Save("s", Scenario{Description: "first"}, "")
 	if err != nil {
 		t.Fatalf("Save of a new file: %v", err)
@@ -105,7 +105,7 @@ func TestSaveReplacesOnlyTheFileItWasGiven(t *testing.T) {
 
 func TestSaveRefusesNamesAFileCannotHave(t *testing.T) {
 	dir := t.TempDir()
-	files := NewScenarioFiles(dir, testUsers, map[string]Scenario{"configured": {}})
+	files := NewScenarioFiles(dir, testUsers, map[string]Scenario{"configured": {}}, "")
 	for _, name := range []string{"", "../escape", "a/b", "Upper", "-dash", "dot.yaml"} {
 		if _, err := files.Save(name, Scenario{}, ""); !errors.Is(err, ErrScenarioName) {
 			t.Errorf("Save(%q) = %v, want ErrScenarioName", name, err)
@@ -125,11 +125,11 @@ func TestSaveRefusesNamesAFileCannotHave(t *testing.T) {
 
 func TestListSkipsWhatIsNotAScenarioFile(t *testing.T) {
 	dir := t.TempDir()
-	files := NewScenarioFiles(filepath.Join(dir, "missing"), testUsers, nil)
+	files := NewScenarioFiles(filepath.Join(dir, "missing"), testUsers, nil, "")
 	if listed, err := files.List(); err != nil || len(listed) != 0 {
 		t.Errorf("List of a directory that does not exist = %v, %v, want nothing", listed, err)
 	}
-	files = NewScenarioFiles(dir, testUsers, nil)
+	files = NewScenarioFiles(dir, testUsers, nil, "")
 	testutil.WriteFile(t, filepath.Join(dir, "kept.yaml"), "schema_version: 1\nfaults: []\n")
 	testutil.WriteFile(t, filepath.Join(dir, ".kept.yaml.123.tmp"), "half a file")
 	testutil.WriteFile(t, filepath.Join(dir, ".hidden.yaml"), "half a file")

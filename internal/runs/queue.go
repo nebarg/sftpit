@@ -6,10 +6,10 @@ import (
 	"github.com/nebarg/sftpit/internal/faults"
 )
 
-// Queue sets the rules and chaos that the next reset starts its run with
-// if it names no scenario and gives none inline, in place of repeating the
-// current run's, or clears them if s is nil. Every reset that succeeds
-// clears them. Invalid rules or chaos are refused.
+// Queue sets the rules, chaos and assertions that the next reset starts its
+// run with if it names no scenario and gives none inline, in place of
+// repeating the current run's, or clears them if s is nil. Every reset that
+// succeeds clears them. Invalid rules or chaos are refused.
 func (m *Manager) Queue(s *InlineScenario) error {
 	if s != nil {
 		if err := faults.Check(s.Rules); err != nil {

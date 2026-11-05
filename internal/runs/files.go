@@ -88,11 +88,11 @@ func (m *Manager) OpenFile(run, name string) (f *os.File, live bool, err error) 
 
 // seeded returns the files of the seed snapshot by path, or nil if the runs
 // start without a seed.
-func (m *Manager) seeded() map[string]seedEntry {
+func (m *Manager) seeded() map[string]fixtureEntry {
 	if m.fixtures == nil {
 		return nil
 	}
-	files := make(map[string]seedEntry)
+	files := make(map[string]fixtureEntry)
 	for _, e := range m.fixtures.manifest.Entries {
 		if e.Type == "file" {
 			files["/"+e.Path] = e

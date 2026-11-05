@@ -7,7 +7,7 @@ import { APIError, get, runPath, send } from "./api.js";
 import { anchors, catalogue, compileRule, triggerLabels } from "./builder.js";
 import { chaosOf, chaosScopes, formOf } from "./chaos.js";
 import { el, show } from "./dom.js";
-import { describeAction, describeChaos, describeMatch } from "./rules.js";
+import { describeAction, describeChaos, describeMatch, keptAssertions } from "./rules.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -243,7 +243,7 @@ async function queueRule() {
   try {
     const status = await get("/api/v1/status");
     const base = status.queued ? await get("/api/v1/next") : await get(runPath(ctx.run(), "rules"));
-    await send("PUT", "/api/v1/next", { faults: [...base.faults, rule], chaos: base.chaos ?? null });
+    await send("PUT", "/api/v1/next", { faults: [...base.faults, rule], chaos: base.chaos ?? null, assertions: keptAssertions(base) });
     show($("builder-note"), `Queued: the next reset that names no scenario starts a run with ${rule.id} and ${count(base.faults.length, "other rule")}. The current run is unchanged.`);
     ctx.changed();
   } catch (err) {
@@ -321,7 +321,7 @@ function saveLive() {
 
 // duplicate opens the save dialog for a copy of a configured scenario.
 function duplicate(s) {
-  saving = { faults: s.faults, chaos: s.chaos ?? null, seed: s.seed ?? null, description: s.description ?? "" };
+  saving = { faults: s.faults, chaos: s.chaos ?? null, assertions: s.assertions ?? [], seed: s.seed ?? null, description: s.description ?? "" };
   openSave(`Duplicate ${s.name} to a file`, "The configuration file is never rewritten, so its scenarios are copied to a file to change them.", `${s.name}-copy`, s.description);
 }
 
@@ -364,7 +364,7 @@ async function submitSave(ev) {
 // run's decisions as well as its rules.
 async function liveScenario() {
   const [current, status] = await Promise.all([get(runPath(ctx.run(), "rules")), get("/api/v1/status")]);
-  const scenario = { faults: current.faults, chaos: current.chaos ?? null };
+  const scenario = { faults: current.faults, chaos: current.chaos ?? null, assertions: keptAssertions(current) };
   if (status.run.seed_pinned) {
     scenario.seed = status.run.seed;
   }
@@ -393,7 +393,7 @@ export async function loadScenarios() {
               el("td", {}, el("code", {}, s.name)),
               el("td", {}, s.source === "file" ? el("span", { title: `sha256 ${s.hash}` }, s.path) : "configuration, read-only"),
               el("td", {}, s.error ? el("span", { class: "error-text" }, s.error) : s.description ?? ""),
-              el("td", {}, s.error ? "" : `${count(s.faults.length, "rule")}${s.chaos ? `, ${describeChaos(s.chaos)}` : ""}${s.seed ? `, seed ${s.seed}` : ""}`),
+              el("td", {}, s.error ? "" : `${count(s.faults.length, "rule")}${s.chaos ? `, ${describeChaos(s.chaos)}` : ""}${s.seed ? `, seed ${s.seed}` : ""}${s.assertions ? `, ${count(s.assertions.length, "assertion")}` : ""}`),
               el("td", {}, s.source === "config" ? el("button", { type: "button", onclick: () => duplicate(s) }, "Duplicate to file") : ""),
             ),
           ),
