@@ -66,6 +66,9 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
 	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
 	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
+	mux.HandleFunc("POST /api/v1/runs/{id}/drain", a.drain)
+	mux.HandleFunc("POST /api/v1/runs/{id}/assert", a.assert)
+	mux.HandleFunc("GET /api/v1/runs/{id}/report", a.report)
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", a.events)
 	mux.HandleFunc("GET /api/v1/runs/{id}/trace", a.trace)
 	mux.HandleFunc("GET /api/v1/runs/{id}/files", a.files)
@@ -129,8 +132,10 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 // statusFor returns the HTTP status that answers err from the runs.
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
+	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision), errors.Is(err, runs.ErrDrained):
 		return http.StatusConflict
+	case errors.Is(err, runs.ErrUnavailable):
+		return http.StatusServiceUnavailable
 	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios), errors.Is(err, config.ErrInvalidScenarioFile):
 		return http.StatusBadRequest
 	case errors.Is(err, runs.ErrUnknownRun):

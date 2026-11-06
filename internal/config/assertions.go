@@ -74,6 +74,42 @@ func (c Count) Allows(n uint64) bool {
 	return n >= c.Min && (c.Max == nil || n <= *c.Max)
 }
 
+// String describes the bounds, as in "exactly 2" or "at least 1".
+func (c Count) String() string {
+	switch {
+	case c.Max == nil:
+		return fmt.Sprintf("at least %d", c.Min)
+	case *c.Max == c.Min:
+		return fmt.Sprintf("exactly %d", c.Min)
+	case c.Min == 0:
+		return fmt.Sprintf("at most %d", *c.Max)
+	}
+	return fmt.Sprintf("%d to %d", c.Min, *c.Max)
+}
+
+// String describes the assertion in a line, as in
+// "rule_fired first-upload-cutoff, exactly 1".
+func (a Assertion) String() string {
+	switch a.Type {
+	case RuleFired:
+		return fmt.Sprintf("%s %s, %s", a.Type, a.Rule, a.Count)
+	case SuccessfulOperation:
+		what := a.Path
+		if a.Operation == faults.Rename {
+			what = strings.TrimSpace(strings.Join([]string{a.Source, "to", a.Target}, " "))
+			if a.Target == "" {
+				what = "from " + a.Source
+			}
+		}
+		return fmt.Sprintf("%s %s %s, %s", a.Type, a.Operation, what, a.Count)
+	case FileEqualsFixture:
+		return fmt.Sprintf("%s %s, fixture %s", a.Type, a.Path, a.Fixture)
+	case FileHash:
+		return fmt.Sprintf("%s %s, sha256 %s", a.Type, a.Path, a.SHA256)
+	}
+	return fmt.Sprintf("%s %s", a.Type, a.Path)
+}
+
 type assertionConfig struct {
 	Type      string  `yaml:"type" json:"type"`
 	RuleID    string  `yaml:"rule_id,omitempty" json:"rule_id,omitempty"`

@@ -142,6 +142,13 @@ func (r *Recorder) Events(after uint64, limit int, f Filter) Page {
 	return p
 }
 
+// Last returns the ID of the latest event.
+func (r *Recorder) Last() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.next - 1
+}
+
 // Changed returns a channel that is closed once another event is recorded,
 // or the recorder is closed.
 func (r *Recorder) Changed() <-chan struct{} {

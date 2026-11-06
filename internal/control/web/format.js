@@ -76,6 +76,8 @@ export function describeEvent(e) {
       return { tone: "notice", summary: `Rules changed to revision ${e.rules.revision}` };
     case "snapshot":
       return { tone: "notice", summary: `Kept ${e.snapshot.copy ? "a copy" : "a record"} of ${e.path}, ${formatBytes(e.snapshot.size)}` };
+    case "drained":
+      return { tone: e.unfinished ? "error" : "notice", summary: `Run drained${e.unfinished ? `: unfinished transfers of ${e.unfinished.join(", ")}` : ""}` };
   }
   return { tone: "", summary: e.kind };
 }

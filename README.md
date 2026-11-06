@@ -411,7 +411,30 @@ A count is `exactly`, or `at_least`, `at_most` or both, and is at least 1 if not
 
 `config validate` and `serve` check assertions as they check rules: `rule_id` must name a rule of the scenario, and `fixture` a regular file in `expected_dir`, which `serve` copies into the workspace at startup, so later changes to it have no effect. `expected_dir` may not lie inside `seed_dir`, whose files clients can see. An inline [reset](#control-api), a [queued run](#queuing-the-next-run) and a [saved scenario file](#scenario-files) take `assertions` too, in the same form as JSON. Changing a run's rules does not change its assertions.
 
-sftpit keeps a run's assertions, which `GET /api/v1/runs/{id}/rules` lists, and does not evaluate them yet.
+`GET /api/v1/runs/{id}/rules` lists a run's assertions. [`sftpit assert`](#checking-a-run) checks them.
+
+### Checking a run
+
+```bash
+sftpit assert --ready-file ./work/sftpit-ready.json --timeout 10s
+```
+
+```text
+run 20261106-101500.123-3f9a: scenario upload-recovery, seed 481516 (pinned)
+  pass  rule_fired first-upload-cutoff, exactly 1: fired 1 time
+  pass  successful_operation rename /incoming/orders.csv.part to /incoming/orders.csv, at least 1: succeeded 1 time
+  FAIL  file_equals_fixture /incoming/orders.csv, fixture orders.csv: holds 1048576 bytes with sha256 5e1a...; the fixture holds 4194304 bytes with sha256 9c2f...
+  pass  path_absent /incoming/orders.csv.part: nothing is there
+failed
+```
+
+It exits with 0 if the run passed, 1 if it failed, 2 for bad flags and 3 if there is no verdict, such as when the server cannot be reached. `--format json` writes the whole report, and `--output FILE` writes to a file instead of standard output.
+
+Asserting ends the run. Admission closes, and clients have until the timeout to close their files, on connections they already have. Every connection then ends, and the assertions are checked, so nothing can change the files after the verdict. The run admits no clients until a reset starts the next, and asserting again gives the same report.
+
+A run passes only if it states assertions, every one holds, and no transfer was unfinished: a file still open when its connection ended counts against it, while one a fault cut off earlier does not. A run with no assertions fails, since nothing was checked. `successful_operation` reads the [trace](#the-trace), so it fails if the trace is incomplete, while the other assertions do not need it.
+
+A pass says what the server saw. Whether the application recovered, without duplicate processing or alerts, is for the application's own tests, so a harness combines their result with this one.
 
 ## Dashboard
 
@@ -446,6 +469,9 @@ The page follows the current run, so after a reset, from the dashboard or elsewh
 | `GET /api/v1/runs/{id}/rules` | the run's rules and chaos, their revision and what each rule has done |
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
 | `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
+| `POST /api/v1/runs/{id}/drain` | closes admission, gives clients `timeout` to close their files, by default 10s, then ends every connection, and answers with the paths left `unfinished` |
+| `POST /api/v1/runs/{id}/assert` | drains the run and answers with [the report](#checking-a-run), with status 200 whether it passed or failed |
+| `GET /api/v1/runs/{id}/report` | the report of a run that has been asserted, as a download |
 | `GET /api/v1/runs/{id}/events` | what happened in the run, [page by page or as it happens](#events) |
 | `GET /api/v1/runs/{id}/trace` | every event of the run, as a [JSON Lines download](#the-trace) |
 | `GET /api/v1/runs/{id}/files` | the run's [files](#files), with their sizes, modes, times and, if asked, hashes |
@@ -469,7 +495,7 @@ curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
 }
 ```
 
-The state is `up`, `down` during an outage, with `down_until`, `resetting`, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold. `trace` describes the run's [trace](#the-trace). `queued` says whether rules are [queued for the next reset](#queuing-the-next-run).
+The state is `up`, `down` during an outage, with `down_until`, `resetting`, `draining` or `drained` once a [drain](#checking-a-run) has begun or ended, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold. `trace` describes the run's [trace](#the-trace). `queued` says whether rules are [queued for the next reset](#queuing-the-next-run).
 
 **A reset:**
 - **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
@@ -698,6 +724,8 @@ run 20261024-101500.123-3f9a: scenario flaky-partner, seed 7 (pinned)
 ```
 
 `--scenario` and `--seed` choose the next run as the reset's body does, and `--scenario ""` starts one without faults. It exits with 2 when the reset is refused, such as for an unknown scenario, and with 3 when the ready file cannot be read, the server cannot be reached or the reset fails.
+
+At the end of a test, [`sftpit assert`](#checking-a-run) gives the verdict on the run through the same ready file.
 
 ## Behavior
 

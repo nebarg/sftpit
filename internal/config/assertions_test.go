@@ -149,6 +149,33 @@ func TestCountAllows(t *testing.T) {
 	}
 }
 
+func TestAssertionsDescribeThemselves(t *testing.T) {
+	two := uint64(2)
+	zero := uint64(0)
+	tests := []struct {
+		assertion Assertion
+		want      string
+	}{
+		{Assertion{Type: RuleFired, Rule: "cut", Count: Count{Min: 1}}, "rule_fired cut, at least 1"},
+		{Assertion{Type: RuleFired, Rule: "cut", Count: Count{Min: 2, Max: &two}}, "rule_fired cut, exactly 2"},
+		{Assertion{Type: RuleFired, Rule: "cut", Count: Count{Max: &zero}}, "rule_fired cut, exactly 0"},
+		{Assertion{Type: RuleFired, Rule: "cut", Count: Count{Max: &two}}, "rule_fired cut, at most 2"},
+		{Assertion{Type: RuleFired, Rule: "cut", Count: Count{Min: 1, Max: &two}}, "rule_fired cut, 1 to 2"},
+		{Assertion{Type: SuccessfulOperation, Operation: faults.Remove, Path: "/a", Count: Count{Min: 1}}, "successful_operation remove /a, at least 1"},
+		{Assertion{Type: SuccessfulOperation, Operation: faults.Rename, Source: "/a", Target: "/b", Count: Count{Min: 1}}, "successful_operation rename /a to /b, at least 1"},
+		{Assertion{Type: SuccessfulOperation, Operation: faults.Rename, Target: "/b", Count: Count{Min: 1}}, "successful_operation rename to /b, at least 1"},
+		{Assertion{Type: SuccessfulOperation, Operation: faults.Rename, Source: "/a", Count: Count{Min: 1}}, "successful_operation rename from /a, at least 1"},
+		{Assertion{Type: FileEqualsFixture, Path: "/a", Fixture: "f"}, "file_equals_fixture /a, fixture f"},
+		{Assertion{Type: FileHash, Path: "/a", SHA256: "abc"}, "file_hash /a, sha256 abc"},
+		{Assertion{Type: PathAbsent, Path: "/a"}, "path_absent /a"},
+	}
+	for _, tt := range tests {
+		if got := tt.assertion.String(); got != tt.want {
+			t.Errorf("String() = %q, want %q", got, tt.want)
+		}
+	}
+}
+
 func TestAssertionsJSONOfNoneIsAnEmptyList(t *testing.T) {
 	b, err := AssertionsJSON(nil)
 	if err != nil {

@@ -62,6 +62,11 @@ const (
 	// Snapshotted is a snapshot of a file that a faulted handle left
 	// behind.
 	Snapshotted Kind = "snapshot"
+
+	// RunDrained is the end of a run's clients, once a drain has closed
+	// admission and ended every connection, with the paths of the files
+	// whose handles were still open in Unfinished.
+	RunDrained Kind = "drained"
 )
 
 // Event is one thing that happened in a run. Which fields are set depends
@@ -118,6 +123,8 @@ type Event struct {
 	Rules    *Rules    `json:"rules,omitempty"`
 
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
+
+	Unfinished []string `json:"unfinished,omitempty"`
 }
 
 // Snapshot describes a file that a faulted handle left behind: its size

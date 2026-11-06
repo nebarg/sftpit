@@ -71,3 +71,8 @@ test("every kind of event has a summary", () => {
     assert.deepEqual(describeEvent(event), { tone, summary }, event.kind);
   }
 });
+
+test("a drained run says what it left unfinished", () => {
+  assert.deepEqual(describeEvent({ kind: "drained" }), { tone: "notice", summary: "Run drained" });
+  assert.deepEqual(describeEvent({ kind: "drained", unfinished: ["/a", "/b"] }), { tone: "error", summary: "Run drained: unfinished transfers of /a, /b" });
+});

@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/nebarg/sftpit/internal/runs"
 )
 
 // Client calls the control API.
@@ -29,6 +32,41 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
+// Status returns the status of the server and its current run.
+func (c *Client) Status(ctx context.Context) (Status, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+c.Addr+"/api/v1/status", nil)
+	if err != nil {
+		return Status{}, fmt.Errorf("control: status: %w", err)
+	}
+	var status Status
+	if err := send(httpClient, req, &status); err != nil {
+		return Status{}, err
+	}
+	return status, nil
+}
+
+// Assert asks the server to drain run, waiting for up to timeout for its
+// file handles to close, and returns the verdict on it. A run that fails is
+// not an error, but one the API refuses or fails is an *Error.
+func (c *Client) Assert(ctx context.Context, run string, timeout time.Duration) (runs.Report, error) {
+	b, err := json.Marshal(DrainRequest{Timeout: timeout.String()})
+	if err != nil {
+		return runs.Report{}, fmt.Errorf("control: assert: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+c.Addr+"/api/v1/runs/"+url.PathEscape(run)+"/assert", bytes.NewReader(b))
+	if err != nil {
+		return runs.Report{}, fmt.Errorf("control: assert: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(RequestHeader, "1")
+	var report runs.Report
+	waiting := &http.Client{Timeout: timeout + httpClient.Timeout}
+	if err := send(waiting, req, &report); err != nil {
+		return runs.Report{}, err
+	}
+	return report, nil
+}
+
 // Reset asks the server to end its current run and start the one req
 // chooses, and returns the status of the run it started. A reset the API
 // refuses or fails is an *Error.
@@ -44,16 +82,16 @@ func (c *Client) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 	hreq.Header.Set("Content-Type", "application/json")
 	hreq.Header.Set(RequestHeader, "1")
 	var status Status
-	if err := send(hreq, &status); err != nil {
+	if err := send(httpClient, hreq, &status); err != nil {
 		return Status{}, err
 	}
 	return status, nil
 }
 
-// send sends req and decodes its reply into v, or returns the API's error
-// as it is.
-func send(req *http.Request, v any) error {
-	resp, err := httpClient.Do(req)
+// send sends req with client and decodes its reply into v, or returns the
+// API's error as it is.
+func send(client *http.Client, req *http.Request, v any) error {
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("control: %w", err)
 	}

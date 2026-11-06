@@ -39,6 +39,14 @@ var (
 	// an inline one.
 	ErrTwoScenarios = errors.New("a reset names a scenario or gives one inline, not both")
 
+	// ErrDrained reports a change to a run that a drain has ended, whose
+	// verdict nothing may change.
+	ErrDrained = errors.New("the run has been drained; a reset starts the next")
+
+	// ErrUnavailable reports a drain of a run that a failed reset has left
+	// without admission.
+	ErrUnavailable = errors.New("the run is unavailable after a failed reset; a reset that succeeds starts the next")
+
 	// ErrUnknownRun reports a run that is neither current nor among the
 	// recent runs whose events the Manager keeps.
 	ErrUnknownRun = errors.New("unknown run")
@@ -139,6 +147,7 @@ type recentRun struct {
 type activeRun struct {
 	run     *Run
 	root    *os.Root
+	backend *backend.Embedded
 	rules   *faults.Engine
 	events  *events.Recorder
 	handler sshfront.Handler
@@ -153,6 +162,13 @@ type activeRun struct {
 	// assertions are what the run must have done once it is over. No change
 	// of its rules changes them.
 	assertions []config.Assertion
+
+	// draining is set while a drain is under way, and drained and report
+	// once it has ended and once the run's verdict is in. They are guarded
+	// by the Manager's mu.
+	draining bool
+	drained  *Drained
+	report   *Report
 
 	// stops stop the timers armed for the run: those it started with, and
 	// those of each change of its rules. They are guarded by the Manager's
@@ -351,6 +367,9 @@ func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, 
 	if run != current.run.ID {
 		return faults.RuleSet{}, staleRun(current, run)
 	}
+	if m.isDrained(current) {
+		return faults.RuleSet{}, fmt.Errorf("runs: change rules: %w", ErrDrained)
+	}
 	timers, err := current.rules.Replace(revision, rules, chaos)
 	if err != nil {
 		return faults.RuleSet{}, err
@@ -443,6 +462,12 @@ const (
 	// StateUnavailable is a run that a failed reset has left without
 	// admission.
 	StateUnavailable State = "unavailable"
+	// StateDraining is a run that a drain has closed admission to, whose
+	// clients are finishing what they are doing.
+	StateDraining State = "draining"
+	// StateDrained is a run that a drain has ended, which admits no clients
+	// until a reset starts the next.
+	StateDrained State = "drained"
 )
 
 // Status describes the current run.
@@ -482,6 +507,10 @@ func (m *Manager) Status() Status {
 		s.State = StateResetting
 	case m.failed != nil:
 		s.State, s.Err = StateUnavailable, m.failed
+	case m.current.draining:
+		s.State = StateDraining
+	case m.current.drained != nil:
+		s.State = StateDrained
 	}
 	m.mu.Unlock()
 	if s.State == StateUp {
@@ -629,6 +658,7 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 	return &activeRun{
 		run:        run,
 		root:       root,
+		backend:    embedded,
 		rules:      rules,
 		events:     rec,
 		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger, Record: rec.Record}),

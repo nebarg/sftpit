@@ -42,6 +42,38 @@ func TestPauseEndsEveryConnectionAndAdmitsNoneUntilResume(t *testing.T) {
 	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
 }
 
+func TestCloseAdmissionLeavesConnectionsOpen(t *testing.T) {
+	handler, conns, returned := connPublisher()
+	logs := make(messages, 64)
+	addr, srv := startServer(t, sshfront.Config{
+		Handler: handler,
+		Logger:  slog.New(logs),
+	})
+	client := mustDial(t, addr, "test", ssh.Password(testPassword))
+	openSFTP(t, client, conns)
+	ended := waitForClient(client)
+
+	srv.CloseAdmission()
+	assertClosedBeforeHandshake(t, addr)
+	testutil.ReceiveUntil(t, logs, admissionClosed)
+	select {
+	case err := <-ended:
+		t.Errorf("closing admission ended a connection: %v", err)
+	case <-returned:
+		t.Error("closing admission ended a connection's handler")
+	default:
+	}
+	openSFTP(t, client, conns)
+
+	if err := srv.Pause(t.Context()); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	_ = testutil.Receive(t, ended)
+
+	srv.Resume()
+	openSFTP(t, mustDial(t, addr, "test", ssh.Password(testPassword)), conns)
+}
+
 func TestPauseEndsAnOutage(t *testing.T) {
 	handler, conns, _ := connPublisher()
 	logs := make(messages, 64)

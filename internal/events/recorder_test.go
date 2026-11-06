@@ -27,8 +27,14 @@ func TestRecorderNumbersAndTimesEachEvent(t *testing.T) {
 
 func TestRecorderKeepsTheLatestEvents(t *testing.T) {
 	r := events.NewRecorder(time.Now(), 3, nil)
+	if last := r.Last(); last != 0 {
+		t.Errorf("Last of no events = %d, want 0", last)
+	}
 	for i := range 5 {
 		r.Record(events.Event{Kind: events.Connected, Connection: uint64(i + 1)})
+	}
+	if last := r.Last(); last != 5 {
+		t.Errorf("Last = %d, want 5", last)
 	}
 	p := r.Events(0, 100, events.Filter{})
 	if ids := ids(p.Events); !slices.Equal(ids, []uint64{3, 4, 5}) || p.First != 3 || p.Next != 5 {

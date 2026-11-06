@@ -83,7 +83,7 @@ function showStatus(status) {
   const sftp = status.sftp;
   const pill = $("state");
   show(pill, sftp.state);
-  pill.className = `pill ${sftp.state === "up" ? "good" : sftp.state === "resetting" ? "" : "bad"}`;
+  pill.className = `pill ${sftp.state === "up" ? "good" : ["resetting", "draining", "drained"].includes(sftp.state) ? "" : "bad"}`;
   show($("run-id"), status.run.id);
 
   const run = status.run;
