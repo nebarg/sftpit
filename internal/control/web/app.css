@@ -540,3 +540,56 @@ dialog label {
 .scenarios tr.broken {
   background: var(--fault-bg);
 }
+
+.verdict {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-inline-start-width: 4px;
+  border-radius: 4px;
+}
+
+.verdict.passed {
+  border-inline-start-color: var(--good);
+  color: var(--good);
+}
+
+.verdict.failed {
+  border-inline-start-color: var(--bad);
+  background: var(--fault-bg);
+  color: var(--bad);
+}
+
+.problems {
+  margin: 0.5rem 0;
+  padding-inline-start: 1.25rem;
+}
+
+td.pass {
+  color: var(--good);
+}
+
+td.fail {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+#check-error:empty {
+  display: none;
+}
+
+#result h3 {
+  margin-top: 1rem;
+}
+
+#check-form[hidden] {
+  display: none;
+}

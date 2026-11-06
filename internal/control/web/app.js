@@ -8,6 +8,7 @@ import { el, show } from "./dom.js";
 import { loadChaos, loadScenarios, removeRule, setup, showQueued } from "./edit.js";
 import { describeEvent, formatBytes, formatDuration, formatElapsed } from "./format.js";
 import { preview, previewBytes } from "./preview.js";
+import { loadResult, setupResult } from "./resultview.js";
 import { describeChaos, ruleRows } from "./rules.js";
 import { eventQuery, Timeline } from "./timeline.js";
 import { treeRows } from "./tree.js";
@@ -57,6 +58,8 @@ async function poll() {
       followRun(status.run.id);
     } else if (state.tab === "rules") {
       await loadRules();
+    } else if (state.tab === "result") {
+      await loadResult();
     }
   } catch (err) {
     showError(err);
@@ -114,6 +117,8 @@ function followRun(run) {
   loadRules();
   if (state.tab === "files") {
     loadFiles();
+  } else if (state.tab === "result") {
+    loadResult();
   }
 }
 
@@ -421,7 +426,7 @@ async function loadRules() {
 
 // --- Tabs ---
 
-const tabs = ["activity", "files", "rules", "chaos", "builder", "scenarios"];
+const tabs = ["activity", "files", "rules", "chaos", "builder", "scenarios", "result"];
 
 function selectTab(tab) {
   state.tab = tab;
@@ -439,6 +444,8 @@ function selectTab(tab) {
     loadChaos();
   } else if (tab === "scenarios") {
     loadScenarios();
+  } else if (tab === "result") {
+    loadResult();
   }
 }
 
@@ -528,6 +535,12 @@ setup({
     poll();
     loadRules();
   },
+});
+setupResult({
+  run: () => state.run,
+  state: () => state.status?.sftp.state,
+  showError,
+  changed: () => poll(),
 });
 selectTab("activity");
 loadServer().catch(showError);

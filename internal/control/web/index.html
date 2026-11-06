@@ -40,6 +40,7 @@
         <button type="button" role="tab" id="tab-chaos" aria-controls="chaos" aria-selected="false">Chaos</button>
         <button type="button" role="tab" id="tab-builder" aria-controls="builder" aria-selected="false">Builder</button>
         <button type="button" role="tab" id="tab-scenarios" aria-controls="scenarios" aria-selected="false">Scenarios</button>
+        <button type="button" role="tab" id="tab-result" aria-controls="result" aria-selected="false">Result</button>
       </nav>
 
       <section id="activity" role="tabpanel" aria-labelledby="tab-activity">
@@ -49,7 +50,7 @@
               <option value="">all</option>
               <option value="operation,transfer,fault,fault_ended">operations and faults</option>
               <option value="fault,fault_ended,suppressed,decision">faults and decisions</option>
-              <option value="run_started,connected,authenticated,disconnected,rules_changed,snapshot">runs and connections</option>
+              <option value="run_started,connected,authenticated,disconnected,rules_changed,snapshot,drained">runs and connections</option>
             </select>
           </label>
           <label>User <input name="user" autocomplete="off" /></label>
@@ -236,6 +237,19 @@
         </form>
         <p id="builder-note" role="status"></p>
         <div id="builder-preview"></div>
+      </section>
+
+      <section id="result" role="tabpanel" aria-labelledby="tab-result" hidden>
+        <div id="result-verdict"></div>
+        <form id="check-form" class="toolbar">
+          <label>Clients have <input name="timeout" value="10s" size="6" autocomplete="off" aria-describedby="check-timeout-note" /></label>
+          <span id="check-timeout-note" class="muted">to close their files, such as 30s or 2m</span>
+          <button type="submit">Check the run…</button>
+        </form>
+        <p id="check-error" class="error-text" role="alert"></p>
+        <div id="result-assertions"></div>
+        <div id="result-evidence"></div>
+        <p id="result-links" class="downloads"></p>
       </section>
 
       <section id="scenarios" role="tabpanel" aria-labelledby="tab-scenarios" hidden>
