@@ -190,9 +190,15 @@ func (s *session) count(req *request, reply sftpwire.Packet) {
 }
 
 // recordTransfer records the totals of h, a file handle, closed as closed
-// says.
+// says, and then stops counting it in the session's Transfers.
 func (s *session) recordTransfer(h *handle, closed string) {
-	if s.record == nil || h == nil || !h.file {
+	if h == nil || !h.file {
+		return
+	}
+	// Settled only once recorded, so that Transfers reaches zero only when
+	// the transfer can be read.
+	defer s.tracker.settle(h)
+	if s.record == nil {
 		return
 	}
 	s.tracker.mu.Lock()

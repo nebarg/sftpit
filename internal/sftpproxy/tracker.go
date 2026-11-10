@@ -126,10 +126,16 @@ type tracker struct {
 	dir        string
 	extensions map[string]bool
 
+	// transfers, if set, counts the session's file handles until it has
+	// recorded their transfers.
+	transfers *Transfers
+
 	mu      sync.Mutex
 	nextID  uint32
 	pending map[uint32]*request
 	handles map[string]*handle
+	// counted is how many of the session's file handles transfers counts.
+	counted int64
 }
 
 // handle is an open handle as the tracker knows it. Its fields are guarded
@@ -144,6 +150,9 @@ type handle struct {
 
 	// file is set for a handle that OPEN returned, rather than OPENDIR.
 	file bool
+
+	// counted is set while the tracker's transfers counts the handle.
+	counted bool
 
 	// faulted is set once a fault has acted on the OPEN that returned the
 	// handle or on a request through it.
@@ -414,6 +423,7 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 		opened := &handle{path: req.path, rule: req.rule, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
 		if file {
 			opened.totals.Mode = mode(open.Flags)
+			t.count(opened)
 		}
 		t.handles[h.Handle] = opened
 	}
@@ -474,6 +484,40 @@ func mode(flags uint32) string {
 		return "write"
 	}
 	return "read"
+}
+
+// count counts h, a new file handle, in t's transfers. t.mu must be held.
+func (t *tracker) count(h *handle) {
+	if t.transfers == nil {
+		return
+	}
+	h.counted = true
+	t.counted++
+	t.transfers.open.Add(1)
+}
+
+// settle stops counting h, once its transfer has been recorded.
+func (t *tracker) settle(h *handle) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !h.counted {
+		return
+	}
+	h.counted = false
+	t.counted--
+	t.transfers.open.Add(-1)
+}
+
+// settleAll stops counting every handle still counted as the session ends,
+// including those whose CLOSE was sent but never answered, whose transfers
+// the session cannot record.
+func (t *tracker) settleAll() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.transfers != nil {
+		t.transfers.open.Add(-t.counted)
+	}
+	t.counted = 0
 }
 
 // openFiles returns the file handles still open, in no particular order.

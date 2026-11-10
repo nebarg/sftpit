@@ -380,6 +380,38 @@ func TestAHandleLostBeforeTheDrainIsNotUnfinished(t *testing.T) {
 	}
 }
 
+// A harness may drain as soon as its client sees a fault drop the
+// connection, while the server is still ending the session. Its transfer was
+// ended by the fault, not left unfinished by the drain. The race this guards
+// against lost about one drain in twenty, hence the repeats.
+func TestADrainStraightAfterADroppedConnectionLeavesNothingUnfinished(t *testing.T) {
+	drop := faults.Rule{ID: "drop", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Drop{When: sftpproxy.Before}}
+	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"s": {Rules: []faults.Rule{drop}}}, Scenario: "s"})
+	for i := range 100 {
+		run := m.Status().Run.ID
+		c, ended := dialSFTP(t, addr)
+		f, err := c.Create("/a.part")
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := f.Write([]byte("id,total\n")); err == nil {
+			t.Fatal("a write that the rule drops succeeded")
+		}
+		_ = testutil.Receive(t, ended)
+
+		d, err := m.Drain(t.Context(), run, time.Second)
+		if err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if len(d.Unfinished) != 0 {
+			t.Fatalf("drain %d calls %v unfinished, want nothing", i+1, d.Unfinished)
+		}
+		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+	}
+}
+
 func TestDrainSaysWhatWasUnfinishedAndCanBeRepeated(t *testing.T) {
 	m, addr := startManager(t, Options{})
 	run := m.Status().Run.ID

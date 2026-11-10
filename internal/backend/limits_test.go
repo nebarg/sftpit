@@ -200,9 +200,6 @@ func TestLimitsCountOpenFileHandlesAcrossSessions(t *testing.T) {
 			t.Fatalf("Open below the limit: %v", err)
 		}
 	}
-	if n := e.OpenFiles(); n != 2 {
-		t.Errorf("OpenFiles = %d, want 2", n)
-	}
 	second := newClient(t, e, "/")
 	_, err = second.Open("/a")
 	assertStatus(t, err, sftpwire.StatusFailure)

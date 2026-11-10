@@ -130,6 +130,10 @@ type Options struct {
 	// It is called from the session's goroutines, so it must be safe for
 	// concurrent use, and must not block.
 	Record func(events.Event)
+
+	// Transfers, if set, counts the session's file handles while they are
+	// open, as it counts those of the other sessions that share it.
+	Transfers *Transfers
 }
 
 // Conn is the connection a client's session runs over.
@@ -176,6 +180,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		released:  opts.Released,
 		logger:    opts.Logger,
 		record:    opts.Record,
+		transfers: opts.Transfers,
 		waits:     make(map[*request]struct{}),
 		replies:   make(chan slot, maxQueuedReplies),
 		moments:   make(chan *request),
@@ -220,6 +225,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 	for _, h := range s.tracker.openFiles() {
 		s.recordTransfer(h, "session_ended")
 	}
+	s.tracker.settleAll()
 	return s.result()
 }
 
@@ -237,6 +243,7 @@ type session struct {
 	released  func() <-chan struct{}
 	logger    *slog.Logger
 	record    func(events.Event)
+	transfers *Transfers
 	tracker   *tracker
 
 	// wg tracks every goroutine of the session, including those holding
@@ -311,6 +318,7 @@ func (s *session) start() error {
 		return err
 	}
 	s.tracker = newTracker(dir, exts)
+	s.tracker.transfers = s.transfers
 
 	b, err := sftpwire.ReadPacket(s.clientIn, maxPacketLength)
 	if err != nil {

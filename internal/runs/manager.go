@@ -145,13 +145,15 @@ type recentRun struct {
 
 // activeRun is a run that a Manager serves.
 type activeRun struct {
-	run     *Run
-	root    *os.Root
-	backend *backend.Embedded
-	rules   *faults.Engine
-	events  *events.Recorder
-	handler sshfront.Handler
-	hooks   sshfront.Hooks
+	run    *Run
+	root   *os.Root
+	rules  *faults.Engine
+	events *events.Recorder
+	// transfers counts the file handles open in the run's sessions, until
+	// their transfers are recorded.
+	transfers *sftpproxy.Transfers
+	handler   sshfront.Handler
+	hooks     sshfront.Hooks
 
 	// startRules and startChaos are the rules and chaos the run started
 	// with, which a reset that repeats an inline scenario starts the next
@@ -655,13 +657,14 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 	}
 	s := chosen.scenario
 	rec.Record(events.Event{Kind: events.RunStarted, Run: &events.Run{ID: run.ID, Scenario: s.Name, Inline: s.Inline, Seed: strconv.FormatUint(uint64(s.Seed), 10), Pinned: s.Pinned}, Rules: started})
+	transfers := new(sftpproxy.Transfers)
 	return &activeRun{
 		run:        run,
 		root:       root,
-		backend:    embedded,
 		rules:      rules,
 		events:     rec,
-		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger, Record: rec.Record}),
+		transfers:  transfers,
+		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger, Record: rec.Record, Transfers: transfers}),
 		hooks:      connectionHooks(rules, m.logger, rec.Record),
 		startRules: chosen.rules,
 		startChaos: chosen.chaos,

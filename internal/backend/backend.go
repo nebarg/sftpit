@@ -50,9 +50,6 @@ type Embedded struct {
 	usage *usage
 }
 
-// OpenFiles returns how many file handles are open, across all sessions.
-func (e *Embedded) OpenFiles() int64 { return e.usage.openFiles() }
-
 // Options configure an Embedded backend.
 type Options struct {
 	// Limits bound the files and the handles open on them.

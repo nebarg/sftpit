@@ -93,14 +93,17 @@ func (m *Manager) drain(ctx context.Context, a *activeRun, wait time.Duration) (
 	return drained, nil
 }
 
-// awaitClosedFiles returns once a's clients have closed every file handle,
-// wait has passed or ctx is done.
+// awaitClosedFiles returns once every file handle of a's sessions has been
+// closed and its transfer recorded, wait has passed or ctx is done. A
+// session that a fault or its client ended is still recording its
+// transfers after its backend has closed their files, so the backend's
+// count of open files would let the drain call them unfinished.
 func awaitClosedFiles(ctx context.Context, a *activeRun, wait time.Duration) {
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	poll := time.NewTicker(drainPoll)
 	defer poll.Stop()
-	for a.backend.OpenFiles() > 0 {
+	for a.transfers.Open() > 0 {
 		select {
 		case <-poll.C:
 		case <-deadline.C:

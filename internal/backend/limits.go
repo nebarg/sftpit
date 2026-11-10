@@ -182,9 +182,6 @@ func (u *usage) openHandle() *limitError {
 
 func (u *usage) closeHandle() { u.open.Add(-1) }
 
-// openFiles returns how many file handles are open.
-func (u *usage) openFiles() int64 { return u.open.Load() }
-
 // refuse logs a request on the virtual path name that would have exceeded
 // limit, and returns the status the client gets for it: SSH_FX_FAILURE,
 // which OpenSSH's sftp-server sends when the disk is full.
