@@ -97,7 +97,7 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 // and which name the file ends up under.
 func TestPhpseclibRenameFaults(t *testing.T) {
 	t.Parallel()
-	php := phpseclibOrSkip(t)
+	phpseclibOrSkip(t)
 
 	const (
 		closed = `phpseclib3\Exception\ConnectionClosedException: Connection closed by server`
@@ -139,7 +139,7 @@ func TestPhpseclibRenameFaults(t *testing.T) {
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
 			start := time.Now()
-			transcript := runPhpseclib(t, php, srv, "rename.php", work)
+			transcript := runPhpseclib(t, srv, "rename.php", work)
 			elapsed := time.Since(start)
 			if phpseclibResults(t, transcript)["put"] != true {
 				t.Fatalf("phpseclib put failed: %v", transcript)

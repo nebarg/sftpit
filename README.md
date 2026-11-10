@@ -741,15 +741,17 @@ make check
 
 `make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, golangci-lint with the linters in `.golangci.yml`, staticcheck's full checks among them, the tests with the race detector, and the dashboard's tests, which need Node 20 or later and use only its own test runner. `make lint` builds the version of golangci-lint that the Makefile pins, so it needs no install. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
 
-The integration tests in `test/integration` drive the OpenSSH `sftp` client, phpseclib, and a Laravel application that publishes through Laravel's filesystem against sftpit, and are skipped when a client is missing. The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there. The PHP clients need PHP 8.3 or later and Composer:
+The integration tests in `test/integration` drive real SFTP clients against sftpit: OpenSSH's `sftp`, and the clients in `test/clients`, each in a container image of its own, so that they need Docker but no language runtime. A test skips when its client is missing. Build the clients' images with:
 
 ```bash
-make integration-deps
+make clients
 ```
+
+The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there.
 
 The dashboard is plain HTML, CSS and JavaScript modules in `internal/control/web`, with no build step and no packages, embedded in the binary, so a change to it needs a rebuild of sftpit. Its logic is in modules that do not touch the page, tested in `internal/control/web/test`.
 
-`make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the PHP clients that `make integration-deps` installed.
+`make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. The tests of the clients in `test/clients` skip there.
 
 `make image` builds the container image `sftpit:local`, and `make container-check` runs [the compose example](#with-docker-compose) with it.
 

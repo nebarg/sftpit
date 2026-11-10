@@ -1,4 +1,4 @@
-.PHONY: build image test js-test vet lint vuln fmt-check fix-check tidy-check check linux-check container-check integration-deps
+.PHONY: build image clients test js-test vet lint vuln fmt-check fix-check tidy-check check linux-check container-check
 
 # golangci-lint is run at this version, built in isolation rather than
 # added to go.mod, as its authors advise.
@@ -9,6 +9,11 @@ build:
 
 image:
 	docker build --tag sftpit:local .
+
+# The images of the SFTP clients the integration tests drive, besides
+# OpenSSH's, whose tests skip without them.
+clients:
+	docker build --tag sftpit-phpseclib:local test/clients/phpseclib
 
 test:
 	go test -race ./...
@@ -49,6 +54,3 @@ linux-check:
 
 container-check: image
 	test/container/check.sh
-
-integration-deps:
-	composer install --working-dir=test/integration/php

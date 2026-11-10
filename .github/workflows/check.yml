@@ -23,11 +23,6 @@ jobs:
           # standard library rather than go.mod's minimum.
           go-version: "1.26.x"
           check-latest: true
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
-        with:
-          php-version: "8.4"
-          extensions: gmp, mbstring
-          tools: composer
       # For the dashboard's tests, which use only Node's own test runner.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -38,7 +33,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends openssh-sftp-server
-      - run: make integration-deps
+      # macOS runners have no Docker, so the tests that drive clients in
+      # containers run on Linux only.
+      - run: make clients
+        if: runner.os == 'Linux'
       - run: make check
       - run: make vuln
         if: runner.os == 'Linux'

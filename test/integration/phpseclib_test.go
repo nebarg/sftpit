@@ -11,7 +11,7 @@ import (
 
 func TestPhpseclibTransparency(t *testing.T) {
 	t.Parallel()
-	php := phpseclibOrSkip(t)
+	phpseclibOrSkip(t)
 
 	upload := randomBytes(4<<20 + 321)
 	since := time.Now().Add(-time.Hour)
@@ -21,7 +21,7 @@ func TestPhpseclibTransparency(t *testing.T) {
 		srv := startServer(t, via, sftpproxy.Options{})
 		work := t.TempDir()
 		writeFile(t, filepath.Join(work, "orders.csv"), upload)
-		transcripts[via] = runPhpseclib(t, php, srv, "workload.php", work)
+		transcripts[via] = runPhpseclib(t, srv, "workload.php", work)
 		trees[via] = readTree(t, srv.files, since)
 	}
 

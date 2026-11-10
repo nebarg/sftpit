@@ -101,7 +101,7 @@ func TestOpenSSHOutages(t *testing.T) {
 // than the outages it should ride out.
 func TestLaravelGivesUpDuringAnOutage(t *testing.T) {
 	t.Parallel()
-	php := phpseclibOrSkip(t)
+	phpseclibOrSkip(t)
 
 	var logs capturedLog
 	srv := startScenario(t, []faults.Rule{{
@@ -113,7 +113,7 @@ func TestLaravelGivesUpDuringAnOutage(t *testing.T) {
 	work := t.TempDir()
 	writeFile(t, filepath.Join(work, "orders.csv"), randomBytes(1<<20))
 
-	outcomes := phpseclibResults(t, runPhpseclib(t, php, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": false, "upload 2": false, "upload 3": false}; !maps.Equal(outcomes, want) {

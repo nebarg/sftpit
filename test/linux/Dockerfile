@@ -1,9 +1,10 @@
 # The Linux environment for make linux-check: Go, OpenSSH's sftp client and
-# server, PHP for phpseclib and Node for the dashboard's tests, so that
-# every test runs, the conformance tests among them.
+# server, and Node for the dashboard's tests, so that the conformance tests
+# run. The tests of the clients in containers skip here, as there is no
+# Docker inside.
 FROM golang:1.26-trixie
 RUN apt-get update \
- && apt-get install --yes --no-install-recommends nodejs openssh-client openssh-sftp-server php-cli php-gmp php-mbstring \
+ && apt-get install --yes --no-install-recommends nodejs openssh-client openssh-sftp-server \
  && rm -rf /var/lib/apt/lists/*
 # The tests run as a user who is not root, as they do on a developer's
 # machine, because root can change any file's owner and read or write any file.

@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -562,12 +563,12 @@ func transferWithOpenSSH(tb testing.TB, srv *server, work string, upload bool) {
 
 func transferWithPhpseclib(tb testing.TB, srv *server, work string, upload bool) {
 	tb.Helper()
-	php := phpseclibOrSkip(tb)
+	phpseclibOrSkip(tb)
 	op := "get"
 	if upload {
 		op = "put"
 	}
-	transcript := runPhpseclib(tb, php, srv, "transfer.php", work, op)
+	transcript := runPhpseclib(tb, srv, "transfer.php", work, op)
 	if phpseclibResults(tb, transcript)[op] != true {
 		tb.Fatalf("phpseclib %s failed: %v", op, transcript)
 	}
@@ -632,46 +633,65 @@ func openSSHCommand(tb testing.TB, sftpPath string, srv *server, work, batch str
 	return cmd
 }
 
-// phpseclibOrSkip returns the path of php, or skips the test if phpseclib
-// cannot run.
-func phpseclibOrSkip(tb testing.TB) string {
+// phpseclibImage is the image of the phpseclib client, which make clients
+// builds from test/clients/phpseclib.
+const phpseclibImage = "sftpit-phpseclib:local"
+
+// phpseclibImageMissing reports why the phpseclib client cannot run, or nil.
+var phpseclibImageMissing = sync.OnceValue(func() error {
+	return exec.Command("docker", "image", "inspect", phpseclibImage).Run()
+})
+
+// phpseclibOrSkip skips the test if the phpseclib client cannot run.
+func phpseclibOrSkip(tb testing.TB) {
 	tb.Helper()
 	if testing.Short() {
 		tb.Skip("runs phpseclib")
 	}
-	php, err := exec.LookPath("php")
-	if err != nil {
-		tb.Skip("php not installed")
+	if err := phpseclibImageMissing(); err != nil {
+		tb.Skipf("the phpseclib client's image %s is missing (%v); run make clients", phpseclibImage, err)
 	}
-	if _, err := os.Stat(filepath.Join(phpDir, "vendor", "autoload.php")); err != nil {
-		tb.Skip("the PHP clients are not installed; run make integration-deps")
-	}
-	return php
 }
 
-// runPhpseclib runs one of the phpseclib scripts against srv with work as
-// its work directory and any further arguments, and returns what it printed.
-func runPhpseclib(tb testing.TB, php string, srv *server, script, work string, args ...string) []line {
+// runPhpseclib runs one of the phpseclib client's scripts against srv with
+// work as its work directory and any further arguments, and returns what it
+// printed. The container shares the host's network, so it reaches srv on
+// loopback, and sees work and the host keys at the same paths.
+func runPhpseclib(tb testing.TB, srv *server, script, work string, args ...string) []line {
 	tb.Helper()
+	phpseclibOrSkip(tb)
 	var keys bytes.Buffer
 	for _, key := range hostKeys {
 		keys.Write(ssh.MarshalAuthorizedKey(key.PublicKey()))
 	}
-	hostKeysFile := filepath.Join(tb.TempDir(), "host_keys")
+	keysDir := tb.TempDir()
+	hostKeysFile := filepath.Join(keysDir, "host_keys")
 	writeFile(tb, hostKeysFile, keys.Bytes())
 
 	ctx, cancel := context.WithTimeout(tb.Context(), clientTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, php, append([]string{filepath.Join(phpDir, script),
-		"127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
+	name := fmt.Sprintf("sftpit-phpseclib-%d-%d", os.Getpid(), containers.Add(1))
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"run", "--rm", "--name", name,
+		"--network", "host", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		"--volume", work + ":" + work, "--volume", keysDir + ":" + keysDir + ":ro",
+		phpseclibImage, script, "127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
+	// Killing docker run would leave the container running.
+	cmd.Cancel = func() error {
+		_ = exec.Command("docker", "rm", "--force", name).Run()
+		return cmd.Process.Kill()
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil || stderr.Len() > 0 {
-		tb.Fatalf("phpseclib workload: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.Bytes())
+		tb.Fatalf("phpseclib %s: %v\nstdout:\n%s\nstderr:\n%s", script, err, out, stderr.Bytes())
 	}
 	return splitLines(out)
 }
+
+// containers numbers the phpseclib client's containers, so that each has a
+// name of its own.
+var containers atomic.Int64
 
 // transcriptEntry is one operation in a transcript: its result, and the
 // SFTP error for a false one.
@@ -718,10 +738,6 @@ func phpseclibFailures(tb testing.TB, transcript []line) map[string]string {
 	}
 	return byOp
 }
-
-// phpDir holds the PHP clients: phpseclib, and Laravel's filesystem on top
-// of it.
-const phpDir = "php"
 
 // uploadCutoff is where partial uploads are cut off. It falls inside a write
 // for both clients, so the write that crosses it is trimmed.

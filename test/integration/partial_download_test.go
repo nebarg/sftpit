@@ -124,10 +124,10 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 
 			t.Run("phpseclib/"+name, func(t *testing.T) {
 				t.Parallel()
-				php := phpseclibOrSkip(t)
+				phpseclibOrSkip(t)
 				srv := start(t)
 				work := t.TempDir()
-				entries := decodeTranscript(t, runPhpseclib(t, php, srv, "transfer.php", work, "get"))
+				entries := decodeTranscript(t, runPhpseclib(t, srv, "transfer.php", work, "get"))
 				got := "true"
 				if thrown, ok := entries[0].Result.(map[string]any); ok {
 					got, _ = thrown["exception"].(string)

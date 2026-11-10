@@ -164,7 +164,7 @@ func failedOpenSSHUpload(t *testing.T, srv *server, work string) string {
 
 func failedPhpseclibUpload(t *testing.T, srv *server, work string) string {
 	t.Helper()
-	transcript := runPhpseclib(t, phpseclibOrSkip(t), srv, "transfer.php", work, "put")
+	transcript := runPhpseclib(t, srv, "transfer.php", work, "put")
 	report, failed := phpseclibFailures(t, transcript)["put"]
 	if !failed {
 		t.Errorf("phpseclib put succeeded, want it to fail: %v", transcript)
