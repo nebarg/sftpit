@@ -12,7 +12,7 @@ go run ./cmd/sftpit serve
 
 sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. The [dashboard](#dashboard) is at `http://127.0.0.1:8122/`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
 
-`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces, except in a container with [`--profile container`](#with-laravel-sail-or-docker-compose). The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
+`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces, except in a container with [`--profile container`](#with-docker-compose). The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
 
 To have files ready to download, point sftpit at a directory of fixtures:
 
@@ -32,49 +32,38 @@ The directory must be empty or already an sftpit workspace, and only one sftpit 
 
 Names in `fs/` are encoded, so that they behave as on a case-sensitive Linux server whatever the host's volume ignores or refuses. A capital is stored as `^` and its lowercase letter, and any other character outside `a-z`, `0-9`, `-`, `_` and `.` as `%` and two hex digits: `Orders 2026.CSV` is stored as `^orders%202026.^c^s^v`. Add files through the seed directory or over SFTP, because sftpit ignores names in `fs/` that it did not encode. Escaping makes names longer, so a name of more than 127 capitals, or of more than 85 bytes that need `%`, is too long to store and fails the way an over-long name fails on a Linux server.
 
-### With Laravel Sail or Docker Compose
+### With Docker Compose
 
-An application in a container cannot reach a server that listens on the host's loopback address, so sftpit runs as a service beside it, as Mailpit does in Sail. Build the image in a clone of sftpit:
+An application in a container cannot reach a server that listens on the host's loopback address, so sftpit runs as a service beside it. Build the image in a clone of sftpit:
 
 ```bash
 make image
 ```
 
-Then add the service to the project's `docker-compose.yml`, as [`examples/sail`](examples/sail) does:
+Then add the service to the project's `docker-compose.yml`, as [`examples/compose`](examples/compose) does:
 
 ```yaml
-    sftpit:
-        image: 'sftpit:local'
-        user: '${WWWUSER:-1000}:${WWWGROUP:-1000}'
-        command: ['serve', '--profile', 'container', '--control-host', 'sftpit', '--config', '/sftpit/sftpit.yaml']
-        ports:
-            - '127.0.0.1:${FORWARD_SFTPIT_PORT:-2122}:2122'
-            - '127.0.0.1:${FORWARD_SFTPIT_CONTROL_PORT:-8122}:8122'
-        volumes:
-            - './tests/sftpit:/sftpit'
-        networks:
-            - sail
+  sftpit:
+    image: 'sftpit:local'
+    user: '${SFTPIT_UID:-1000}:${SFTPIT_GID:-1000}'
+    command: ['serve', '--profile', 'container', '--control-host', 'sftpit', '--config', '/sftpit/sftpit.yaml']
+    ports:
+      - '127.0.0.1:${SFTPIT_PORT:-2122}:2122'
+      - '127.0.0.1:${SFTPIT_CONTROL_PORT:-8122}:8122'
+    volumes:
+      - './sftpit:/sftpit'
 ```
 
-Put the [configuration](#configuration) in `tests/sftpit/sftpit.yaml`, list `sftpit` under the application's `depends_on`, and point its disk at the service:
-
-```php
-// config/filesystems.php
-'sftp' => [
-    'driver' => 'sftp',
-    'host' => 'sftpit',
-    'port' => 2122,
-    'username' => 'test',
-    'password' => 'test',
-],
-```
+Put the [configuration](#configuration) in `sftpit/sftpit.yaml`, list `sftpit` under the application's `depends_on`, and point the application's SFTP client at host `sftpit`, port `2122`. In a project whose services share a named network, such as Laravel Sail's `sail`, list it under the service's `networks` too.
 
 - **The application** reaches SFTP at `sftpit:2122` and the control API at `http://sftpit:8122`, so a test can [reset](#control-api) the run.
-- **The host** reaches both on `127.0.0.1` only, at the ports `FORWARD_SFTPIT_PORT` and `FORWARD_SFTPIT_CONTROL_PORT` choose.
+- **The host** reaches both on `127.0.0.1` only, at the ports `SFTPIT_PORT` and `SFTPIT_CONTROL_PORT` choose.
 - **`--profile container`** makes sftpit listen on every interface in the container: `:2122` and `:8122` unless the configuration or flags say otherwise. It warns of a loopback address, which other containers cannot reach. The profile is never chosen for you. It belongs only in a container, because on a host, every interface includes those that other machines reach.
 - **`--control-host sftpit`** lets the control API answer requests addressed to `sftpit`, the service's name; otherwise it answers only `localhost` and loopback addresses. Any container on the compose network can then reset runs and change rules, as it can reach any other service there.
-- **The user** is Sail's, from its `.env`, so that sftpit can create the host keys in `tests/sftpit/hostkeys`, which the configuration names, on the first start. Commit them, so the fingerprints stay the same for everyone. As its own user, which is not root, sftpit could not write to a directory that a Linux host user owns, or read keys only that user can read.
+- **The user** is yours, from `SFTPIT_UID` and `SFTPIT_GID`, so that sftpit can create the host keys in `sftpit/hostkeys`, which the configuration names, on the first start. Commit them, so the fingerprints stay the same for everyone. As its own user, which is not root, sftpit could not write to a directory that a Linux host user owns, or read keys only that user can read.
 - **The workspace** is temporary, inside the container. To keep runs after the container stops, mount a directory and name it with `--data-dir`.
+
+`make container-check` runs the example with a stand-in application, curl, which uploads through `sftpit:2122` with its first upload cut off and resets the run through `sftpit:8122`, and checks that the host reaches both ports on loopback only.
 
 ## Configuration
 
@@ -441,7 +430,7 @@ A pass says what the server saw. Whether the application recovered, without dupl
 `sftpit serve` serves a dashboard on the control API's address, `http://127.0.0.1:8122/` by default, which the banner shows. It needs nothing from the internet: its files are in the binary.
 
 - **Run:** the server's state, the current run, its scenario, seed and rules revision, and how many requests are stalled and connections frozen, with buttons to release them and to reset. A reset can repeat the current scenario, choose another or none, and pin a seed, and the dialog says which run it ends.
-- **Connect:** the SFTP address, an `sftp` command that logs in, the users and how each logs in, never with what, unless the only user is the built-in `test`, the host-key fingerprints, the read-only paths and the workspace. In the [container profile](#with-laravel-sail-or-docker-compose), the command uses each `--control-host` name, as an application in the same compose network would.
+- **Connect:** the SFTP address, an `sftp` command that logs in, the users and how each logs in, never with what, unless the only user is the built-in `test`, the host-key fingerprints, the read-only paths and the workspace. In the [container profile](#with-docker-compose), the command uses each `--control-host` name, as an application in the same compose network would.
 - **Activity:** the run's events as they happen, newest first. A fault that a rule injected is red, with its rule, a request that the read-only policy refused is amber, a failure that sftpit did not inject is purple, and changes to the run are blue, so a failure during development is easy to attribute to sftpit or not. Filters narrow it to a kind, user, path, connection or rule, and clicking a user, connection or rule filters by it. Clicking an event shows all of it. The page keeps the latest 2,000 events and says how many older ones it dropped, and a gap in the run's own record of events shows as a gap.
 - **Files:** the run's files as a tree, with sizes, modes, times and, on request, hashes, and which files the seed holds and whether clients changed them. Selecting a file previews its first 4 KiB as text, or as hex if it is not text, and offers a download. The copies that faults left behind are listed for download too.
 - **Rules:** the run's rules in the order they are tried, what each matches and does, and how many times each has matched, been selected, fired and been canceled, with any rule that has never matched marked, as a mistyped or shadowed rule would be, and chaos's own rules after them. Each of the run's own rules can be removed now, and **Save as scenario** writes the rules and chaos as they are, with the run's seed if it is pinned, to a [scenario file](#scenario-files) and shows its path, asking first if the file exists. What is [queued](#queuing-the-next-run) for the next reset is listed below, with a button to clear it.
@@ -456,7 +445,7 @@ The page follows the current run, so after a reset, from the dashboard or elsewh
 
 ## Control API
 
-`sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names, or [in a container](#with-laravel-sail-or-docker-compose) on `:8122`. Port `0` picks a free port, and the banner shows the address.
+`sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names, or [in a container](#with-docker-compose) on `:8122`. Port `0` picks a free port, and the banner shows the address.
 
 | Route | Answer |
 |---|---|
@@ -762,7 +751,7 @@ The dashboard is plain HTML, CSS and JavaScript modules in `internal/control/web
 
 `make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. It uses the PHP clients that `make integration-deps` installed.
 
-`make image` builds the container image `sftpit:local`. `make container-check` runs [`examples/sail`](examples/sail) with a stand-in for a Sail application, which uploads through Laravel's sftp disk to `sftpit:2122` and resets the run through `sftpit:8122`, and checks that the host reaches both ports on loopback only. It also uses the PHP clients.
+`make image` builds the container image `sftpit:local`, and `make container-check` runs [the compose example](#with-docker-compose) with it.
 
 ## License
 

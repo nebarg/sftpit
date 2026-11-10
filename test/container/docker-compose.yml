@@ -1,12 +1,11 @@
-# Added to examples/sail/docker-compose.yml by check.sh: a stand-in for a
-# Sail application, which runs check.php on the sail network. Paths are
-# relative to examples/sail.
+# Added to examples/compose/docker-compose.yml by check.sh: a stand-in for an
+# application, which runs client.sh with curl, whose SFTP is libssh2's.
+# Paths are relative to examples/compose.
 services:
-    laravel.test:
-        image: 'php:8.4-cli'
-        command: ['php', '/check/check.php']
-        volumes:
-            - '../../test/container:/check:ro'
-            - '../../test/integration/php/vendor:/vendor:ro'
-        networks:
-            - sail
+  client:
+    image: 'curlimages/curl:8.11.1'
+    depends_on:
+      - sftpit
+    entrypoint: ['/bin/sh', '/check/client.sh']
+    volumes:
+      - '../../test/container:/check:ro'

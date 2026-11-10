@@ -1,0 +1,22 @@
+# The sftpit service to add to a project's docker-compose.yml. Build the
+# image first with make image in a clone of sftpit. The application's own
+# service reaches it as sftpit, and lists it under depends_on.
+services:
+  sftpit:
+    image: 'sftpit:local'
+    # Your user, so that the host keys sftpit creates in ./sftpit/hostkeys
+    # belong to you.
+    user: '${SFTPIT_UID:-1000}:${SFTPIT_GID:-1000}'
+    command:
+      - serve
+      - '--profile'
+      - container
+      - '--control-host'
+      - sftpit
+      - '--config'
+      - /sftpit/sftpit.yaml
+    ports:
+      - '127.0.0.1:${SFTPIT_PORT:-2122}:2122'
+      - '127.0.0.1:${SFTPIT_CONTROL_PORT:-8122}:8122'
+    volumes:
+      - './sftpit:/sftpit'

@@ -1,18 +1,18 @@
 #!/bin/sh
-# Runs the Sail-shaped example in examples/sail with a stand-in application
-# that reaches sftpit over the compose network, then checks that the host
-# reaches the control API on loopback only. It needs the sftpit:local image,
-# from make image, and the PHP clients, from make integration-deps.
+# Runs the example in examples/compose with a stand-in application that
+# reaches sftpit over the compose network, then checks that the host reaches
+# the control API on loopback only. It needs the sftpit:local image, from
+# make image.
 set -eu
 cd "$(dirname "$0")/../.."
 
-# As Sail sets them, so that sftpit can write the host keys into the
-# example's directory. Free ports keep the check off a local sftpit's.
-export WWWUSER="$(id -u)" WWWGROUP="$(id -g)" FORWARD_SFTPIT_PORT=0 FORWARD_SFTPIT_CONTROL_PORT=0
-compose="docker compose --project-name sftpit-container-check --file examples/sail/docker-compose.yml --file test/container/docker-compose.yml"
+# Your user, so that sftpit can write the host keys into the example's
+# directory. Free ports keep the check off a local sftpit's.
+export SFTPIT_UID="$(id -u)" SFTPIT_GID="$(id -g)" SFTPIT_PORT=0 SFTPIT_CONTROL_PORT=0
+compose="docker compose --project-name sftpit-container-check --file examples/compose/docker-compose.yml --file test/container/docker-compose.yml"
 trap '$compose down --volumes --remove-orphans' EXIT
 
-$compose run --rm laravel.test
+$compose run --rm client
 
 for port in 2122 8122; do
 	published="$($compose port sftpit "$port")"
