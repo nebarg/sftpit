@@ -1,0 +1,47 @@
+schema_version: 1
+
+# Scenarios for the quickstart. Run sftpit with one, act as an application
+# would with any SFTP client, then check the run with sftpit assert. The
+# files are synthetic.
+
+storage:
+  seed_dir: "./seed" # every run starts with outgoing/report.csv
+
+scenarios:
+  upload-recovery:
+    description: "The first upload is cut off part way. Upload again before publishing."
+    faults:
+      - id: "first-upload-cutoff"
+        fail_upload: { path: "/incoming/orders.csv.part", attempts: [1], after_bytes: 32768 }
+    assertions:
+      - { type: "rule_fired", rule_id: "first-upload-cutoff", exactly: 1 }
+      - { type: "successful_operation", operation: "rename", source: "/incoming/orders.csv.part", target: "/incoming/orders.csv" }
+      # The SHA-256 of orders.csv beside this file.
+      - { type: "file_hash", path: "/incoming/orders.csv", sha256: "c35ca2182104775e5730554766aadf0d6af670af736ac44449ca62101c4572a9" }
+      - { type: "path_absent", path: "/incoming/orders.csv.part" }
+
+  lost-rename-reply:
+    description: "The publishing rename happens, but its reply is lost with the connection."
+    faults:
+      - id: "lost-publish-reply"
+        max_triggers: 1
+        match: { operation: "rename", source: "/incoming/orders.csv.part", target: "/incoming/orders.csv" }
+        action: { type: "close_connection", when: "after", mode: "fin" }
+    assertions:
+      - { type: "rule_fired", rule_id: "lost-publish-reply", exactly: 1 }
+      - { type: "file_hash", path: "/incoming/orders.csv", sha256: "c35ca2182104775e5730554766aadf0d6af670af736ac44449ca62101c4572a9" }
+      - { type: "path_absent", path: "/incoming/orders.csv.part" }
+
+  cut-off-download:
+    description: "The first download of outgoing/report.csv is cut off part way."
+    faults:
+      - id: "first-download-cutoff"
+        fail_download: { path: "/outgoing/report.csv", attempts: [1], after_bytes: 32768 }
+    assertions:
+      - { type: "rule_fired", rule_id: "first-download-cutoff", exactly: 1 }
+
+  flaky-partner:
+    description: "A third of uploads and renames under incoming fail at random."
+    faults:
+      - id: "random-failures"
+        fail_randomly: { operations: ["open_write", "rename"], path_glob: "/incoming/*", probability: 0.3 }

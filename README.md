@@ -6,18 +6,94 @@ Mailpit for SFTP: a local SFTP server for developing and testing file integratio
 
 ## Quickstart
 
+In about five minutes, this runs an upload whose first attempt is cut off part way, publishes it as an application would, and has sftpit say whether the run recovered. It needs Go 1.26 or later and OpenSSH's `sftp`. There are no releases yet, so build sftpit from a clone:
+
 ```bash
-go run ./cmd/sftpit serve
+git clone https://github.com/nebarg/sftpit.git
 ```
 
-sftpit listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. The [dashboard](#dashboard) is at `http://127.0.0.1:8122/`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops. Stop it with Ctrl+C.
+```bash
+cd sftpit && make build
+```
+
+Start it with the `upload-recovery` scenario of [`examples/quickstart`](examples/quickstart/sftpit.yaml), which cuts off the first upload to `/incoming/orders.csv.part` after 32 KiB:
+
+```bash
+./bin/sftpit serve --config examples/quickstart/sftpit.yaml --scenario upload-recovery --ready-file ready.json
+```
+
+In another terminal, in the same directory, log in as `test` with the password `test`:
+
+```bash
+sftp -o PubkeyAuthentication=no -P 2122 test@127.0.0.1
+```
+
+Then upload `orders.csv` under a temporary name, upload it again when that fails, and publish it with a rename:
+
+```text
+sftp> mkdir incoming
+sftp> put examples/quickstart/orders.csv incoming/orders.csv.part
+orders.csv                                    100%  101KB  60.9MB/s   00:00
+write remote "/incoming/orders.csv.part": Failure
+sftp> put examples/quickstart/orders.csv incoming/orders.csv.part
+orders.csv                                    100%  101KB  92.3MB/s   00:00
+sftp> rename incoming/orders.csv.part incoming/orders.csv
+sftp> bye
+```
+
+The first upload shows 100% because `sftp` had sent every write before it read the failure. The [dashboard](#dashboard), at `http://127.0.0.1:8122/`, shows the fault in its timeline, with the rule that caused it. Now ask sftpit whether the run did what the scenario's [assertions](#assertions) require:
+
+```bash
+./bin/sftpit assert --ready-file ready.json
+```
+
+```text
+run 20261111-225708.815-574d: scenario upload-recovery, seed 502796428 (fresh)
+  pass  rule_fired first-upload-cutoff, exactly 1: fired 1 time
+  pass  successful_operation rename /incoming/orders.csv.part to /incoming/orders.csv, at least 1: succeeded 1 time
+  pass  file_hash /incoming/orders.csv, sha256 c35ca218...: holds 103657 bytes with that hash
+  pass  path_absent /incoming/orders.csv.part: nothing is there
+passed
+```
+
+Now be the application with the defect. Start the next run, then log in again and publish without uploading again:
+
+```bash
+./bin/sftpit reset --ready-file ready.json
+```
+
+```text
+sftp> mkdir incoming
+sftp> put examples/quickstart/orders.csv incoming/orders.csv.part
+write remote "/incoming/orders.csv.part": Failure
+sftp> rename incoming/orders.csv.part incoming/orders.csv
+```
+
+`sftpit assert` now fails, and exits with 1, because the published file is the 32 KiB that the server stored before the cutoff:
+
+```text
+  FAIL  file_hash /incoming/orders.csv, sha256 c35ca218...: holds 32768 bytes with sha256 158d9de6...
+failed
+```
+
+The example has other scenarios to try with `--scenario`, or with `sftpit reset --scenario NAME` while it runs: `lost-rename-reply` loses the reply to the publishing rename after the rename has happened, `cut-off-download` cuts off the first download of `outgoing/report.csv`, and `flaky-partner` fails a third of uploads and renames at random. Stop sftpit with Ctrl+C.
+
+`-o PubkeyAuthentication=no` stops `sftp` offering the keys in your SSH agent first. sftpit, like OpenSSH's server, ends a login after six failed attempts, and each key counts as one.
+
+### A plain server
+
+```bash
+./bin/sftpit serve
+```
+
+With no scenario, sftpit is a plain SFTP server that injects no faults. It listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. The [dashboard](#dashboard) is at `http://127.0.0.1:8122/`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops.
 
 `--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces, except in a container with [`--profile container`](#with-docker-compose). The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
 
 To have files ready to download, point sftpit at a directory of fixtures:
 
 ```bash
-go run ./cmd/sftpit serve --seed-dir ./tests/sftpit/seed
+./bin/sftpit serve --seed-dir ./tests/sftpit/seed
 ```
 
 At startup, sftpit copies the directory into the workspace, keeping permissions and modification times, and every run begins with a copy of that snapshot. So each run, after a [reset](#control-api) too, begins with the same files, and nothing a client does changes the originals. Changes to the directory reach runs at the next start. It may contain only directories and regular files. An empty directory has to hold something, such as a `.gitkeep`, before git will commit it, and SFTP clients see that file too.
@@ -25,7 +101,7 @@ At startup, sftpit copies the directory into the workspace, keeping permissions 
 To keep the workspace after sftpit stops, name a directory for it:
 
 ```bash
-go run ./cmd/sftpit serve --data-dir ./sandbox-data
+./bin/sftpit serve --data-dir ./sandbox-data
 ```
 
 The directory must be empty or already an sftpit workspace, and only one sftpit can use it at a time. It keeps the host keys, so clients see the same fingerprints at every start, and the files of the last five runs, under `runs/<run>/fs/`, so that a failed run can be inspected afterwards. Each start, and each reset, is still a new run, which begins with only the seed's files. The seed's snapshot is in `fixtures/seed/`, and `fixtures/seed.json` lists what it holds, with each file's size and SHA-256.
@@ -494,7 +570,7 @@ The state is `up`, `down` during an outage, with `down_until`, `resetting`, `dra
 **A reset:**
 - **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
 - **Ends the run.** Every connection is closed, as at a `close_connection`, and the run's timers stop. The reset then waits, for up to 30 s, until every session has finished, so no client of the run can still change its files. The run's files stay among the workspace's last five runs.
-- **Starts the next run.** Its files are a copy of the [seed's snapshot](#quickstart), its counters start from zero, and its timers count from its start. Then connections are admitted again.
+- **Starts the next run.** Its files are a copy of the [seed's snapshot](#a-plain-server), its counters start from zero, and its timers count from its start. Then connections are admitted again.
 
 Every field of the body is optional:
 - `run` is the run the reset expects to end. If another run is current, the reset is refused with status 409.
@@ -630,7 +706,7 @@ curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/files?path=/inc
 
 - `path` lists that file or directory and everything beneath it, `/` by default. `hash=true` adds each file's SHA-256, which reads every file listed.
 - `live` is set for the current run, whose files clients can still change, so its sizes and hashes are those of the moment. Nothing is held back while they are read. Those of a run that has ended are final.
-- `seed` marks a file at a path the [seed](#quickstart) also holds: `unchanged`, or `changed` if its size differs, or its hash when hashes are asked for, or otherwise its modification time. A client that rewrites a file with the same content changes its time, so only a hash shows that its content is the same.
+- `seed` marks a file at a path the [seed](#a-plain-server) also holds: `unchanged`, or `changed` if its size differs, or its hash when hashes are asked for, or otherwise its modification time. A client that rewrites a file with the same content changes its time, so only a hash shows that its content is the same.
 
 `GET /api/v1/runs/{id}/files/content?path=…` sends a file as a download: `application/octet-stream`, as an attachment, with `nosniff` and a content security policy that sandboxes it, so a browser never displays or runs it. It answers range requests, so `Range: bytes=0-4095` previews the start of a file. A missing file is answered with 404, and a directory with 400.
 
@@ -731,9 +807,24 @@ With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `
 - paths are cleaned before they are used, so a trailing slash after a file name, or `..` after a directory that does not exist, is ignored where OpenSSH answers that there is no such file;
 - `posix-rename@openssh.com` does not replace an empty directory with another directory;
 - the long names in listings, which are for display, show the owner and group as numbers;
-- names are encoded on the host, which shortens the longest name that fits, as [Quickstart](#quickstart) explains.
+- names are encoded on the host, which shortens the longest name that fits, as [a plain server](#a-plain-server) explains.
 
 A standard rename fails when the target exists, while `posix-rename@openssh.com` replaces it.
+
+## Limitations
+
+sftpit is pre-alpha. These are the limits to know before relying on it:
+- **No releases yet.** Build it from a clone with Go 1.26 or later. The CLI, the configuration and the control API may still change.
+- **Linux and macOS only.** On Windows, run it in a container or under WSL2, as [with Docker Compose](#with-docker-compose).
+- **Local only.** sftpit listens on loopback addresses, or in a container on the container's own interfaces. It has no mode for serving other machines, and its control API has no authentication beyond [those checks](#control-api).
+- **Its own storage only.** Every run serves files from sftpit's workspace. It cannot yet sit in front of a real SFTP server and inject faults into that server's traffic.
+- **SFTP version 3,** with the differences from OpenSSH that [Behavior](#behavior) lists. No symlinks or hard links.
+- **One run at a time.** A server serves one run, which every client shares, so tests that need runs of their own in parallel need a server each. Port `0` and the ready file make that easy.
+- **Not every fault yet.** Files that grow while a consumer reads them, malformed replies and bandwidth limits are not supported.
+- **Time is approximate.** A time trigger fires when it says, but how far a transfer has got by then depends on the machine, and no tolerance has been measured yet. Cut at a byte offset to test what a file holds.
+- **Resets vary.** What a client reports, and how much of a download it keeps, after a TCP reset differs from run to run, because the operating system may discard data the client had not read yet.
+- **The clients tested** are OpenSSH's `sftp`, phpseclib 2 and 3, Go's pkg/sftp, and curl's libssh2 in the container check. Java, .NET and Python clients have not been tested.
+- **Evidence is per run.** Each run's trace stops at 64 MiB by default, and says it is incomplete if it does. There is no export that bundles a failed run for someone else yet.
 
 ## Development
 
