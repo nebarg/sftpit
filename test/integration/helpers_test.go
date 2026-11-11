@@ -632,7 +632,11 @@ type phpseclib struct {
 
 func newPhpseclib(name, image string) *phpseclib {
 	return &phpseclib{name: name, image: image, missing: sync.OnceValue(func() error {
-		return exec.Command("docker", "image", "inspect", image).Run()
+		// A Docker daemon that has stopped answering skips the tests rather
+		// than hanging them.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return exec.CommandContext(ctx, "docker", "image", "inspect", image).Run()
 	})}
 }
 
@@ -791,7 +795,7 @@ func snapshotClosedBy(byClient []string, result sftpproxy.Action) []string {
 	return byClient
 }
 
-// The paths publish.php uploads to and then publishes at.
+// The paths an application uploads to and then publishes at.
 const (
 	temporaryPath = "/incoming/orders.csv.part"
 	publishedPath = "/incoming/orders.csv"

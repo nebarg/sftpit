@@ -1,15 +1,13 @@
 {
-    "description": "PHP clients for sftpit's integration tests: phpseclib, and Laravel's filesystem on top of it",
+    "description": "phpseclib 3 for sftpit's integration tests",
     "require": {
-        "php": ">=8.3",
-        "illuminate/filesystem": "^13.0",
-        "league/flysystem-sftp-v3": "^3.0",
+        "php": ">=8.1",
         "phpseclib/phpseclib": "^3.0"
     },
     "config": {
         "sort-packages": true,
         "platform": {
-            "php": "8.3.0"
+            "php": "8.1.0"
         }
     }
 }

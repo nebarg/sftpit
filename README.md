@@ -255,7 +255,7 @@ faults:
 `attempts` lists the opens a recipe selects, counted per user and path, and `occurrences` the matching requests, counting from 1. `sftpit config explain` shows the long form of each recipe.
 
 `fail_download` cuts a download off part way, as a dropped connection or a partner's failing server does. A client that reads in order receives exactly the bytes below `after_bytes` before the result, and keeps what it saved: neither OpenSSH's `sftp` nor phpseclib deletes a partial download. They differ in what they report:
-- With a status, OpenSSH prints `read remote "/orders.csv" : Failure` and exits 1, but phpseclib's `get()` returns `true`, so Laravel's `Storage::get()` hands the application the bytes below the cutoff as if they were the whole file. Only an application that compares the length with `Storage::size()` notices.
+- With a status, OpenSSH prints `read remote "/orders.csv" : Failure` and exits 1, but phpseclib's `get()` returns `true`, handing the application the bytes below the cutoff as if they were the whole file. Only an application that compares the length with the file's size notices.
 - With a FIN close, phpseclib throws `ConnectionClosedException`, having saved every byte below the cutoff. OpenSSH reports the close but may save fewer bytes than it was sent: of the 1 MiB below the cutoff, 576 KiB in every run on macOS, and from 960 KiB to all of it on Linux.
 - With a reset, what either client saves and reports varies from run to run.
 
@@ -263,9 +263,9 @@ phpseclib 2, which code written before phpseclib 3 still runs, Flysystem 1's SFT
 - **A lost connection:** it returns `false` where phpseclib 3 throws. It says why only in PHP notices, such as `Connection closed (by server) prematurely`, which a framework's error handler may turn into exceptions. After a reset part way through an upload it gives no reason at all.
 - **Renames:** it has no `posix_rename()`.
 
-`corrupt_upload` changes what is stored while the client is told every write succeeded, as a partner's system that loses or damages part of a file does. Each write is judged by its own offset and length, so the stored file is the same however a client splits, orders or pipelines its writes. Only an application that checks what it stored, by its size, a checksum or reading it back, can tell: Laravel's `writeStream()` returns `true`, and an uploader that then compares `Storage::size()` with the local file's size catches the truncation and uploads again. The handle's snapshot records the corrupted file.
+`corrupt_upload` changes what is stored while the client is told every write succeeded, as a partner's system that loses or damages part of a file does. Each write is judged by its own offset and length, so the stored file is the same however a client splits, orders or pipelines its writes. Only an application that checks what it stored, by its size, a checksum or reading it back, can tell: an uploader that compares the stored size with the local file's catches the truncation and uploads again. The handle's snapshot records the corrupted file.
 
-`deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. Laravel's sftp disk never hears of it: Flysystem's SFTP adapter ignores a failed remove, so `Storage::delete()` returns `true`, and only a consumer that remembers what it has processed avoids processing the file twice.
+`deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. A client library that ignores a failed remove, as Flysystem's SFTP adapter does, never tells the application, and only a consumer that remembers what it has processed avoids processing the file twice.
 
 `missing_file` makes a file vanish for the operations that would find it, so a consumer can be tested against a file that a partner removed. With `operations: [open_read, stat]`, the file is still listed but cannot be fetched, as when it goes between a poll's listing and its download. A hidden file is still there for the operations that create or change files: an open for writing, a `mkdir` of its name or a rename onto it acts on the real file, so a rename only hides its source. A hidden directory is left out of its parent's listing, but can still be listed by name. A listing never shows a hidden file, however many there are, and `.` and `..` are never hidden.
 
@@ -344,7 +344,7 @@ faults:
 - **Limit:** a fault ends with the handshake, which the server gives up after 2 minutes, as OpenSSH's `LoginGraceTime` does.
 - **What clients see:**
   - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, a close or reset as the server closing or resetting the connection, and a connection refused during an outage as `connect to host 127.0.0.1 port N: Connection refused`.
-  - Flysystem's SFTP adapter retries a failed connection 4 times at once, so a Laravel upload rides out four cut-off logins in a row, and fails after five. Those retries are all refused during an outage, so only an application that backs off for longer than the outage recovers from it.
+  - A client library's own retries come in here, before the application's. Flysystem's SFTP adapter retries a failed connection 4 times at once, so it rides out four cut-off logins in a row, but all of them are refused during an outage.
 
 ### Chaos
 
@@ -750,6 +750,8 @@ The integration tests in `test/integration` drive real SFTP clients against sftp
 ```bash
 make clients
 ```
+
+Applications built on these clients, tested against sftpit from outside as a test suite would, live in repositories of their own, such as sftpit-laravel for Laravel's sftp disk.
 
 The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there.
 

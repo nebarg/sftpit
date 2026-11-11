@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,36 +90,5 @@ func TestOpenSSHOutages(t *testing.T) {
 				t.Errorf("logs lack the outage:\n%s", logs.text())
 			}
 		})
-	}
-}
-
-// TestLaravelGivesUpDuringAnOutage takes the server down for two seconds at
-// the first login. Flysystem retries the connection at once, and the
-// recovering uploader after 100 ms each time, so every attempt falls in the
-// outage and nothing is published: an uploader needs to back off for longer
-// than the outages it should ride out.
-func TestLaravelGivesUpDuringAnOutage(t *testing.T) {
-	t.Parallel()
-	phpseclib3.orSkip(t)
-
-	var logs capturedLog
-	srv := startScenario(t, []faults.Rule{{
-		ID:          "outage",
-		MaxTriggers: 1,
-		Match:       faults.Match{Operations: []faults.Operation{faults.Authenticate}},
-		Action:      sftpproxy.ListenerDown{Duration: 2 * time.Second, CloseExisting: true},
-	}}, 0, logs.logger())
-	work := t.TempDir()
-	writeFile(t, filepath.Join(work, "orders.csv"), randomBytes(1<<20))
-
-	outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, "recover"))
-	srv.waitForSessions()
-
-	if want := map[string]any{"upload 1": false, "upload 2": false, "upload 3": false}; !maps.Equal(outcomes, want) {
-		t.Errorf("publish.php gave %v, want every upload to fail during the outage", outcomes)
-	}
-	assertHolds(t, srv, publishedPath, nil)
-	if got, want := srv.counts(t, "outage"), (faults.Counts{Matched: 1, Selected: 1, Fired: 1}); got != want {
-		t.Errorf("counts = %+v, want only the first login to reach the server", got)
 	}
 }
