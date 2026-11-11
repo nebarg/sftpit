@@ -1,12 +1,12 @@
 # sftpit
 
-Mailpit for SFTP: a local SFTP server for developing and testing file integrations, with faults you can inject on demand — slow responses, dropped connections, random failures and simulated corruption.
+sftpit is an SFTP server for testing applications that exchange files over SFTP. It runs on your machine, serves files from a temporary workspace, and injects the faults a scenario describes: delays, failed requests, dropped or frozen connections, partial uploads and downloads, corrupted data and outages. At the end of a run it checks the server's state against the scenario's assertions.
 
-**Status:** pre-alpha. `sftpit serve` runs a plain SFTP server, and injects the faults of a scenario in its configuration, which `sftpit config` checks and explains. Its [dashboard](#dashboard) and [control API](#control-api) report on the run and reset it.
+sftpit is pre-alpha. There are no releases yet, and the CLI, configuration and control API may change. See [Limitations](#limitations).
 
 ## Quickstart
 
-In about five minutes, this runs an upload whose first attempt is cut off part way, publishes it as an application would, and has sftpit say whether the run recovered. It needs Go 1.26 or later and OpenSSH's `sftp`. There are no releases yet, so build sftpit from a clone:
+You need Go 1.26 or later and OpenSSH's `sftp`. Build sftpit from a clone:
 
 ```bash
 git clone https://github.com/nebarg/sftpit.git
@@ -16,7 +16,7 @@ git clone https://github.com/nebarg/sftpit.git
 cd sftpit && make build
 ```
 
-Start it with the `upload-recovery` scenario of [`examples/quickstart`](examples/quickstart/sftpit.yaml), which cuts off the first upload to `/incoming/orders.csv.part` after 32 KiB:
+Start it with the `upload-recovery` scenario from [`examples/quickstart`](examples/quickstart/sftpit.yaml), which cuts off the first upload to `/incoming/orders.csv.part` after 32 KiB:
 
 ```bash
 ./bin/sftpit serve --config examples/quickstart/sftpit.yaml --scenario upload-recovery --ready-file ready.json
@@ -28,7 +28,9 @@ In another terminal, in the same directory, log in as `test` with the password `
 sftp -o PubkeyAuthentication=no -P 2122 test@127.0.0.1
 ```
 
-Then upload `orders.csv` under a temporary name, upload it again when that fails, and publish it with a rename:
+`-o PubkeyAuthentication=no` stops `sftp` offering your SSH agent's keys first. Like OpenSSH's server, sftpit ends a login after six failed attempts, and each key counts as one.
+
+Upload `orders.csv` under a temporary name, upload it again when that fails, then rename it into place:
 
 ```text
 sftp> mkdir incoming
@@ -41,7 +43,7 @@ sftp> rename incoming/orders.csv.part incoming/orders.csv
 sftp> bye
 ```
 
-The first upload shows 100% because `sftp` had sent every write before it read the failure. The [dashboard](#dashboard), at `http://127.0.0.1:8122/`, shows the fault in its timeline, with the rule that caused it. Now ask sftpit whether the run did what the scenario's [assertions](#assertions) require:
+The first upload shows 100% because `sftp` sent every write before it read the failure. The [dashboard](#dashboard) at `http://127.0.0.1:8122/` shows the fault and the rule that caused it. Check the run against the scenario's [assertions](#assertions):
 
 ```bash
 ./bin/sftpit assert --ready-file ready.json
@@ -56,7 +58,7 @@ run 20261111-225708.815-574d: scenario upload-recovery, seed 502796428 (fresh)
 passed
 ```
 
-Now be the application with the defect. Start the next run, then log in again and publish without uploading again:
+Now act as an application that doesn't retry. Start a new run, log in again, and publish the failed upload:
 
 ```bash
 ./bin/sftpit reset --ready-file ready.json
@@ -69,54 +71,66 @@ write remote "/incoming/orders.csv.part": Failure
 sftp> rename incoming/orders.csv.part incoming/orders.csv
 ```
 
-`sftpit assert` now fails, and exits with 1, because the published file is the 32 KiB that the server stored before the cutoff:
+`sftpit assert` now fails and exits with 1, because the published file holds only the 32 KiB stored before the cutoff:
 
 ```text
   FAIL  file_hash /incoming/orders.csv, sha256 c35ca218...: holds 32768 bytes with sha256 158d9de6...
 failed
 ```
 
-The example has other scenarios to try with `--scenario`, or with `sftpit reset --scenario NAME` while it runs: `lost-rename-reply` loses the reply to the publishing rename after the rename has happened, `cut-off-download` cuts off the first download of `outgoing/report.csv`, and `flaky-partner` fails a third of uploads and renames at random. Stop sftpit with Ctrl+C.
+The example has three more scenarios. Pick one with `--scenario` at startup, or with `sftpit reset --ready-file ready.json --scenario NAME` while sftpit runs:
+- `lost-rename-reply`: the publishing rename happens, but the connection closes before its reply.
+- `cut-off-download`: the first download of `outgoing/report.csv` is cut off part way.
+- `flaky-partner`: 30% of uploads and renames under `/incoming` fail at random.
 
-`-o PubkeyAuthentication=no` stops `sftp` offering the keys in your SSH agent first. sftpit, like OpenSSH's server, ends a login after six failed attempts, and each key counts as one.
+Stop sftpit with Ctrl+C.
 
-### A plain server
+## Running sftpit
 
 ```bash
 ./bin/sftpit serve
 ```
 
-With no scenario, sftpit is a plain SFTP server that injects no faults. It listens on `127.0.0.1:2122` and accepts the user `test` with the password `test`. The [dashboard](#dashboard) is at `http://127.0.0.1:8122/`. At startup it prints the address, its host-key fingerprints, the run's ID and the temporary workspace that holds the files, which is deleted when sftpit stops.
+With no configuration, sftpit serves SFTP on `127.0.0.1:2122`, accepts the user `test` with the password `test`, and injects no faults. The [dashboard](#dashboard) and [control API](#control-api) are on `127.0.0.1:8122`. At startup sftpit prints the address, the host-key fingerprints, the run's ID and the workspace directory. The workspace is temporary and is deleted when sftpit stops.
 
-`--sftp-listen` changes the address. It must be a loopback address such as `127.0.0.1:2200` or `[::1]:2122`, and port `0` picks a free port. sftpit never listens on other interfaces, except in a container with [`--profile container`](#with-docker-compose). The [control API](#control-api) listens on `127.0.0.1:8122`, or on the loopback address `--http-listen` names.
+`--sftp-listen` and `--http-listen` change the addresses. Both must be loopback addresses, such as `127.0.0.1:2200` or `[::1]:2122`, unless sftpit runs in a container with [`--profile container`](#docker-compose). Port `0` picks a free port.
 
-To have files ready to download, point sftpit at a directory of fixtures:
+### Seed files
+
+`--seed-dir` gives every run a copy of a directory of files:
 
 ```bash
 ./bin/sftpit serve --seed-dir ./tests/sftpit/seed
 ```
 
-At startup, sftpit copies the directory into the workspace, keeping permissions and modification times, and every run begins with a copy of that snapshot. So each run, after a [reset](#control-api) too, begins with the same files, and nothing a client does changes the originals. Changes to the directory reach runs at the next start. It may contain only directories and regular files. An empty directory has to hold something, such as a `.gitkeep`, before git will commit it, and SFTP clients see that file too.
+sftpit copies the directory at startup, keeping permissions and modification times. Every run, including one started by a reset, begins with that copy, so clients never change the originals. Changes to the directory take effect at the next start. It may hold only directories and regular files. Git won't commit an empty directory, so it needs a placeholder such as `.gitkeep`, which clients will see.
 
-To keep the workspace after sftpit stops, name a directory for it:
+### Keeping the workspace
+
+`--data-dir` keeps the workspace after sftpit stops:
 
 ```bash
 ./bin/sftpit serve --data-dir ./sandbox-data
 ```
 
-The directory must be empty or already an sftpit workspace, and only one sftpit can use it at a time. It keeps the host keys, so clients see the same fingerprints at every start, and the files of the last five runs, under `runs/<run>/fs/`, so that a failed run can be inspected afterwards. Each start, and each reset, is still a new run, which begins with only the seed's files. The seed's snapshot is in `fixtures/seed/`, and `fixtures/seed.json` lists what it holds, with each file's size and SHA-256.
+The directory must be empty or an existing sftpit workspace, and only one sftpit can use it at a time. It holds:
+- the host keys, so clients see the same fingerprints at every start;
+- the last five runs, with each run's files in `runs/<run>/fs/`;
+- the seed's copy in `fixtures/seed/`, with each file's size and SHA-256 listed in `fixtures/seed.json`.
 
-Names in `fs/` are encoded, so that they behave as on a case-sensitive Linux server whatever the host's volume ignores or refuses. A capital is stored as `^` and its lowercase letter, and any other character outside `a-z`, `0-9`, `-`, `_` and `.` as `%` and two hex digits: `Orders 2026.CSV` is stored as `^orders%202026.^c^s^v`. Add files through the seed directory or over SFTP, because sftpit ignores names in `fs/` that it did not encode. Escaping makes names longer, so a name of more than 127 capitals, or of more than 85 bytes that need `%`, is too long to store and fails the way an over-long name fails on a Linux server.
+Each start and each reset is still a new run that begins with only the seed's files.
 
-### With Docker Compose
+Names in `fs/` are encoded so that they behave as on a case-sensitive Linux server whatever the host's file system: `Orders 2026.CSV` is stored as `^orders%202026.^c^s^v`. Add files through the seed directory or over SFTP, since sftpit ignores names in `fs/` it didn't encode. Encoding makes names longer, so a name of more than 127 capitals, or more than 85 bytes of other characters that need escaping, is too long to store.
 
-An application in a container cannot reach a server that listens on the host's loopback address, so sftpit runs as a service beside it. Build the image in a clone of sftpit:
+### Docker Compose
+
+An application in a container can't reach a server on the host's loopback address, so run sftpit as a service beside it. Build the image from a clone:
 
 ```bash
 make image
 ```
 
-Then add the service to the project's `docker-compose.yml`, as [`examples/compose`](examples/compose) does:
+Add the service to the project's `docker-compose.yml`, as [`examples/compose`](examples/compose) does:
 
 ```yaml
   sftpit:
@@ -130,16 +144,13 @@ Then add the service to the project's `docker-compose.yml`, as [`examples/compos
       - './sftpit:/sftpit'
 ```
 
-Put the [configuration](#configuration) in `sftpit/sftpit.yaml`, list `sftpit` under the application's `depends_on`, and point the application's SFTP client at host `sftpit`, port `2122`. In a project whose services share a named network, such as Laravel Sail's `sail`, list it under the service's `networks` too.
+Put the [configuration](#configuration) in `sftpit/sftpit.yaml`, add `sftpit` to the application's `depends_on`, and point its SFTP client at host `sftpit`, port `2122`. If the project's services share a named network, such as Laravel Sail's `sail`, add it to the service's `networks`.
 
-- **The application** reaches SFTP at `sftpit:2122` and the control API at `http://sftpit:8122`, so a test can [reset](#control-api) the run.
-- **The host** reaches both on `127.0.0.1` only, at the ports `SFTPIT_PORT` and `SFTPIT_CONTROL_PORT` choose.
-- **`--profile container`** makes sftpit listen on every interface in the container: `:2122` and `:8122` unless the configuration or flags say otherwise. It warns of a loopback address, which other containers cannot reach. The profile is never chosen for you. It belongs only in a container, because on a host, every interface includes those that other machines reach.
-- **`--control-host sftpit`** lets the control API answer requests addressed to `sftpit`, the service's name; otherwise it answers only `localhost` and loopback addresses. Any container on the compose network can then reset runs and change rules, as it can reach any other service there.
-- **The user** is yours, from `SFTPIT_UID` and `SFTPIT_GID`, so that sftpit can create the host keys in `sftpit/hostkeys`, which the configuration names, on the first start. Commit them, so the fingerprints stay the same for everyone. As its own user, which is not root, sftpit could not write to a directory that a Linux host user owns, or read keys only that user can read.
-- **The workspace** is temporary, inside the container. To keep runs after the container stops, mount a directory and name it with `--data-dir`.
-
-`make container-check` runs the example with a stand-in application, curl, which uploads through `sftpit:2122` with its first upload cut off and resets the run through `sftpit:8122`, and checks that the host reaches both ports on loopback only.
+- **Ports:** the application reaches SFTP at `sftpit:2122` and the control API at `http://sftpit:8122`. The host reaches both on `127.0.0.1` only, on the ports `SFTPIT_PORT` and `SFTPIT_CONTROL_PORT` set.
+- **`--profile container`** listens on all of the container's interfaces. sftpit never picks it itself, because on a host that would include interfaces other machines can reach.
+- **`--control-host sftpit`** lets the control API answer requests addressed to `sftpit`, so any container on the compose network can reset runs and change rules.
+- **`user`** runs sftpit as you, so that it can create the host keys in `sftpit/hostkeys` on the first start. Commit the keys so everyone sees the same fingerprints.
+- **The workspace** is temporary. Mount a directory and pass `--data-dir` to keep runs.
 
 ## Configuration
 
@@ -186,40 +197,53 @@ policy:
       users: ["partner-b"]
 ```
 
-- Relative paths are resolved against the config file's directory.
+- Relative paths are resolved from the config file's directory.
 - Unknown fields and duplicate keys are errors.
 - Flags override the file.
-- With no `users`, the `test`/`test` login is used.
-- A `host_key` directory gets an Ed25519 and an RSA key the first time it is used. Commit them so a team shares one fingerprint.
+- Without `users`, sftpit accepts `test` with the password `test`.
+- A `host_key` directory gets an Ed25519 and an RSA key the first time it is used. Commit them so a team shares the fingerprints.
 
-`reply_order` sets the order in which replies reach a client. With `request`, the default, a session passes the client's requests to the server one at a time and answers them in order, as OpenSSH's `sftp-server` does, so a fault that holds a request before the server acts holds back every later one. With `completion`, it answers each request as soon as it is done, as a server that handles requests concurrently may: requests on the same file still reach the server in order, but a held request holds back only later requests on its own files.
+### Reply order
 
-The storage limits keep a runaway client from filling the disk. A file counts at its logical size, so a sparse write or a truncate that extends a file counts in full, and only file handles count as open files. A request that would take the files past a limit changes nothing and fails with `SSH_FX_FAILURE`, as a write to a full disk fails on OpenSSH's server, and sftpit logs it as `storage limit reached`, naming the setting. The seed counts too, and sftpit refuses to start with one that does not fit. A limit can be set to any value of at least 1, but not turned off.
+With `reply_order: request`, the default, a session passes the client's requests to the server one at a time and answers them in order, as OpenSSH's `sftp-server` does. A fault that holds a request before the server acts therefore holds back every later request. With `completion`, sftpit answers each request as soon as it is done, as a server that handles requests concurrently may. Requests on the same file still reach the server in order, but a held request holds back only later requests on its own files.
 
-The policy makes paths read-only, as a partner's server does with permissions, whatever scenario a run injects. A `path_prefix` covers the path and everything beneath it, so `/reference` covers `/reference/rates.csv` but not `/reference-old`, and `users` limits it to some users. Clients can still list, stat and download there, but sftpit refuses every change with `SSH_FX_PERMISSION_DENIED`: an open that can write, create or truncate, a `setstat`, `remove`, `mkdir` or `rmdir`, and a rename either of whose paths is read-only, or holds a read-only path, since renaming a directory moves what is in it. sftpit logs each refusal as `policy denied`, naming the path that refused it, and the banner lists the read-only paths. Fault rules never see a refused request, so it does not count towards them.
+### Storage limits
 
-Passwords never appear in the config file. `password_env` names an environment variable, which is read from the process environment first and then from the env files named by `env_file` and `--env-file`. A later file overrides an earlier one, and a missing env file is skipped.
+The limits stop a runaway client filling the disk. A file counts at its logical size, and only file handles count as open files. A request that would go over a limit changes nothing and fails with `SSH_FX_FAILURE`, as a write to a full disk does, and sftpit logs `storage limit reached` with the setting's name. The seed counts too. Limits can't be turned off.
 
-sftpit never reads a `.env` it was not told about. It never copies env-file values into its own environment, and it keeps only the variables the config references. Env files accept the following:
-- `KEY=value` lines, with an optional `export` prefix;
-- single or double quotes;
-- `#` comments;
-- LF or CRLF line endings.
+### Read-only paths
 
-Expansion such as `${OTHER}`, escapes and unquoted spaces are rejected in the variables sftpit reads from a file. A multi-line value, or a line that is not `KEY=value`, is rejected anywhere in the file. Keep env files out of version control.
+`policy.read_only` makes paths read-only, as a partner's server does with permissions, whatever scenario runs. A rule applies to every user, or only to those in `users`. A `path_prefix` covers the path and everything below it: `/reference` covers `/reference/rates.csv` but not `/reference-old`.
 
-To check a configuration without starting a server:
+Clients can still list, stat and download there. sftpit refuses every change with `SSH_FX_PERMISSION_DENIED`:
+- an open that can write, create or truncate;
+- `setstat`, `remove`, `mkdir` and `rmdir`;
+- a rename where either path is read-only or contains a read-only path.
+
+sftpit logs each refusal as `policy denied` with the path, and the banner lists the read-only paths. Fault rules never see a refused request, so it doesn't count towards them.
+
+### Passwords and env files
+
+Passwords never go in the config file. `password_env` names an environment variable. sftpit reads it from the process environment first, then from the env files named by `env_file` and `--env-file`. A later file overrides an earlier one, and a missing file is skipped. sftpit never reads a `.env` it wasn't told about, never copies values into its own environment, and keeps only the variables the config uses.
+
+Env files take `KEY=value` lines, with optional `export`, quotes and `#` comments, and LF or CRLF endings. sftpit rejects anything else, such as `${OTHER}` expansion, rather than guess. Keep env files out of version control.
+
+### Checking a configuration
 
 ```bash
 sftpit config validate --config ./sftpit.yaml
 sftpit config explain --config ./sftpit.yaml
 ```
 
-`validate` checks the file, the users and their keys, every secret and every scenario, and exits with 2 at the first problem. The seed directory's contents and whether they fit the limits, the data directory, the host keys and whether the listen addresses are free are checked when `serve` starts. `explain` prints the configuration as sftpit reads it: every default filled in, every path absolute, [recipes](#faults) as long-form rules, each scenario's rules in the order they are tried, and the rules each [chaos preset](#chaos) compiles to, in a comment. It says where each secret comes from (the environment, an env file, or nowhere) but never shows a value, and its output works as a config file. Neither starts a listener or touches the workspace. Both take `--env-file`, and `--profile` to check the listen addresses as `serve` would in that profile.
+`validate` checks the file, the users and their keys, every secret and every scenario, and exits with 2 at the first problem. `serve` checks the rest at startup: the seed directory and whether it fits the limits, the data directory, the host keys, and whether the listen addresses are free.
+
+`explain` prints the configuration as sftpit reads it, as a valid config file: defaults filled in, paths absolute, [recipes](#recipes) as long-form rules, and the rules each [chaos preset](#chaos) compiles to in a comment. It says where each secret comes from but never shows it.
+
+Neither command starts a listener or touches the workspace. Both take `--env-file`, and `--profile` to check the listen addresses for that profile.
 
 ## Faults
 
-A scenario in the configuration lists fault rules, and `--scenario` chooses the one a run injects. Without it, sftpit injects nothing. Every scenario is checked at startup, whichever one is chosen, those in [scenario files](#scenario-files) too.
+A scenario lists fault rules, and `--scenario` picks the scenario a run uses. Without it, sftpit injects nothing. sftpit checks every scenario at startup, including those in [scenario files](#scenario-files).
 
 ```yaml
 scenarios:
@@ -252,32 +276,47 @@ scenarios:
 sftpit serve --config ./sftpit.yaml --scenario upload-recovery
 ```
 
-A rule matches requests by:
-- `operation`, one or a list of: `open_read`, `open_write`, `read`, `write`, `close`, `stat`, `lstat`, `fstat`, `list`, `mkdir`, `rmdir`, `remove`, `rename` (standard and posix), `setstat`, `realpath`, `statvfs`, or `any`; or of the [connection events](#connection-events) `connect` and `authenticate`;
-- optionally `user`, and `key_fingerprint` for a client that logs in with a key, as ssh-keygen prints it;
-- optionally one of `path`, `path_prefix` (a directory and everything beneath it), `path_glob` (where `*` stays within one directory), `filename` and `filename_glob` (the last segment, in any directory). A rename spells them `source`, `source_prefix` and so on, and matches its destination with the `target` forms. Paths are matched case-sensitively, as clients see them.
+### Matching requests
 
-Of the requests it matches, a rule selects those whose `attempt` (the open of a transfer's file, counting each user and path separately unless `per` says otherwise) or `occurrence` (the matching request, counting from 1) is listed, or all of them. Rules are tried in order of `priority`, lowest first, and then as listed. The first to select a request applies, but every rule that matches a request counts it. `max_triggers` limits how often a rule takes effect.
+A rule matches requests by:
+- `operation`: one or a list of `open_read`, `open_write`, `read`, `write`, `close`, `stat`, `lstat`, `fstat`, `list`, `mkdir`, `rmdir`, `remove`, `rename` (standard and posix), `setstat`, `realpath`, `statvfs` or `any`, or one of the [connection events](#connection-events) `connect` and `authenticate`;
+- optionally `user`, and `key_fingerprint` as ssh-keygen prints it, for a client that logs in with a key;
+- optionally one location: `path`, `path_prefix` (a directory and everything below it), `path_glob` (where `*` stays within one directory), or `filename` or `filename_glob` (the last segment, in any directory). A rename matches its source with `source`, `source_prefix` and so on, and its destination with `target`, `target_prefix` and so on. Paths are matched case-sensitively, as clients send them.
+
+Of the requests it matches, a rule selects:
+- those whose `attempt` is listed. An attempt is an open of a transfer's file, a failed open included, counted separately for each user and path. `per: [user]` counts all of a user's opens instead, and `per: [path]` all opens of a path;
+- or those whose `occurrence` is listed: the rule's matching requests, counted from 1;
+- or, with neither, every request it matches.
+
+Rules are tried in order of `priority`, lowest first, then in the order listed. The first rule to select a request applies its action, but every rule that matches a request counts it. `max_triggers` limits how many times a rule takes effect.
+
+### Actions
 
 | Action | Effect | Fields |
 |---|---|---|
 | `delay` | Holds the request before the server acts, or its reply after | `when`, `duration` |
-| `stall` | Holds the request or its reply as `delay` does, until [released](#releasing-stalls) or `max_stall` passes. The SSH connection stays alive, keepalives included, so only an operation timeout notices | `when`, `max_stall` |
-| `fail` | Answers with `status`. After, the server has acted although the client is told otherwise | `when`, `status` |
-| `close_connection` | Closes the connection where the reply would be, with a FIN or, with `mode: rst`, a TCP reset | `when`, `mode` |
+| `stall` | Holds the request or reply as `delay` does, until [released](#releasing-stalls) or `max_stall` passes. The SSH connection stays alive, keepalives included, so only an operation timeout notices | `when`, `max_stall` |
+| `fail` | Answers with `status`. With `when: after`, the server has acted although the client is told otherwise | `when`, `status` |
+| `close_connection` | Closes the connection where the reply would be, with a FIN, or with a TCP reset if `mode: rst` | `when`, `mode` |
 | `freeze_connection` | Stops all traffic where the reply would be, keepalives included, then closes the connection after `max_freeze` | `when`, `max_freeze` |
-| `close_subsystem` | Ends the SFTP session where the reply would be, closing its channel but leaving the connection open, as a server ending an idle session does | `when` |
-| `listener_down` | Takes the server down for `duration` where the reply would be: new connections are refused until it is over. With `close_existing: true`, every connection is closed too, the client's own included; otherwise the client carries on | `when`, `duration`, `close_existing` |
+| `close_subsystem` | Ends the SFTP session where the reply would be, closing its channel but not the connection, as a server ending an idle session does | `when` |
+| `listener_down` | Takes the server down for `duration` where the reply would be, refusing new connections. With `close_existing: true`, every connection is closed too, the client's own included | `when`, `duration`, `close_existing` |
 | `partial_upload` | For `write`: stores only the bytes below `cutoff_offset`, then answers with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
-| `partial_download` | For `read`: serves the bytes below `cutoff_offset`, shortening the read that crosses it, then answers a read at or beyond it with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it. The file is unchanged | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
-| `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
-| `corrupt_upload` | For `write`: stores the upload `truncate`d at `offset`, without the `length` bytes at `offset` (`omit_range`), with every later byte moved down to fill the gap, or with them changed (`flip_bytes`). Every write is answered with success | `transform`, `offset`, `length` |
+| `partial_download` | For `read`: serves the bytes below `cutoff_offset`, shortening the read that crosses it, then answers a read at or past it with `status`, closes the connection (`mode` `fin` or `rst`) or freezes it. The stored file is unchanged | `cutoff_offset`, `result`, `status`, `mode`, `max_freeze` |
+| `corrupt_download` | For `read`: serves the file `truncate`d at `offset`, without the `length` bytes at `offset` (`omit_range`), or with them changed (`flip_bytes`). The stored file is unchanged | `transform`, `offset`, `length` |
+| `corrupt_upload` | For `write`: stores the upload `truncate`d at `offset`, without the `length` bytes at `offset` (`omit_range`, with later bytes moved down to fill the gap), or with them changed (`flip_bytes`). Every write is answered with success | `transform`, `offset`, `length` |
 | `wrong_size` | For `stat`, `lstat`, `fstat` and `list`: reports the size as `size`, or `size_delta` off | `size`, `size_delta` |
-| `hide` | Makes a file seem absent, while it stays on the server. For `list`, leaves it out of listings; for `open_read`, `stat`, `lstat`, `remove` and `rename`, answers `no_such_file` before the server acts | |
+| `hide` | Makes a file seem absent while it stays on the server. Leaves it out of a `list`, and answers `no_such_file` to `open_read`, `stat`, `lstat`, `remove` and `rename` before the server acts | |
 
-A `listener_down` closes the listening socket, so connecting clients see a refusal, and the port is free during the outage. Should another process take it, sftpit warns and keeps trying to listen again.
+- **Statuses:** `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` and `eof`.
+- **Outages:** a `listener_down` closes the listening socket, so connecting clients are refused and the port is free during the outage. If another process takes the port, sftpit warns and keeps trying to listen again.
+- **Transfers:** a partial or corrupt upload or download is chosen when its file opens. It takes effect, and counts towards `max_triggers`, only once it changes a read or write.
+- **Logs:** sftpit logs `rule fired` with the rule's ID for each fault.
+- **Snapshots:** when a file handle that a fault acted on is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It keeps a copy under `runs/<run>/snapshots/` unless that would take the run's copies past 64 MiB, in which case it logs `snapshot not copied`.
 
-Recipes are shorthands for common faults. A rule gives one in place of `match` and `action`, with the location fields of a match:
+### Recipes
+
+Recipes are shorthands for common faults. A rule gives a recipe in place of `match` and `action`, with a match's location fields:
 
 ```yaml
 faults:
@@ -320,36 +359,37 @@ faults:
 
 | Recipe | Long form | Fields |
 |---|---|---|
-| `fail_upload` | A `partial_upload` cut off at `after_bytes`, whose `result` is `status` and `status` is `failure` unless set | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
+| `fail_upload` | A `partial_upload` cut off at `after_bytes`, with `result: status` and `status: failure` unless set | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
 | `fail_download` | A `partial_download` cut off at `after_bytes`, with the same defaults as `fail_upload` | `attempts`, `probability`, `after_bytes`, `result`, `status`, `mode`, `max_freeze` |
-| `fail_randomly` | A `fail` of `operations` with `probability`, `when` `before` and `status` `failure` unless set | `operations`, `probability`, `status`, `when` |
+| `fail_randomly` | A `fail` of `operations` with `probability`, with `when: before` and `status: failure` unless set | `operations`, `probability`, `status`, `when` |
 | `corrupt_download` | A `corrupt_download` | `attempts`, `probability`, `transform`, `offset`, `length` |
 | `corrupt_upload` | A `corrupt_upload` | `attempts`, `probability`, `transform`, `offset`, `length` |
 | `deny_acknowledgement` | A `fail` of `remove` and `rename` before the server acts, with `permission_denied` unless `status` is set | `occurrences`, `probability`, `status` |
 | `missing_file` | A `hide` of `operations`, by default `open_read`, `stat`, `lstat`, `list`, `remove` and `rename` | `operations`, `probability` |
 
-`attempts` lists the opens a recipe selects, counted per user and path, and `occurrences` the matching requests, counting from 1. `sftpit config explain` shows the long form of each recipe.
+`attempts` lists the attempts a recipe selects, counted per user and path, and `occurrences` the matching requests, counted from 1. `sftpit config explain` shows each recipe's long form.
 
-`fail_download` cuts a download off part way, as a dropped connection or a partner's failing server does. A client that reads in order receives exactly the bytes below `after_bytes` before the result, and keeps what it saved: neither OpenSSH's `sftp` nor phpseclib deletes a partial download. They differ in what they report:
-- With a status, OpenSSH prints `read remote "/orders.csv" : Failure` and exits 1, but phpseclib's `get()` returns `true`, handing the application the bytes below the cutoff as if they were the whole file. Only an application that compares the length with the file's size notices.
-- With a FIN close, phpseclib throws `ConnectionClosedException`, having saved every byte below the cutoff. OpenSSH reports the close but may save fewer bytes than it was sent: of the 1 MiB below the cutoff, 576 KiB in every run on macOS, and from 960 KiB to all of it on Linux.
-- With a reset, what either client saves and reports varies from run to run.
+- **`fail_download`** cuts a download off part way. A client that reads in order receives exactly the bytes below `after_bytes`. See [what clients report](#what-openssh-and-phpseclib-report).
+- **`corrupt_upload`** changes what is stored while telling the client every write succeeded. The stored file is the same however the client splits or pipelines its writes. Only an application that checks what it stored notices.
+- **`deny_acknowledgement`** refuses the remove, or the rename into an archive, with which a consumer marks a file as processed. The file stays, so the next poll finds it again. Flysystem's SFTP adapter ignores a failed remove, so only a consumer that remembers what it processed avoids processing the file twice.
+- **`missing_file`** hides a file from the operations that would find it. With `operations: [open_read, stat]`, the file is still listed but can't be fetched, as when it disappears between a listing and a download. Writes, `mkdir` and renames onto the name still act on the real file.
 
-phpseclib 2, which code written before phpseclib 3 still runs, Flysystem 1's SFTP adapter among it, behaves as phpseclib 3 does, with these differences:
-- **A lost connection:** it returns `false` where phpseclib 3 throws. It says why only in PHP notices, such as `Connection closed (by server) prematurely`, which a framework's error handler may turn into exceptions. After a reset part way through an upload it gives no reason at all.
-- **Renames:** it has no `posix_rename()`.
+Publishing over an existing file needs no recipe. A standard rename never replaces its target, so Flysystem's `move()` deletes the published file and renames again. A `fail` on that second rename (`occurrence: [2]`) leaves no published file at all.
 
-`corrupt_upload` changes what is stored while the client is told every write succeeded, as a partner's system that loses or damages part of a file does. Each write is judged by its own offset and length, so the stored file is the same however a client splits, orders or pipelines its writes. Only an application that checks what it stored, by its size, a checksum or reading it back, can tell: an uploader that compares the stored size with the local file's catches the truncation and uploads again. The handle's snapshot records the corrupted file.
+### What OpenSSH and phpseclib report
 
-`deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. A client library that ignores a failed remove, as Flysystem's SFTP adapter does, never tells the application, and only a consumer that remembers what it has processed avoids processing the file twice.
+After a `fail_download`, neither OpenSSH's `sftp` nor phpseclib deletes the partial download, but they report it differently:
+- **With a status:** OpenSSH prints `read remote "/orders.csv" : Failure` and exits 1. phpseclib's `get()` returns `true`, handing the application the bytes below the cutoff as if they were the whole file. Only an application that compares the length with the file's size notices.
+- **With a FIN close:** phpseclib throws `ConnectionClosedException`, having saved every byte below the cutoff. OpenSSH reports the close but may save fewer bytes than it received: of 1 MiB below the cutoff, 576 KiB on every run on macOS, and from 960 KiB to all of it on Linux.
+- **With a TCP reset:** what either client saves and reports varies from run to run.
 
-`missing_file` makes a file vanish for the operations that would find it, so a consumer can be tested against a file that a partner removed. With `operations: [open_read, stat]`, the file is still listed but cannot be fetched, as when it goes between a poll's listing and its download. A hidden file is still there for the operations that create or change files: an open for writing, a `mkdir` of its name or a rename onto it acts on the real file, so a rename only hides its source. A hidden directory is left out of its parent's listing, but can still be listed by name. A listing never shows a hidden file, however many there are, and `.` and `..` are never hidden.
+phpseclib 2, which older code such as Flysystem 1's SFTP adapter still uses, behaves like phpseclib 3 except:
+- **After a lost connection** it returns `false` where phpseclib 3 throws. It gives the reason only in PHP notices, such as `Connection closed (by server) prematurely`, which a framework's error handler may turn into exceptions. After a reset part way through an upload it gives no reason at all.
+- **It has no `posix_rename()`.**
 
-Publishing over an existing file needs no recipe. A standard rename never replaces its target, so Flysystem's `move()` deletes the published file and renames again, and a `fail` on that second rename (`occurrence: [2]`) leaves no published file at all.
+### Random rules and seeds
 
-A status is `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` or `eof`. A partial or corrupt upload or download is chosen when its file is opened, and takes effect, and counts towards `max_triggers`, only once it changes a write or read. sftpit logs `rule fired` with the rule's ID for each fault. When a file handle that a fault acted on, at its open or later, is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It also keeps a copy under `runs/<run>/snapshots/`, unless the copy would take the run's copies past 64 MiB, when it logs `snapshot not copied`.
-
-Rules can also fire at random, and draw a `duration` or a partial upload's `cutoff_offset` from a range:
+A rule can fire at random, and can draw a `duration` or a partial upload's `cutoff_offset` from a range:
 
 ```yaml
 scenarios:
@@ -365,9 +405,13 @@ scenarios:
         action: { type: "partial_upload", cutoff_offset: { min: 65536, max: 1048576 }, result: "close_connection", mode: "rst" }
 ```
 
-A rule with a `decision` fires with its `probability`: a partial upload or corrupt download draws once for each transfer, as its file opens, and any other rule for each request it selects. When the draw misses, the request goes on to the next rule. A range is drawn for each request a rule fires for, or each transfer. `rule fired` shows the values drawn.
+A rule with a `decision` fires with its `probability`. A partial upload or corrupt download draws once per transfer, when its file opens. Any other rule draws once for each request it selects. When the draw misses, the request goes on to the next rule. A range is drawn for each request or transfer the rule fires for, and `rule fired` logs the values drawn.
 
-A `trigger` ties a rule to time, measured from an `anchor`: the start of the `run`, when the client's `connection` authenticated, or, for a connection action, when a `transfer`'s file opened.
+Each draw depends only on the run's seed and on the request: its rule, user, path and operation, and how many such requests the rule has matched before. Requests for other files never change it. A pinned seed, from the scenario's `seed` or from `--seed`, therefore gives the same faults on every run of the same workload. Without one, each run draws a fresh seed. The banner shows the seed, and a kept workspace records it in `runs/<run>/run.json`, so `--seed` can repeat a run's decisions.
+
+### Time triggers
+
+A `trigger` ties a rule to time, measured from an `anchor`: the start of the `run`, the login of the client's `connection`, or, for a connection action, the open of a `transfer`'s file.
 
 ```yaml
 faults:
@@ -385,19 +429,17 @@ faults:
 ```
 
 - **`window`:** the rule applies only from `from` until `until`.
-- **`at` with a connection action:** the action fires at that moment whatever the client is doing, without a `when`.
-  - Anchored to a transfer, it fires only while the file is still open, and selects transfers as their file opens, so `attempt` and `decision` apply to it.
-  - Anchored to the run or the connection, it matches only `user` and `key_fingerprint`, and fires once per connection. A `listener_down` at a moment of the run fires once for the run, whether or not anyone is connected, and matches no user or key.
-- **`at` with any other action:** the rule applies to the first request it selects from that moment on, once per run or connection.
+- **`at` with a connection action:** the action fires at that moment, whatever the client is doing, and takes no `when`.
+  - Anchored to a transfer, it fires only while the file is still open. It selects transfers as their files open, so `attempt` and `decision` apply.
+  - Anchored to the run or the connection, it matches only `user` and `key_fingerprint`, and fires once per connection. A `listener_down` anchored to the run fires once for the run, whether or not anyone is connected, and matches no user or key.
+- **`at` with any other action:** the rule applies to the first request it selects after that moment, once per run or connection.
 - `at` takes a `{min, max}` range, drawn once per anchor.
 
-Time triggers suit tests of timeouts, keepalives and reconnects. A test of file contents should cut at a byte offset instead, because how far a client gets in two seconds depends on the machine.
-
-Every draw depends only on the run's seed and on the request: its rule, user, path and operation, and how many requests of that user, path and operation the rule has matched before it. Requests for other files never change one. So a pinned seed, from the scenario's `seed` or `--seed`, gives a test the same faults on every run of the same workload. Without one, each run draws a fresh seed, so chaos differs from run to run. The banner shows the seed, and a kept workspace records it in `runs/<run>/run.json`, so `--seed` can repeat a run's decisions.
+Use time triggers to test timeouts, keepalives and reconnects. To test what a file holds, cut at a byte offset instead: how far a client gets in two seconds depends on the machine.
 
 ### Connection events
 
-Two operations come before any request:
+Two operations come before any SFTP request:
 - **`connect`:** the server accepting a connection, before the SSH handshake.
 - **`authenticate`:** the server accepting a login, before it tells the client.
 
@@ -416,15 +458,13 @@ faults:
 
 - **Actions:** `delay`, `close_connection`, `freeze_connection` and `listener_down`, without `when`.
 - **Matching:** neither event has a path. `connect` comes before the login, so it has no `user` or `key_fingerprint` either.
-- **Counting:** `occurrence` counts connections or logins. A trigger measures from the run.
-- **Limit:** a fault ends with the handshake, which the server gives up after 2 minutes, as OpenSSH's `LoginGraceTime` does.
-- **What clients see:**
-  - OpenSSH's `sftp` reports a delay at `connect` beyond its `ConnectTimeout` as `Connection timed out during banner exchange`, a close or reset as the server closing or resetting the connection, and a connection refused during an outage as `connect to host 127.0.0.1 port N: Connection refused`.
-  - A client library's own retries come in here, before the application's. Flysystem's SFTP adapter retries a failed connection 4 times at once, so it rides out four cut-off logins in a row, but all of them are refused during an outage.
+- **Counting:** `occurrence` counts connections or logins. A trigger measures from the start of the run.
+- **Limit:** the server gives up a handshake after 2 minutes, as OpenSSH's `LoginGraceTime` does.
+- **Client retries** may hide these faults from the application. Flysystem's SFTP adapter retries a failed connection 4 times at once, so it gets past four cut-off logins in a row, but not an outage.
 
 ### Chaos
 
-A scenario's `chaos` makes random trouble over a scope, for trying an application against sftpit while developing it:
+A scenario's `chaos` injects random faults over a scope, for trying an application against sftpit while developing it:
 
 ```yaml
 scenarios:
@@ -435,7 +475,7 @@ scenarios:
       extras: ["corrupt_download"] # optional
 ```
 
-A preset compiles to ordinary rules, which are tried after the scenario's own `faults`, so a scripted rule wins on a request that both match:
+A preset compiles to ordinary rules, tried after the scenario's own `faults`, so a scenario's rule wins on a request that both match:
 
 | Rule | `light` | `moderate` | `heavy` |
 |---|---|---|---|
@@ -444,15 +484,14 @@ A preset compiles to ordinary rules, which are tried after the scenario's own `f
 | `chaos-drop`: a `close_connection` at a moment up to 1 s after a transfer's file opens | | 2% of transfers | 5% of transfers |
 | `chaos-freeze`: a `freeze_connection` before the server acts, for up to 15 s | | | 0.5% |
 
-- **What draws:** any request can be delayed, reads and writes included, as on a slow link. Only the other operations fail or freeze, so a transfer is decided at its open and close, and a large file is no likelier to fail than a small one. The drops make trouble during a transfer, but only if it is still open at its moment, so a small file usually finishes first unless a delay holds it open.
-- **Extras:** corruption and wrong sizes are never part of a preset, since silently corrupted data surprises in a long session. `corrupt_download` changes the first 64 bytes served of a download (`chaos-corrupt-download`), and `wrong_size` reports sizes 1 KiB short in stat replies and listings (`chaos-wrong-size`), each as often as the preset fails operations.
-- **Seeds:** without a pinned seed, each run draws a fresh one, so chaos differs from run to run. The banner shows the preset, and the logs name the rule behind each fault, such as `rule fired rule=chaos-fail`.
-- **Names:** `sftpit config explain` shows the rules a preset compiles to. Rule IDs that start with `chaos-` are kept for them.
-- **Pausing:** with `paused: true`, chaos's rules match nothing, and a drop it chose does not come, until a [change of rules](#changing-the-rules-during-a-run) resumes them with their counts. A delay or freeze already under way runs its course.
+- **What it affects:** any request can be delayed. Only operations other than reads and writes fail or freeze, so a large file is no more likely to fail than a small one.
+- **Extras:** presets never corrupt data or misreport sizes unless asked. `corrupt_download` changes the first 64 bytes of a download, and `wrong_size` reports sizes 1 KiB short, each as often as the preset fails operations.
+- **Names:** rule IDs starting with `chaos-` are reserved for presets. `sftpit config explain` shows the rules a preset compiles to.
+- **Pausing:** `paused: true` stops chaos's rules matching until a [change of rules](#changing-the-rules-during-a-run) resumes them, with their counts.
 
 ## Assertions
 
-A scenario can say what a run of it must have done, or left behind:
+A scenario can state what a run must have done or left behind:
 
 ```yaml
 scenarios:
@@ -472,15 +511,16 @@ scenarios:
 | `rule_fired` | `rule_id`, a count | how many times a rule of the scenario or its chaos fired |
 | `successful_operation` | `operation`, `path`, a count | how many requests got a successful reply: `remove`, `mkdir`, `rmdir`, `setstat`, `stat` or `lstat` |
 | `successful_operation` | `operation: rename`, `source`, `target` or both, a count | the same for a rename |
-| `file_equals_fixture` | `path`, `fixture` | the file holds the content of a fixture, given by its path under `storage.expected_dir` |
+| `file_equals_fixture` | `path`, `fixture` | the file has the content of a fixture, given by its path under `storage.expected_dir` |
 | `file_hash` | `path`, `sha256` | the file has this SHA-256, for a file not worth committing |
-| `path_absent` | `path` | nothing is left at the path |
+| `path_absent` | `path` | nothing is at the path |
 
-A count is `exactly`, or `at_least`, `at_most` or both, and is at least 1 if not given. Reads and writes are not counted by request, so assert on the file they should have left. A scenario may hold only assertions, with `faults: []`, to check a workflow with no faults.
+- **Counts** are `exactly`, or `at_least`, `at_most` or both, and are at least 1 if not given. Reads and writes aren't counted by request, so assert on the file they should have left.
+- **A scenario without faults** can hold only assertions, with `faults: []`, to check a workflow that should succeed.
+- **Checks:** `config validate` and `serve` check assertions as they check rules. `rule_id` must name a rule of the scenario, and `fixture` a regular file in `expected_dir`. `serve` copies `expected_dir` at startup, so later changes to it have no effect. `expected_dir` can't be inside `seed_dir`, whose files clients see.
+- **Elsewhere:** an inline [reset](#resetting-a-run), a [queued run](#queuing-the-next-run) and a [saved scenario file](#scenario-files) take `assertions` too, in the same form as JSON. Changing a run's rules doesn't change its assertions.
 
-`config validate` and `serve` check assertions as they check rules: `rule_id` must name a rule of the scenario, and `fixture` a regular file in `expected_dir`, which `serve` copies into the workspace at startup, so later changes to it have no effect. `expected_dir` may not lie inside `seed_dir`, whose files clients can see. An inline [reset](#control-api), a [queued run](#queuing-the-next-run) and a [saved scenario file](#scenario-files) take `assertions` too, in the same form as JSON. Changing a run's rules does not change its assertions.
-
-`GET /api/v1/runs/{id}/rules` lists a run's assertions. [`sftpit assert`](#checking-a-run) checks them.
+`GET /api/v1/runs/{id}/rules` lists a run's assertions.
 
 ### Checking a run
 
@@ -497,35 +537,78 @@ run 20261106-101500.123-3f9a: scenario upload-recovery, seed 481516 (pinned)
 failed
 ```
 
-It exits with 0 if the run passed, 1 if it failed, 2 for bad flags and 3 if there is no verdict, such as when the server cannot be reached. `--format json` writes the whole report, and `--output FILE` writes to a file instead of standard output.
+`sftpit assert` exits with 0 if the run passed, 1 if it failed, 2 for bad flags, and 3 if there is no verdict, such as when the server can't be reached. `--format json` writes the whole report, and `--output FILE` writes it to a file.
 
-Asserting ends the run. Admission closes, and clients have until the timeout to close their files, on connections they already have. Every connection then ends, and the assertions are checked, so nothing can change the files after the verdict. The run admits no clients until a reset starts the next, and asserting again gives the same report.
+Asserting ends the run:
+1. Admission closes, and clients have until `--timeout` to close their files, on the connections they already have.
+2. Every connection ends.
+3. The assertions are checked, so nothing can change the files after the verdict.
 
-A run passes only if it states assertions, every one holds, and no transfer was unfinished: a file still open when its connection ended counts against it, while one a fault cut off earlier does not. A run with no assertions fails, since nothing was checked. `successful_operation` reads the [trace](#the-trace), so it fails if the trace is incomplete, while the other assertions do not need it.
+The run then admits no clients until a reset starts the next one. Asserting again gives the same report.
 
-A pass says what the server saw. Whether the application recovered, without duplicate processing or alerts, is for the application's own tests, so a harness combines their result with this one.
+A run passes only if it has assertions, every one holds, and no transfer was left unfinished. A file still open when its connection ended counts against the run, but one that a fault cut off doesn't. A run with no assertions fails, since nothing was checked. `successful_operation` reads the [trace](#the-trace), so it fails if the trace is incomplete. The other assertions don't need the trace.
+
+A pass covers what the server saw. Whether the application recovered without processing a file twice or raising alerts is for the application's own tests to check.
+
+## Using sftpit from a test suite
+
+A test harness can start sftpit on free ports and read the addresses from a ready file:
+
+```bash
+sftpit serve --config ./sftpit.yaml --scenario upload-recovery --seed 481516 \
+  --sftp-listen 127.0.0.1:0 --http-listen 127.0.0.1:0 \
+  --ready-file ./work/sftpit-ready.json
+```
+
+Once both listeners are open, `serve` writes the ready file in one go, so a reader never sees part of it:
+
+```json
+{
+  "sftp_address": "127.0.0.1:52341",
+  "http_address": "127.0.0.1:52342",
+  "workspace": "/tmp/sftpit-2585468165",
+  "host_keys": [
+    { "type": "ssh-ed25519", "fingerprint": "SHA256:..." },
+    { "type": "ssh-rsa", "fingerprint": "SHA256:..." }
+  ]
+}
+```
+
+It holds only what stays the same while sftpit runs, and no secrets. The current run comes from [`status`](#control-api). sftpit removes the file when it stops. It replaces a ready file an earlier `serve` left behind, but won't start if the path holds any other file.
+
+Between tests, `sftpit reset` starts a new run:
+
+```bash
+sftpit reset --ready-file ./work/sftpit-ready.json --scenario flaky-partner --seed 7
+```
+
+```text
+run 20261024-101500.123-3f9a: scenario flaky-partner, seed 7 (pinned)
+```
+
+`--scenario` and `--seed` choose the next run as the [reset's body](#resetting-a-run) does, and `--scenario ""` starts a run without faults. It exits with 2 when the reset is refused, such as for an unknown scenario, and with 3 when the ready file can't be read, the server can't be reached or the reset fails.
+
+At the end of a test, [`sftpit assert`](#checking-a-run) gives the verdict through the same ready file.
 
 ## Dashboard
 
-`sftpit serve` serves a dashboard on the control API's address, `http://127.0.0.1:8122/` by default, which the banner shows. It needs nothing from the internet: its files are in the binary.
+`sftpit serve` serves a dashboard at the control API's address, `http://127.0.0.1:8122/` by default. Its files are embedded in the binary.
 
-- **Run:** the server's state, the current run, its scenario, seed and rules revision, and how many requests are stalled and connections frozen, with buttons to release them and to reset. A reset can repeat the current scenario, choose another or none, and pin a seed, and the dialog says which run it ends.
-- **Connect:** the SFTP address, an `sftp` command that logs in, the users and how each logs in, never with what, unless the only user is the built-in `test`, the host-key fingerprints, the read-only paths and the workspace. In the [container profile](#with-docker-compose), the command uses each `--control-host` name, as an application in the same compose network would.
-- **Activity:** the run's events as they happen, newest first. A fault that a rule injected is red, with its rule, a request that the read-only policy refused is amber, a failure that sftpit did not inject is purple, and changes to the run are blue, so a failure during development is easy to attribute to sftpit or not. Filters narrow it to a kind, user, path, connection or rule, and clicking a user, connection or rule filters by it. Clicking an event shows all of it. The page keeps the latest 2,000 events and says how many older ones it dropped, and a gap in the run's own record of events shows as a gap.
-- **Files:** the run's files as a tree, with sizes, modes, times and, on request, hashes, and which files the seed holds and whether clients changed them. Selecting a file previews its first 4 KiB as text, or as hex if it is not text, and offers a download. The copies that faults left behind are listed for download too.
-- **Rules:** the run's rules in the order they are tried, what each matches and does, and how many times each has matched, been selected, fired and been canceled, with any rule that has never matched marked, as a mistyped or shadowed rule would be, and chaos's own rules after them. Each of the run's own rules can be removed now, and **Save as scenario** writes the rules and chaos as they are, with the run's seed if it is pinned, to a [scenario file](#scenario-files) and shows its path, asking first if the file exists. What is [queued](#queuing-the-next-run) for the next reset is listed below, with a button to clear it.
-- **Chaos:** a switch to turn [chaos](#chaos) on, off or pause it, keeping its counts, with a preset, a scope of everyone, a user, a path prefix or a filename, and the extras that corrupt downloads or report wrong sizes. **Preview** shows the rules it compiles to, and **Apply now** changes the current run, keeping its own rules. While chaos is on, a banner says so on every view.
-- **Builder:** a form that makes a rule from a fault (a delay, failure, dropped or frozen connection, stall, partial upload or download, download or upload corruption, wrong size, random failures, a read-only path or a missing file), a scope (a user, a key, an exact path, a path prefix or glob, or a filename or filename glob) and a trigger (every match, the first attempts, an occurrence, a probability, a moment or a time window), offering only the triggers a fault can take. **Preview** has sftpit check the rule and shows it in the long form, as the engine runs it. **Apply now** adds it to the current run, and **Apply at next reset** queues the current run's rules with it for the next reset.
-- **Scenarios:** the configuration's scenarios and the scenario files, with their descriptions and rules, and any file's error. A configured scenario can be duplicated to a file, since the configuration is never rewritten.
-- **Result:** the run's assertions and a button that [checks them](#checking-a-run), which ends the run, asking first. Then the verdict, what each assertion found, the rules that fired and those that never did, the final files and their hashes, and downloads of the report and the [trace](#the-trace). A verdict from `sftpit assert` shows here too.
+- **Run:** the current run's scenario, seed and rules revision, with buttons to reset and to release stalls and frozen connections.
+- **Connect:** the SFTP address, an `sftp` command that logs in, the users and how each logs in, the host-key fingerprints and the read-only paths. Passwords are never shown, except the built-in `test` user's.
+- **Activity:** the run's events as they happen, filterable by kind, user, path, connection or rule. Injected faults are red, with their rule; read-only refusals amber; failures sftpit didn't inject purple; changes to the run blue.
+- **Files:** the run's files, with sizes, modes, times, optional hashes and whether clients changed the seed's files, plus previews, downloads and the copies faults left behind.
+- **Rules:** the run's rules in the order they are tried, with their counts, and rules that have never matched marked. Rules can be removed, saved as a [scenario file](#scenario-files), and [queued](#queuing-the-next-run) for the next reset.
+- **Chaos:** turns [chaos](#chaos) on, off or paused for the current run, with a preset, scope and extras.
+- **Builder:** makes a rule from a fault, a scope and a trigger, previews its long form, and applies it now or at the next reset.
+- **Scenarios:** the configuration's scenarios and scenario files. A configured scenario can be copied to a file to edit.
+- **Result:** [checks the run's assertions](#checking-a-run), and shows the verdict, the rules that fired and never fired, the final files, and downloads of the report and [trace](#the-trace).
 
-Every change says whether it applies now or at the next reset. One that applies now asks first, since transfers already open keep the faults chosen when they opened.
-
-The page follows the current run, so after a reset, from the dashboard or elsewhere, it shows the next one. It escapes everything it shows, and it runs under a content security policy that allows only its own files and API, so a file name or file content a client uploaded can never run as a script. It works at phone width and in dark mode.
+A change that applies to the current run asks first, since open transfers keep the faults chosen when they opened. The page escapes everything it shows and runs under a content security policy that allows only its own files and API, so an uploaded file's name or content can't run as a script.
 
 ## Control API
 
-`sftpit serve` answers HTTP requests on `127.0.0.1:8122`, or on the loopback address that `--http-listen` or `server.http_listen` names, or [in a container](#with-docker-compose) on `:8122`. Port `0` picks a free port, and the banner shows the address.
+`sftpit serve` answers HTTP requests at `--http-listen` or `server.http_listen`: `127.0.0.1:8122` by default, or `:8122` in the [container profile](#docker-compose). Port `0` picks a free port, and the banner shows the address.
 
 | Route | Answer |
 |---|---|
@@ -533,16 +616,16 @@ The page follows the current run, so after a reset, from the dashboard or elsewh
 | `GET /api/v1/ready` | `{"ready": true}`, or status 503 with the error once a reset has failed |
 | `GET /api/v1/server` | how to connect: the SFTP address and profile, the control hosts, the host keys, the users and how each logs in, the default login if it is in use, the read-only paths and the workspace |
 | `GET /api/v1/status` | the state of the SFTP server, the backend and the current run |
-| `POST /api/v1/reset` | ends the current run and starts the next, then answers as `status` does |
-| `GET`, `PUT`, `DELETE /api/v1/next` | the rules and chaos [queued for the next reset](#queuing-the-next-run), which `PUT` sets and `DELETE` clears |
-| `POST /api/v1/rules/check` | checks rules and chaos as a change of rules would, without applying them, and answers with them in the long form |
-| `GET /api/v1/runs/{id}/rules` | the run's rules and chaos, their revision and what each rule has done |
+| `POST /api/v1/reset` | [ends the current run and starts the next](#resetting-a-run), then answers as `status` does |
+| `GET`, `PUT`, `DELETE /api/v1/next` | the rules and chaos [queued for the next reset](#queuing-the-next-run) |
+| `POST /api/v1/rules/check` | checks rules and chaos without applying them, and answers with them in the long form |
+| `GET /api/v1/runs/{id}/rules` | the run's rules, chaos and assertions, their revision and what each rule has done |
 | `PUT /api/v1/runs/{id}/rules` | replaces the run's rules [during the run](#changing-the-rules-during-a-run) |
-| `POST /api/v1/runs/{id}/release-stalls` | releases the run's stalls and frozen connections, then answers as `status` does |
-| `POST /api/v1/runs/{id}/drain` | closes admission, gives clients `timeout` to close their files, by default 10s, then ends every connection, and answers with the paths left `unfinished` |
+| `POST /api/v1/runs/{id}/release-stalls` | [releases](#releasing-stalls) the run's stalls and frozen connections, then answers as `status` does |
+| `POST /api/v1/runs/{id}/drain` | closes admission, gives clients `timeout` (10s by default) to close their files, then ends every connection, and answers with the paths left `unfinished` |
 | `POST /api/v1/runs/{id}/assert` | drains the run and answers with [the report](#checking-a-run), with status 200 whether it passed or failed |
 | `GET /api/v1/runs/{id}/report` | the report of a run that has been asserted, as a download |
-| `GET /api/v1/runs/{id}/events` | what happened in the run, [page by page or as it happens](#events) |
+| `GET /api/v1/runs/{id}/events` | the run's [events](#events), page by page or as they happen |
 | `GET /api/v1/runs/{id}/trace` | every event of the run, as a [JSON Lines download](#the-trace) |
 | `GET /api/v1/runs/{id}/files` | the run's [files](#files), with their sizes, modes, times and, if asked, hashes |
 | `GET /api/v1/runs/{id}/files/content?path=…` | a file of the run, as a download |
@@ -565,34 +648,43 @@ curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/reset \
 }
 ```
 
-The state is `up`, `down` during an outage, with `down_until`, `resetting`, `draining` or `drained` once a [drain](#checking-a-run) has begun or ended, or `unavailable` once a reset has failed, with its `error`. Every run has a seed, a run without a scenario too, for rules applied to it later. A seed is written as a string, because JavaScript reads a number past 2^53 inexactly, and a request may give it as a number or a string. The `revision` is that of the run's rules. `stalled` counts the requests and replies that stalls hold now, and `frozen` the connections that freezes hold. `trace` describes the run's [trace](#the-trace). `queued` says whether rules are [queued for the next reset](#queuing-the-next-run).
+`state` is `up`, `down` during an outage, `resetting`, `draining`, `drained` after a [drain](#checking-a-run), or `unavailable` after a failed reset, with its `error`. Seeds are strings, since JavaScript can't read integers above 2^53 exactly; requests may send either. `stalled` and `frozen` count what stalls and freezes are holding now.
 
-**A reset:**
-- **Closes admission.** The port stays open, and a connection made during the reset is closed before its handshake. An outage ends.
-- **Ends the run.** Every connection is closed, as at a `close_connection`, and the run's timers stop. The reset then waits, for up to 30 s, until every session has finished, so no client of the run can still change its files. The run's files stay among the workspace's last five runs.
-- **Starts the next run.** Its files are a copy of the [seed's snapshot](#a-plain-server), its counters start from zero, and its timers count from its start. Then connections are admitted again.
+### Who can call the API
+
+The API answers only requests addressed to `localhost`, a loopback address or a name given with `--control-host`, so a web page can't reach it by DNS rebinding. Every request except `GET`, `HEAD` and `OPTIONS` needs an `Sftpit-Control` header with any non-empty value. A page on another origin can't send that header, and a browser request from another origin is refused. Other users of the same machine can reach the API, as they can any loopback port.
+
+Errors are answered as `{"error": "..."}`. The exceptions are an unknown route, answered with a plain-text 404, and a method the route doesn't take, answered with a plain-text 405.
+
+### Resetting a run
+
+`POST /api/v1/reset`:
+1. **Closes admission.** Connections made during the reset are closed before their handshake. An outage ends.
+2. **Ends the run.** Every connection closes, and the reset waits up to 30 s for every session to finish, so no client can still change the run's files. The run stays among the workspace's last five.
+3. **Starts the next run** from a fresh copy of the [seed](#seed-files), with counters and timers from zero, and admits connections again.
 
 Every field of the body is optional:
-- `run` is the run the reset expects to end. If another run is current, the reset is refused with status 409.
-- `scenario` names the next run's scenario, or `""` for none. Without it, the next run starts with the [queued](#queuing-the-next-run) rules if any are queued, or else repeats the current scenario, and its seed if that was pinned.
-- `faults` and `chaos` give the next run's rules and [chaos](#chaos) in place of a named scenario, as a [change of rules](#changing-the-rules-during-a-run) does, so a test can start from rules of its own. Status then shows `"inline": true`, and a reset without `scenario`, `faults` or `chaos` repeats them.
-- `seed` pins the next run's random decisions. Without it, the scenario's own seed does, or the run draws a fresh one.
+- **`run`** is the run the reset expects to end. If another run is current, the reset is refused with 409.
+- **`scenario`** names the next run's scenario, or `""` for none. Without it, the next run uses the [queued](#queuing-the-next-run) rules if there are any, or else repeats the current scenario, with its seed if pinned.
+- **`faults`** and **`chaos`** give the next run's rules inline, in the form a [change of rules](#changing-the-rules-during-a-run) takes. A later reset without `scenario`, `faults` or `chaos` repeats them.
+- **`seed`** pins the next run's random decisions. Without it, the scenario's seed applies, or the run draws a fresh one.
 
-An unknown scenario, a seed without one, `scenario` with `faults` or `chaos`, invalid rules or chaos, or a scenario file that no longer holds a valid scenario are refused with status 400 and leave the run alone. The configuration's scenarios are those of the file as it was at startup, so a change to it needs a restart, but a [scenario file](#scenario-files) is read each time a run starts, so a save or an edit applies at the next reset.
+Invalid requests are refused with 400 and leave the run alone. The configuration's scenarios are read at startup, but [scenario files](#scenario-files) are read when each run starts, so an edit to one applies at the next reset. If a reset fails after closing admission, admission stays closed, `status` says `unavailable`, and a later reset tries again.
 
 ### Queuing the next run
 
-`PUT /api/v1/next` queues rules and chaos, as a [change of rules](#changing-the-rules-during-a-run) gives them, for the next reset that names no scenario and gives none inline, whether that reset comes from the dashboard, `sftpit reset` or a test suite. The current run is left as it is. `GET /api/v1/next` answers with what is queued, in the long form, or 404, and `DELETE /api/v1/next` clears it. Every reset that succeeds clears the queue, one that names a scenario too, and a refused reset leaves it. The run it starts shows `"inline": true`, and the reset's `seed` pins it as for any inline scenario.
+`PUT /api/v1/next` queues rules and chaos, in the form a [change of rules](#changing-the-rules-during-a-run) takes, for the next reset that names no scenario and gives no rules inline. That reset can come from the dashboard, `sftpit reset` or a test suite. The current run is unaffected.
 
-`POST /api/v1/rules/check` takes the same body and answers with the rules and chaos in the long form, recipes written out, with the rules a chaos compiles to as `compiled_chaos`, or with 400 and the error a change would give. Nothing changes, so the dashboard previews a rule with it before applying it.
+- `GET /api/v1/next` answers with what is queued, in the long form, or with 404.
+- `DELETE /api/v1/next` clears the queue.
+- Every successful reset clears the queue, including one that names a scenario. A refused reset leaves it.
+- The run started from the queue shows `"inline": true`, and the reset's `seed` pins it as for any inline rules.
 
-If a reset fails once it has closed admission, because a session outlasted the 30 s or the seed's snapshot has changed on disk, admission stays closed. `status` then says `unavailable`, `ready` answers 503, and a later reset tries again.
-
-**Who can use it:** the API answers only requests addressed to `localhost`, a loopback address or a name given with `--control-host`, so a web page cannot reach it by DNS rebinding. Any request but a `GET`, `HEAD` or `OPTIONS` needs the `Sftpit-Control` header, with any non-empty value, which a page on another origin cannot send, and one that a browser makes from another origin is refused. Other users of the same machine can reach it, as they can any loopback port. An error is answered as `{"error": "..."}`, except that a request that passes these checks gets a plain-text 404 for an unknown route, and a plain-text 405 for a method its route does not take.
+`POST /api/v1/rules/check` takes the same body and answers with the rules in the long form, recipes written out, and the rules chaos compiles to as `compiled_chaos`. If the rules are invalid, it answers 400 with the error a change would give. Nothing changes; the dashboard uses it to preview a rule.
 
 ### Changing the rules during a run
 
-`PUT /api/v1/runs/{id}/rules` replaces the current run's rules, all at once between two requests, without a reset. Its body gives the `revision` of the rules it replaces, the new rules as a scenario's `faults`, in JSON, in the long form or as recipes, and optionally the run's [`chaos`](#chaos):
+`PUT /api/v1/runs/{id}/rules` replaces the current run's rules between two requests, without a reset. The body gives the `revision` of the rules it replaces, the new rules as a scenario's `faults` in JSON, in the long form or as recipes, and optionally the run's [`chaos`](#chaos):
 
 ```bash
 curl -X PUT -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/rules -d '{
@@ -603,7 +695,7 @@ curl -X PUT -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/v1/runs/20261024-19
 }'
 ```
 
-It answers as `GET` on the same route does, with the rules' revision, the run's `chaos`, if it has any, with every default spelled out, the rules in the long form, in the order they are tried, and what each rule has done so far, chaos's included:
+It answers as `GET` on the same route does: the rules' revision, the run's `chaos` with every default spelled out, the rules in the long form in the order they are tried, and what each rule has done so far, chaos's included:
 
 ```json
 {
@@ -619,21 +711,20 @@ It answers as `GET` on the same route does, with the rules' revision, the run's 
 }
 ```
 
-- **Revisions:** the rules a run starts with are revision 1, and each change adds one. A change based on another revision, such as from a second dashboard tab, is refused with status 409, as is one for a run that is no longer current. Invalid rules are refused with 400, with the message the config file would give. Either way, nothing changes. The `faults` and `chaos` that a `GET` returns can be sent back as they are.
-- **Chaos** is replaced as the rules are: a change without `chaos` ends it, and one that only sets `paused` pauses or resumes it, keeping its rules' counts.
-- **A rule that carries on**, with the same ID and definition, keeps its counts, attempts, occurrences and moments.
-- **Any other rule starts from the change.** Its first attempt is the next open, a trigger anchored to the run measures from the change, and its random decisions differ from those of an earlier rule with the same ID.
-- **A rule that goes** releases what it holds: a delayed request or reply goes on, and a frozen connection is closed. Each counts as `canceled`. None of its moments come. A transfer it chose keeps its partial upload or corruption, so a download is never corrupted only in part, and an outage it started runs its course.
-- **Sessions already open** get the new rules from their next request, and a connection action at a moment of the run or the connection reaches them too.
-- **A reset** starts the next run with its scenario's rules, whatever changed during this one. Use a reset when a test needs a clean start that it can repeat.
+- **Revisions:** a run starts at revision 1, and each change adds one. A change based on an older revision, such as from a second dashboard tab, or to a run that is no longer current, is refused with 409. Invalid rules are refused with 400. The `faults` and `chaos` a `GET` returns can be sent back as they are.
+- **Chaos** is replaced along with the rules: a change without `chaos` ends it.
+- **A rule that stays,** with the same ID and definition, keeps its counts, attempts and moments. Any other rule starts counting from the change, and draws different random decisions from an earlier rule with the same ID.
+- **A removed rule** releases delayed requests and closes frozen connections. A transfer it already chose keeps its partial upload or corruption, and an outage it started runs its course.
+- **Open sessions** get the new rules from their next request.
+- **A reset** starts the next run with its scenario's rules, whatever changed during this run.
 
 ### Releasing stalls
 
-`POST /api/v1/runs/{id}/release-stalls` releases every stall and frozen connection of the run that is in progress, whichever rule chose it: a stalled request or reply goes on, and a frozen connection is closed, as at its limit. A stall that begins later holds as usual, and a delay runs its course. Each release is logged as `fault released`. A run that is no longer current is refused with status 409.
+`POST /api/v1/runs/{id}/release-stalls` releases every stall and frozen connection of the current run, whichever rule chose it. A stalled request or reply goes on, and a frozen connection is closed as at its limit. Later stalls hold as usual, and delays run their course. Each release is logged as `fault released`. A run that is no longer current is refused with 409.
 
 ### Events
 
-Each run records what happens in it, numbered from 1, and the API keeps the latest 10,000 events of each of the last five runs in memory. `GET /api/v1/runs/{id}/events` answers with a page of them, oldest first:
+Each run records what happens in it as events numbered from 1, and the API keeps the latest 10,000 events of each of the last five runs in memory. `GET /api/v1/runs/{id}/events` answers with a page of them, oldest first:
 
 ```bash
 curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/events?kind=fault,operation&path=/incoming/orders.csv.part'
@@ -658,37 +749,35 @@ curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/events?kind=fau
 }
 ```
 
-The kinds of event:
-
 | Kind | Records |
 |---|---|
 | `run_started` | the run's ID, scenario and seed, and the rules and chaos it starts with |
 | `connected`, `authenticated`, `disconnected` | each connection as it is accepted, logs in and ends, with the user and, for a key, its fingerprint |
-| `operation` | each request as its reply is sent, so a query made once the client has the reply finds it: the `reply`, what the backend answered as `backend_reply` if the request reached it, how long it took, the `rule` whose fault acted on it, and the `read_only` path that refused it |
-| `transfer` | the reads and writes through a file handle, summed once it is closed or its session ends |
-| `fault` | each fault as it takes effect, with its rule, type, when it acts and its settings |
+| `operation` | each request, once its reply is sent: the `reply`, the backend's answer as `backend_reply` if the request reached it, how long it took, the `rule` whose fault acted on it, and the `read_only` path that refused it |
+| `transfer` | the reads and writes through a file handle, summed when it is closed or its session ends |
+| `fault` | each fault as it takes effect, with its rule, type, timing and settings |
 | `fault_ended` | the end of a delay, stall or freeze: `elapsed`, `limit`, `released` by `release-stalls`, `canceled` by a change of rules, or `session_ended` |
-| `suppressed` | a fault whose rule did not inject it when its moment came: `removed`, `paused` or `max_triggers` |
-| `decision` | each random decision a rule drew from the seed, with its draw from 0 up to 1 and what it decided |
+| `suppressed` | a fault its rule didn't inject when its moment came: `removed`, `paused` or `max_triggers` |
+| `decision` | each random decision drawn from the seed, with the draw, from 0 up to 1, and what it decided |
 | `rules_changed` | a change of the run's rules, with the revision it replaced and the new rules and chaos |
-| `snapshot` | a snapshot of a file that a faulted handle left behind: its size and SHA-256, the path of its copy if the run kept one, and what closed the handle |
+| `snapshot` | a file a faulted handle left behind: its size and SHA-256, the path of its copy if the run kept one, and what closed the handle |
 
-- **Reads and writes** that succeed and that no fault touches are summed into their handle's `transfer`, so a large upload is one event, not thousands. One that a fault touches, or that fails, is an `operation` of its own.
-- **A request whose reply never left**, because a fault closed the connection first, has no `operation`; its `fault` explains why.
-- **Filters:** `kind`, a list separated by commas, `connection`, `user`, `path`, which matches a rename's target too, and `rule`. `limit` sets the page size, 500 by default and at most 5000, and `after` the ID to continue after: the page's `next`. Events before `first_id` are gone.
-- **Live:** with `Accept: text/event-stream`, the same route streams the events as [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html), each with its ID, from `after` or the `Last-Event-ID` a browser sends when it reconnects. A `gap` event says that events it asked for are gone, and an `end` event that the run has ended, after which the next run's events are at its own route.
+- **Reads and writes** that succeed without a fault are summed into their handle's `transfer`, so a large upload is one event.
+- **A request whose reply was never sent,** because a fault closed the connection first, has no `operation`; its `fault` explains why.
+- **Filters:** `kind` (comma-separated), `connection`, `user`, `path` (a rename's target too) and `rule`. `limit` sets the page size (500 by default, at most 5000), and `after` continues from a page's `next`.
+- **Live:** with `Accept: text/event-stream`, the route streams the events as server-sent events. A `gap` event says requested events are gone, and an `end` event that the run has ended.
 
-The events are also the evidence for a run that has ended: a reset keeps them, along with the run's files. Unknown runs, and runs older than the last five, are answered with 404.
+A reset keeps a run's events, along with its files, as evidence. Unknown runs, and runs older than the last five, are answered with 404.
 
 ### The trace
 
-Each run also writes every event to `events.jsonl` in its directory, one JSON object a line, in the form the events route gives them. `GET /api/v1/runs/{id}/trace` downloads it, for the current run or any of the last five that the workspace keeps, those of an earlier `serve` with `--data-dir` too. While a run is writing, the download holds the whole lines so far.
+Each run also writes every event to `events.jsonl` in its directory, one JSON object per line, in the form the events route gives. `GET /api/v1/runs/{id}/trace` downloads it, for the current run or any of the last five in the workspace, including those of an earlier `serve` with `--data-dir`. While a run is still writing, the download holds the complete lines so far.
 
-The trace stops at `events.max_disk_bytes`, 64 MiB by default, so the last five runs take at most about five times that. A trace that reaches its bound ends with a `trace_full` line whose `id` is the first event it left out, and `complete` is `false` in the status of the current run. An error writing the file stops the trace too, and `error` in the status gives it. The dashboard and the events route still have the latest 10,000 events either way.
+The trace stops at `events.max_disk_bytes`, 64 MiB by default, so the last five runs take at most about five times that. A trace that reaches its limit ends with a `trace_full` line whose `id` is the first event left out, and the current run's status shows `complete: false`. An error writing the file stops the trace too, and the status's `error` gives it. The dashboard and the events route still have the latest 10,000 events either way.
 
 ### Files
 
-`GET /api/v1/runs/{id}/files` lists a run's files and directories as its clients see them, sorted by path, for the current run or any of the last five that the workspace keeps:
+`GET /api/v1/runs/{id}/files` lists a run's files and directories as clients see them, sorted by path, for the current run or any of the last five in the workspace:
 
 ```bash
 curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/files?path=/incoming&hash=true'
@@ -704,17 +793,17 @@ curl 'http://127.0.0.1:8122/api/v1/runs/20261024-192538.677-3ad8/files?path=/inc
 }
 ```
 
-- `path` lists that file or directory and everything beneath it, `/` by default. `hash=true` adds each file's SHA-256, which reads every file listed.
-- `live` is set for the current run, whose files clients can still change, so its sizes and hashes are those of the moment. Nothing is held back while they are read. Those of a run that has ended are final.
-- `seed` marks a file at a path the [seed](#a-plain-server) also holds: `unchanged`, or `changed` if its size differs, or its hash when hashes are asked for, or otherwise its modification time. A client that rewrites a file with the same content changes its time, so only a hash shows that its content is the same.
+- **`path`** limits the listing to that file or directory and everything below it. **`hash=true`** adds each file's SHA-256.
+- **`live`** is set for the current run, whose files may still change.
+- **`seed`** marks a file at a path the [seed](#seed-files) also holds as `unchanged` or `changed`, judged by size, hash if hashes were asked for, or modification time.
 
-`GET /api/v1/runs/{id}/files/content?path=…` sends a file as a download: `application/octet-stream`, as an attachment, with `nosniff` and a content security policy that sandboxes it, so a browser never displays or runs it. It answers range requests, so `Range: bytes=0-4095` previews the start of a file. A missing file is answered with 404, and a directory with 400.
+`GET /api/v1/runs/{id}/files/content?path=…` downloads a file, as an attachment a browser won't display or run. It answers range requests, so `Range: bytes=0-4095` previews the start of a file.
 
-When a fault leaves a file behind, the run [keeps a copy](#faults), up to 64 MiB of copies in all. `GET /api/v1/runs/{id}/snapshots` lists them, numbered in the order they were taken, with the path of the file and the copy's size, time and, with `hash=true`, SHA-256, and `GET /api/v1/runs/{id}/snapshots/{n}/content` downloads one as a file is downloaded. The run's `snapshot` events record every snapshot, with its size and SHA-256, those too large to copy included.
+`GET /api/v1/runs/{id}/snapshots` lists the copies of files that faults left behind (up to 64 MiB in all), and `GET /api/v1/runs/{id}/snapshots/{n}/content` downloads one. The run's `snapshot` events record every snapshot, including those too large to copy.
 
 ### Scenario files
 
-A scenario can also be a file of its own in `scenarios_dir`, named after the scenario: `scenarios/flaky-partner.yaml` holds `flaky-partner`. The directory is `./scenarios` next to the config file by default, or `./sftpit-scenarios` in the working directory without one. Committing it shares the scenarios with a team. A file holds one scenario, as the configuration's `scenarios` give one, with its own `schema_version`:
+A scenario can also be a file of its own in `scenarios_dir`, named after the scenario: `scenarios/flaky-partner.yaml` holds `flaky-partner`. The directory defaults to `./scenarios` next to the config file, or `./sftpit-scenarios` in the working directory without one. Commit it to share scenarios with a team. A file holds one scenario, in the form the configuration's `scenarios` use, with its own `schema_version`:
 
 ```yaml
 schema_version: 1
@@ -726,7 +815,7 @@ faults:
     action: { type: "fail", when: "before", status: "failure" }
 ```
 
-Every file is checked at startup with the configuration, and `serve`, `config validate` and `config explain` refuse a file that holds no valid scenario, or whose name is not a scenario name or is also a scenario of the configuration. Files whose names start with a dot, or do not end in `.yaml`, are not scenarios. `--scenario` and a reset choose a file's scenario as they do the configuration's, but read the file when the run starts, so a reset picks up a save or an edit without a restart.
+Files are checked at startup with the configuration, and a file that holds no valid scenario, or whose name clashes with a configured scenario, is an error. Files whose names start with a dot or don't end in `.yaml` are ignored. A run reads its scenario's file when it starts, so a reset picks up an edit without a restart.
 
 `GET /api/v1/scenarios` lists the configuration's scenarios and the files, sorted by name, with the directory:
 
@@ -740,9 +829,9 @@ Every file is checked at startup with the configuration, and `serve`, `config va
 }
 ```
 
-Each scenario's `faults` are in the long form, as a run's rules are, with its `chaos` if it has one. A file's `hash` is the SHA-256 of its content. A file that holds no valid scenario is listed with its `error` in place of the scenario.
+Each scenario's `faults` are in the long form, with its `chaos` if it has any. A file's `hash` is the SHA-256 of its content. A file without a valid scenario is listed with its `error` instead.
 
-`PUT /api/v1/scenarios/{name}` saves a scenario file. Its body gives the scenario as a [change of rules](#changing-the-rules-during-a-run) does, `faults` and optionally `chaos`, with an optional `description` and `seed`. To replace a file, it gives the file's `hash` too:
+`PUT /api/v1/scenarios/{name}` saves a scenario file. The body gives `faults` and optionally `chaos`, as a [change of rules](#changing-the-rules-during-a-run) does, with an optional `description` and `seed`. To replace an existing file, it also gives the file's `hash`:
 
 ```bash
 curl -X PUT http://127.0.0.1:8122/api/v1/scenarios/flaky-partner \
@@ -750,107 +839,57 @@ curl -X PUT http://127.0.0.1:8122/api/v1/scenarios/flaky-partner \
   -d '{"hash": "5e1a...", "description": "Partner B'"'"'s listings fail, then recover.", "seed": 7, "faults": [...]}'
 ```
 
-- **It answers** with the saved scenario as the listing gives it, and status 201 for a new file or 200 for one replaced. The run goes on with its rules: the next run of the scenario has the new ones.
-- **A file changed since it was read is never overwritten.** A save without a `hash` over a file that exists, with one that does not match the file, or with one for a file that is gone is refused with 409, and the file is left as it is. List the scenarios again to see the file as it is now.
-- **The configuration is never rewritten.** A save of a scenario that the configuration defines is refused with 409, so a configured scenario is copied to a file under another name to change it there.
-- **sftpit writes the whole file,** with a header saying so, its rules in the long form, through a temporary file renamed over the old one, so a reader never sees half a file. Comments are not kept, so notes belong in `description`.
-- **Saving the live rules:** the body of `GET /api/v1/runs/{id}/rules`, its `faults` and `chaos`, is a valid body for a save, which turns rules changed during a run into a scenario that a reset can repeat.
-- A name holds only lowercase letters, digits and `-`, so a file can never land outside the directory. A bad name, rules or chaos are refused with 400. The directory is made on the first save.
+- **Responses:** 201 for a new file, 200 for a replaced one. The current run keeps its rules; the next run of the scenario gets the new ones.
+- **Conflicts:** a save over an existing file without a matching `hash` is refused with 409, so a file that changed since it was read is never overwritten. So is a save of a scenario the configuration defines, since sftpit never rewrites the configuration.
+- **Format:** sftpit writes the whole file atomically, in the long form. Comments aren't kept, so put notes in `description`.
+- **Live rules:** the `faults` and `chaos` from `GET /api/v1/runs/{id}/rules` are a valid body, which turns rules changed during a run into a repeatable scenario.
+- **Names** hold only lowercase letters, digits and `-`.
 
-### In a test harness
+## Differences from OpenSSH
 
-A harness that starts sftpit can take free ports and learn them from a ready file, rather than sleeping for a while and hoping:
-
-```bash
-sftpit serve --config ./sftpit.yaml --scenario upload-recovery --seed 481516 \
-  --sftp-listen 127.0.0.1:0 --http-listen 127.0.0.1:0 \
-  --ready-file ./work/sftpit-ready.json
-```
-
-Once both listeners are open, `serve` writes the ready file, all at once, so a reader never sees part of it:
-
-```json
-{
-  "sftp_address": "127.0.0.1:52341",
-  "http_address": "127.0.0.1:52342",
-  "workspace": "/tmp/sftpit-2585468165",
-  "host_keys": [
-    { "type": "ssh-ed25519", "fingerprint": "SHA256:..." },
-    { "type": "ssh-rsa", "fingerprint": "SHA256:..." }
-  ]
-}
-```
-
-It holds only what stays the same while sftpit runs, and no secrets; the current run comes from `status`. sftpit removes the file when it stops, and replaces a ready file that an earlier `serve` left behind, but refuses to start if the path holds any other file.
-
-Between tests, `sftpit reset` resets the run through the control API:
-
-```bash
-sftpit reset --ready-file ./work/sftpit-ready.json --scenario flaky-partner --seed 7
-```
-
-```text
-run 20261024-101500.123-3f9a: scenario flaky-partner, seed 7 (pinned)
-```
-
-`--scenario` and `--seed` choose the next run as the reset's body does, and `--scenario ""` starts one without faults. It exits with 2 when the reset is refused, such as for an unknown scenario, and with 3 when the ready file cannot be read, the server cannot be reached or the reset fails.
-
-At the end of a test, [`sftpit assert`](#checking-a-run) gives the verdict on the run through the same ready file.
-
-## Behavior
-
-With no faults, sftpit is a plain SFTP version 3 server that follows OpenSSH's `sftp-server` closely. The differences:
-- symlinks and hard links are not supported;
-- `statvfs@openssh.com`, which `df` uses, reports the storage limits instead of the host's disk;
-- ownership cannot be changed, though setting the owner and group a file already has succeeds;
+With no faults, sftpit is an SFTP version 3 server that follows OpenSSH's `sftp-server` closely, except:
+- symlinks and hard links aren't supported;
+- `statvfs@openssh.com`, which `df` uses, reports the storage limits, not the host's disk;
+- ownership can't be changed, though setting the owner and group a file already has succeeds;
 - the setuid, setgid and sticky bits are dropped from permissions;
-- paths are cleaned before they are used, so a trailing slash after a file name, or `..` after a directory that does not exist, is ignored where OpenSSH answers that there is no such file;
-- `posix-rename@openssh.com` does not replace an empty directory with another directory;
+- paths are cleaned before use, so a trailing slash after a file name, or `..` after a directory that doesn't exist, is ignored where OpenSSH answers that there is no such file;
+- `posix-rename@openssh.com` doesn't replace an empty directory with another directory;
 - the long names in listings, which are for display, show the owner and group as numbers;
-- names are encoded on the host, which shortens the longest name that fits, as [a plain server](#a-plain-server) explains.
+- names are [encoded on the host](#keeping-the-workspace), which shortens the longest name that fits.
 
-A standard rename fails when the target exists, while `posix-rename@openssh.com` replaces it.
+As on OpenSSH, a standard rename fails when the target exists, and `posix-rename@openssh.com` replaces it.
 
 ## Limitations
 
-sftpit is pre-alpha. These are the limits to know before relying on it:
-- **No releases yet.** Build it from a clone with Go 1.26 or later. The CLI, the configuration and the control API may still change.
-- **Linux and macOS only.** On Windows, run it in a container or under WSL2, as [with Docker Compose](#with-docker-compose).
-- **Local only.** sftpit listens on loopback addresses, or in a container on the container's own interfaces. It has no mode for serving other machines, and its control API has no authentication beyond [those checks](#control-api).
-- **Its own storage only.** Every run serves files from sftpit's workspace. It cannot yet sit in front of a real SFTP server and inject faults into that server's traffic.
-- **SFTP version 3,** with the differences from OpenSSH that [Behavior](#behavior) lists. No symlinks or hard links.
-- **One run at a time.** A server serves one run, which every client shares, so tests that need runs of their own in parallel need a server each. Port `0` and the ready file make that easy.
-- **Not every fault yet.** Files that grow while a consumer reads them, malformed replies and bandwidth limits are not supported.
-- **Time is approximate.** A time trigger fires when it says, but how far a transfer has got by then depends on the machine, and no tolerance has been measured yet. Cut at a byte offset to test what a file holds.
-- **Resets vary.** What a client reports, and how much of a download it keeps, after a TCP reset differs from run to run, because the operating system may discard data the client had not read yet.
-- **The clients tested** are OpenSSH's `sftp`, phpseclib 2 and 3, Go's pkg/sftp, and curl's libssh2 in the container check. Java, .NET and Python clients have not been tested.
-- **Evidence is per run.** Each run's trace stops at 64 MiB by default, and says it is incomplete if it does. There is no export that bundles a failed run for someone else yet.
+- **No releases yet.** Build from a clone. The CLI, configuration and control API may still change.
+- **Linux and macOS only.** On Windows, run it in a container or under WSL2.
+- **Local only.** sftpit listens on loopback addresses or a container's own interfaces, and the control API has no authentication beyond [the host and header checks](#who-can-call-the-api).
+- **Its own storage only.** sftpit can't yet sit in front of a real SFTP server.
+- **One run at a time.** Every client shares the server's run, so tests that need separate runs in parallel need a server each. Port `0` and the ready file make that easy.
+- **Missing faults:** files that grow while a consumer reads them, malformed replies and bandwidth limits.
+- **Time is approximate.** How far a transfer has got when a time trigger fires depends on the machine. Cut at a byte offset to test what a file holds.
+- **TCP resets vary.** What a client reports after a reset, and how much of a download it keeps, varies from run to run, because the operating system may discard data the client hadn't read.
+- **Tested clients:** OpenSSH's `sftp`, phpseclib 2 and 3, Go's pkg/sftp and curl's libssh2. Java, .NET and Python clients are untested.
+- **No bundled export** of a failed run for sharing yet.
 
 ## Development
 
-sftpit runs on Linux and macOS, and building it requires Go 1.26 or later.
+Building sftpit needs Go 1.26 or later, on Linux or macOS.
 
 ```bash
 make check
 ```
 
-`make check` runs the gofmt check, a check that `go fix` has nothing to change, a check that `go.mod` is tidy, `go vet`, golangci-lint with the linters in `.golangci.yml`, staticcheck's full checks among them, the tests with the race detector, and the dashboard's tests, which need Node 20 or later and use only its own test runner. `make lint` builds the version of golangci-lint that the Makefile pins, so it needs no install. `make vuln` scans for known vulnerabilities with govulncheck. `make build` writes the binary to `bin/sftpit`.
+`make check` runs gofmt, `go fix`, `go mod tidy`, `go vet` and golangci-lint checks, the tests with the race detector, and the dashboard's tests, which need Node 20 or later. `make build` writes `bin/sftpit`.
 
-The integration tests in `test/integration` drive real SFTP clients against sftpit: OpenSSH's `sftp`, and the clients in `test/clients`, each in a container image of its own, so that they need Docker but no language runtime. A test skips when its client is missing. Build the clients' images with:
+- `make linux-check` runs `make check` in a Debian container, so the conformance tests run on macOS too.
+- `make clients` builds the client images the integration tests use.
+- `make image` builds `sftpit:local`, and `make container-check` runs [the compose example](#docker-compose) with curl as the application.
+- `make vuln` runs govulncheck.
 
-```bash
-make clients
-```
+The integration tests in `test/integration` drive real clients against sftpit: OpenSSH's `sftp`, and phpseclib 2 and 3 from container images, skipping a client whose image is missing. The conformance tests in `test/conformance` compare sftpit with OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed. Applications are tested against sftpit in repositories of their own, such as sftpit-laravel.
 
-Applications built on these clients, tested against sftpit from outside as a test suite would, live in repositories of their own, such as sftpit-laravel for Laravel's sftp disk.
-
-The conformance tests in `test/conformance` send the same requests to sftpit and to OpenSSH's `sftp-server`, and run only on Linux with `openssh-sftp-server` installed, since partners' servers run there.
-
-The dashboard is plain HTML, CSS and JavaScript modules in `internal/control/web`, with no build step and no packages, embedded in the binary, so a change to it needs a rebuild of sftpit. Its logic is in modules that do not touch the page, tested in `internal/control/web/test`.
-
-`make linux-check` runs `make check` in a Debian container with Docker, so the conformance tests run on macOS too. The tests of the clients in `test/clients` skip there.
-
-`make image` builds the container image `sftpit:local`, and `make container-check` runs [the compose example](#with-docker-compose) with it.
+The dashboard is plain HTML, CSS and JavaScript modules in `internal/control/web`, with no build step, embedded in the binary.
 
 ## License
 
