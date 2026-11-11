@@ -14,6 +14,7 @@ image:
 # OpenSSH's, whose tests skip without them.
 clients:
 	docker build --tag sftpit-phpseclib:local test/clients/phpseclib
+	docker build --tag sftpit-phpseclib2:local --build-arg DEPS=v2 --build-arg PHP_VERSION=8.1 test/clients/phpseclib
 
 test:
 	go test -race ./...

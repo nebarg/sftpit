@@ -259,6 +259,10 @@ faults:
 - With a FIN close, phpseclib throws `ConnectionClosedException`, having saved every byte below the cutoff. OpenSSH reports the close but may save fewer bytes than it was sent: of the 1 MiB below the cutoff, 576 KiB in every run on macOS, and from 960 KiB to all of it on Linux.
 - With a reset, what either client saves and reports varies from run to run.
 
+phpseclib 2, which code written before phpseclib 3 still runs, Flysystem 1's SFTP adapter among it, behaves as phpseclib 3 does, with these differences:
+- **A lost connection:** it returns `false` where phpseclib 3 throws. It says why only in PHP notices, such as `Connection closed (by server) prematurely`, which a framework's error handler may turn into exceptions. After a reset part way through an upload it gives no reason at all.
+- **Renames:** it has no `posix_rename()`.
+
 `corrupt_upload` changes what is stored while the client is told every write succeeded, as a partner's system that loses or damages part of a file does. Each write is judged by its own offset and length, so the stored file is the same however a client splits, orders or pipelines its writes. Only an application that checks what it stored, by its size, a checksum or reading it back, can tell: Laravel's `writeStream()` returns `true`, and an uploader that then compares `Storage::size()` with the local file's size catches the truncation and uploads again. The handle's snapshot records the corrupted file.
 
 `deny_acknowledgement` refuses a consumer's acknowledgement of a file it has processed: the remove, or the rename into an archive, whose source the location fields match. A denied acknowledgement leaves the file in place, so the consumer's next poll finds it again. Laravel's sftp disk never hears of it: Flysystem's SFTP adapter ignores a failed remove, so `Storage::delete()` returns `true`, and only a consumer that remembers what it has processed avoids processing the file twice.

@@ -29,26 +29,27 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 		// exact is set where a client stores every byte below the cutoff,
 		// and unset where it may store fewer, which are still a prefix.
 		exact map[string]bool
-		// openSSH is what OpenSSH's sftp prints, and phpseclib what its
-		// get() returns, or the exception it throws.
+		// openSSH is what OpenSSH's sftp prints, and phpseclib what get()
+		// returns in each version, or the exception it throws.
 		openSSH   string
-		phpseclib string
+		phpseclib map[string]string
 	}{
 		{
 			name:      "fail",
 			result:    sftpproxy.Fail{Status: sftpwire.StatusFailure},
-			exact:     map[string]bool{"OpenSSH": true, "phpseclib": true},
+			exact:     map[string]bool{"OpenSSH": true, "phpseclib": true, "phpseclib2": true},
 			openSSH:   `read remote "/orders.csv" : Failure`,
-			phpseclib: "true",
+			phpseclib: map[string]string{"phpseclib": "true", "phpseclib2": "true"},
 		},
 		// OpenSSH's ssh exits when the server closes the connection, losing
 		// data it had received but not yet passed to sftp.
 		{
-			name:      "drop",
-			result:    sftpproxy.Drop{},
-			exact:     map[string]bool{"phpseclib": true},
-			openSSH:   "closed by remote host",
-			phpseclib: "phpseclib3\\Exception\\ConnectionClosedException",
+			name:    "drop",
+			result:  sftpproxy.Drop{},
+			exact:   map[string]bool{"phpseclib": true, "phpseclib2": true},
+			openSSH: "closed by remote host",
+			// phpseclib 2 returns false, with a notice.
+			phpseclib: map[string]string{"phpseclib": "phpseclib3\\Exception\\ConnectionClosedException", "phpseclib2": "false"},
 		},
 		// A reset can discard data the client's host had received, so
 		// neither client reliably stores it all, and what each reports
@@ -122,24 +123,26 @@ func TestClientsOnACutOffDownload(t *testing.T) {
 				assertHolds(t, srv, "/orders.csv", data)
 			})
 
-			t.Run("phpseclib/"+name, func(t *testing.T) {
-				t.Parallel()
-				phpseclibOrSkip(t)
-				srv := start(t)
-				work := t.TempDir()
-				entries := decodeTranscript(t, runPhpseclib(t, srv, "transfer.php", work, "get"))
-				got := "true"
-				if thrown, ok := entries[0].Result.(map[string]any); ok {
-					got, _ = thrown["exception"].(string)
-				} else if entries[0].Result != true {
-					got = "false"
-				}
-				if tt.phpseclib != "" && got != tt.phpseclib {
-					t.Errorf("phpseclib get gave %s, want %s", got, tt.phpseclib)
-				}
-				assertSavedPrefix(t, filepath.Join(work, "orders.csv"), partial, tt.exact["phpseclib"])
-				assertHolds(t, srv, "/orders.csv", data)
-			})
+			for _, p := range phpseclibs {
+				t.Run(p.name+"/"+name, func(t *testing.T) {
+					t.Parallel()
+					p.orSkip(t)
+					srv := start(t)
+					work := t.TempDir()
+					entries := decodeTranscript(t, p.run(t, srv, "transfer.php", work, "get"))
+					got := "true"
+					if thrown, ok := entries[0].Result.(map[string]any); ok {
+						got, _ = thrown["exception"].(string)
+					} else if entries[0].Result != true {
+						got = "false"
+					}
+					if want := tt.phpseclib[p.name]; want != "" && got != want {
+						t.Errorf("%s get gave %s, want %s", p.name, got, want)
+					}
+					assertSavedPrefix(t, filepath.Join(work, "orders.csv"), partial, tt.exact[p.name])
+					assertHolds(t, srv, "/orders.csv", data)
+				})
+			}
 		}
 	}
 }

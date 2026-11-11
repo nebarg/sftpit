@@ -28,7 +28,7 @@ func TestLaravelUploadRecovery(t *testing.T) {
 	// under the load of parallel tests publish.php's retry on a new
 	// connection can change the cut-off file before the first session,
 	// slowed down, snapshots it.
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	data := randomBytes(4<<20 + 321)
 	partial := data[:uploadCutoff]
@@ -138,7 +138,7 @@ func TestLaravelUploadRecovery(t *testing.T) {
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-			outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, tt.uploader))
+			outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, tt.uploader))
 			srv.waitForSessions()
 
 			if !maps.Equal(outcomes, tt.outcomes) {
@@ -166,7 +166,7 @@ func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
 	// under the load of parallel tests publish.php's retry on a new
 	// connection can change the cut-off file before the first session,
 	// slowed down, snapshots it.
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	opts := scenarioOptions(t, `  upload-recovery:
     faults:
@@ -191,7 +191,7 @@ func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
 	data := randomBytes(4<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": false, "upload 2": true, "move": true}; !maps.Equal(outcomes, want) {
@@ -215,7 +215,7 @@ func TestLaravelUploadRecoveryFromAScenario(t *testing.T) {
 // whole file.
 func TestLaravelUploadRecoveryFromASilentlyTruncatedUpload(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	const truncateAt = 3 << 20
 	data := randomBytes(4<<20 + 321)
@@ -253,7 +253,7 @@ func TestLaravelUploadRecoveryFromASilentlyTruncatedUpload(t *testing.T) {
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-			outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, tt.uploader))
+			outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, tt.uploader))
 			srv.waitForSessions()
 
 			if !maps.Equal(outcomes, tt.outcomes) {
@@ -277,7 +277,7 @@ func TestLaravelUploadRecoveryFromASilentlyTruncatedUpload(t *testing.T) {
 // the order of the requests on the published file and their results.
 func TestLaravelRepublishLosesThePublishedFile(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	seed := t.TempDir()
 	previous := randomBytes(64<<10 + 123)
@@ -303,7 +303,7 @@ func TestLaravelRepublishLosesThePublishedFile(t *testing.T) {
 	data := randomBytes(1<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": true, "move": false}; !maps.Equal(outcomes, want) {
@@ -369,7 +369,7 @@ func (l *requestLog) get() []string {
 // first two seconds of the run wait, so that the upload is still under way.
 func TestLaravelUploadRecoveryFromAResetMidUpload(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	opts := scenarioOptions(t, `  reset-mid-upload:
     faults:
@@ -389,7 +389,7 @@ func TestLaravelUploadRecoveryFromAResetMidUpload(t *testing.T) {
 	data := randomBytes(4<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": false, "upload 2": true, "move": true}; !maps.Equal(outcomes, want) {
@@ -418,7 +418,7 @@ func TestLaravelUploadRecoveryFromAResetMidUpload(t *testing.T) {
 // and publish the file.
 func TestLaravelReconnectsWhenItsFirstLoginsAreCutOff(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	opts := scenarioOptions(t, `  cut-off-logins:
     faults:
@@ -433,7 +433,7 @@ func TestLaravelReconnectsWhenItsFirstLoginsAreCutOff(t *testing.T) {
 	data := randomBytes(1<<20 + 321)
 	writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-	outcomes := phpseclibResults(t, runPhpseclib(t, srv, "publish.php", work, "recover"))
+	outcomes := phpseclibResults(t, phpseclib3.run(t, srv, "publish.php", work, "recover"))
 	srv.waitForSessions()
 
 	if want := map[string]any{"upload 1": true, "move": true}; !maps.Equal(outcomes, want) {

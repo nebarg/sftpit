@@ -26,8 +26,14 @@ var uploadClients = []struct {
 	{name: "OpenSSH", failedUpload: failedOpenSSHUpload, transfer: transferWithOpenSSH, closedBy: []string{"client"}},
 	{
 		name:         "phpseclib",
-		failedUpload: failedPhpseclibUpload,
-		transfer:     transferWithPhpseclib,
+		failedUpload: phpseclib3.failedUpload,
+		transfer:     phpseclib3.transfer,
+		closedBy:     phpseclibClosedBy,
+	},
+	{
+		name:         "phpseclib2",
+		failedUpload: phpseclib2.failedUpload,
+		transfer:     phpseclib2.transfer,
 		closedBy:     phpseclibClosedBy,
 	},
 }
@@ -48,6 +54,12 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 		// phpseclib says the connection closed "by server" or
 		// "prematurely", depending on where it was reading.
 		phpseclibClosed = `phpseclib3\Exception\ConnectionClosedException: Connection closed`
+		// phpseclib 2 returns false and raises notices instead, which say
+		// the same as phpseclib's exceptions, except after a reset, when it
+		// gives no reason at all.
+		phpseclib2ClosedByServer = "Connection closed (by server) prematurely"
+		phpseclib2Closed         = "Connection closed prematurely"
+		noReason                 = ""
 	)
 	results := []struct {
 		name   string
@@ -59,24 +71,27 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 			name:   "fail",
 			result: sftpproxy.Fail{Status: sftpwire.StatusFailure},
 			reports: map[string][]string{
-				"OpenSSH":   {`write remote "/orders.csv": Failure`},
-				"phpseclib": {"NET_SFTP_STATUS_FAILURE: Failure"},
+				"OpenSSH":    {`write remote "/orders.csv": Failure`},
+				"phpseclib":  {"NET_SFTP_STATUS_FAILURE: Failure"},
+				"phpseclib2": {"NET_SFTP_STATUS_FAILURE: Failure"},
 			},
 		},
 		{
 			name:   "drop",
 			result: sftpproxy.Drop{},
 			reports: map[string][]string{
-				"OpenSSH":   {normalClose},
-				"phpseclib": {phpseclibClosed},
+				"OpenSSH":    {normalClose},
+				"phpseclib":  {phpseclibClosed},
+				"phpseclib2": {phpseclib2ClosedByServer, phpseclib2Closed},
 			},
 		},
 		{
 			name:   "reset",
 			result: sftpproxy.Drop{Reset: true},
 			reports: map[string][]string{
-				"OpenSSH":   {reset, brokenPipe},
-				"phpseclib": {phpseclibWrite, phpseclibClosed},
+				"OpenSSH":    {reset, brokenPipe},
+				"phpseclib":  {phpseclibWrite, phpseclibClosed},
+				"phpseclib2": {noReason},
 			},
 		},
 	}
@@ -101,7 +116,7 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 					// once the client has gone.
 					srv.waitForSessions()
 					want := r.reports[c.name]
-					if !slices.ContainsFunc(want, func(w string) bool { return strings.Contains(report, w) }) {
+					if !slices.ContainsFunc(want, func(w string) bool { return reports(report, w) }) {
 						t.Errorf("%s reported %q, want one of %q", c.name, report, want)
 					}
 					assertHolds(t, srv, "/orders.csv", data[:uploadCutoff])
@@ -110,6 +125,15 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 			}
 		}
 	}
+}
+
+// reports reports whether a client's report says want, or says nothing if
+// want is empty.
+func reports(report, want string) bool {
+	if want == "" {
+		return report == ""
+	}
+	return strings.Contains(report, want)
 }
 
 // TestRetryLeavesThePartialUploadsSnapshot cuts off each client's first
@@ -162,16 +186,6 @@ func failedOpenSSHUpload(t *testing.T, srv *server, work string) string {
 	return string(out)
 }
 
-func failedPhpseclibUpload(t *testing.T, srv *server, work string) string {
-	t.Helper()
-	transcript := runPhpseclib(t, srv, "transfer.php", work, "put")
-	report, failed := phpseclibFailures(t, transcript)["put"]
-	if !failed {
-		t.Errorf("phpseclib put succeeded, want it to fail: %v", transcript)
-	}
-	return report
-}
-
 // onFirstUpload returns faults that apply action to the first OPEN of
 // /orders.csv, so that a retry succeeds.
 func onFirstUpload(action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fault {
@@ -218,7 +232,8 @@ func TestCorruptedUploadsAreTheSameForEveryClient(t *testing.T) {
 		closedBy []string
 	}{
 		{name: "OpenSSH", transfer: transferWithOpenSSH, closedBy: []string{"client"}},
-		{name: "phpseclib", transfer: transferWithPhpseclib, closedBy: phpseclibClosedBy},
+		{name: "phpseclib", transfer: phpseclib3.transfer, closedBy: phpseclibClosedBy},
+		{name: "phpseclib2", transfer: phpseclib2.transfer, closedBy: phpseclibClosedBy},
 	}
 
 	for _, c := range clients {

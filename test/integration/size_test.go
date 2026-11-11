@@ -79,25 +79,27 @@ func TestClientsReportTheWrongSize(t *testing.T) {
 			assertHolds(t, srv, "/orders.csv", data)
 		})
 
-		t.Run("phpseclib/"+tt.name, func(t *testing.T) {
-			t.Parallel()
-			phpseclibOrSkip(t)
-			srv := startServer(t, proxied, sftpproxy.Options{Faults: misreportSizeOf("/orders.csv", tt.wrongSize)})
-			writeFile(t, srv.path("/orders.csv"), data)
-			work := t.TempDir()
+		for _, p := range phpseclibs {
+			t.Run(p.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				p.orSkip(t)
+				srv := startServer(t, proxied, sftpproxy.Options{Faults: misreportSizeOf("/orders.csv", tt.wrongSize)})
+				writeFile(t, srv.path("/orders.csv"), data)
+				work := t.TempDir()
 
-			results := phpseclibResults(t, runPhpseclib(t, srv, "sizes.php", work))
-			for _, op := range []string{"stat", "lstat", "rawlist"} {
-				if got := results[op]; got != float64(tt.reported) {
-					t.Errorf("phpseclib %s gave size %v, want %d", op, got, tt.reported)
+				results := phpseclibResults(t, p.run(t, srv, "sizes.php", work))
+				for _, op := range []string{"stat", "lstat", "rawlist"} {
+					if got := results[op]; got != float64(tt.reported) {
+						t.Errorf("%s %s gave size %v, want %d", p.name, op, got, tt.reported)
+					}
 				}
-			}
-			if results["get"] != true {
-				t.Errorf("phpseclib get = %v, want true", results["get"])
-			}
-			assertDownloaded(t, filepath.Join(work, "orders.csv"), data)
-			assertHolds(t, srv, "/orders.csv", data)
-		})
+				if results["get"] != true {
+					t.Errorf("%s get = %v, want true", p.name, results["get"])
+				}
+				assertDownloaded(t, filepath.Join(work, "orders.csv"), data)
+				assertHolds(t, srv, "/orders.csv", data)
+			})
+		}
 	}
 }
 

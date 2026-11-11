@@ -6,6 +6,7 @@ package integration
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -561,19 +562,6 @@ func transferWithOpenSSH(tb testing.TB, srv *server, work string, upload bool) {
 	}
 }
 
-func transferWithPhpseclib(tb testing.TB, srv *server, work string, upload bool) {
-	tb.Helper()
-	phpseclibOrSkip(tb)
-	op := "get"
-	if upload {
-		op = "put"
-	}
-	transcript := runPhpseclib(tb, srv, "transfer.php", work, op)
-	if phpseclibResults(tb, transcript)[op] != true {
-		tb.Fatalf("phpseclib %s failed: %v", op, transcript)
-	}
-}
-
 // openSSHOrSkip returns the path of OpenSSH's sftp client, or skips the test
 // if it cannot run.
 func openSSHOrSkip(tb testing.TB) string {
@@ -633,33 +621,49 @@ func openSSHCommand(tb testing.TB, sftpPath string, srv *server, work, batch str
 	return cmd
 }
 
-// phpseclibImage is the image of the phpseclib client, which make clients
+// phpseclib is a major version of phpseclib, whose image make clients
 // builds from test/clients/phpseclib.
-const phpseclibImage = "sftpit-phpseclib:local"
+type phpseclib struct {
+	name  string
+	image string
+	// missing reports why the image cannot run, or nil.
+	missing func() error
+}
 
-// phpseclibImageMissing reports why the phpseclib client cannot run, or nil.
-var phpseclibImageMissing = sync.OnceValue(func() error {
-	return exec.Command("docker", "image", "inspect", phpseclibImage).Run()
-})
+func newPhpseclib(name, image string) *phpseclib {
+	return &phpseclib{name: name, image: image, missing: sync.OnceValue(func() error {
+		return exec.Command("docker", "image", "inspect", image).Run()
+	})}
+}
 
-// phpseclibOrSkip skips the test if the phpseclib client cannot run.
-func phpseclibOrSkip(tb testing.TB) {
+var (
+	phpseclib3 = newPhpseclib("phpseclib", "sftpit-phpseclib:local")
+	// phpseclib2 is the version that code from before phpseclib 3, such as
+	// Flysystem 1's SFTP adapter, still runs.
+	phpseclib2 = newPhpseclib("phpseclib2", "sftpit-phpseclib2:local")
+
+	// phpseclibs are the versions that the tests of every client run.
+	phpseclibs = []*phpseclib{phpseclib3, phpseclib2}
+)
+
+// orSkip skips the test if p cannot run.
+func (p *phpseclib) orSkip(tb testing.TB) {
 	tb.Helper()
 	if testing.Short() {
 		tb.Skip("runs phpseclib")
 	}
-	if err := phpseclibImageMissing(); err != nil {
-		tb.Skipf("the phpseclib client's image %s is missing (%v); run make clients", phpseclibImage, err)
+	if err := p.missing(); err != nil {
+		tb.Skipf("the %s client's image %s is missing (%v); run make clients", p.name, p.image, err)
 	}
 }
 
-// runPhpseclib runs one of the phpseclib client's scripts against srv with
-// work as its work directory and any further arguments, and returns what it
-// printed. The container shares the host's network, so it reaches srv on
-// loopback, and sees work and the host keys at the same paths.
-func runPhpseclib(tb testing.TB, srv *server, script, work string, args ...string) []line {
+// run runs one of p's scripts against srv with work as its work directory
+// and any further arguments, and returns what it printed. The container
+// shares the host's network, so it reaches srv on loopback, and sees work
+// and the host keys at the same paths.
+func (p *phpseclib) run(tb testing.TB, srv *server, script, work string, args ...string) []line {
 	tb.Helper()
-	phpseclibOrSkip(tb)
+	p.orSkip(tb)
 	var keys bytes.Buffer
 	for _, key := range hostKeys {
 		keys.Write(ssh.MarshalAuthorizedKey(key.PublicKey()))
@@ -670,11 +674,11 @@ func runPhpseclib(tb testing.TB, srv *server, script, work string, args ...strin
 
 	ctx, cancel := context.WithTimeout(tb.Context(), clientTimeout)
 	defer cancel()
-	name := fmt.Sprintf("sftpit-phpseclib-%d-%d", os.Getpid(), containers.Add(1))
+	name := fmt.Sprintf("sftpit-%s-%d-%d", p.name, os.Getpid(), containers.Add(1))
 	cmd := exec.CommandContext(ctx, "docker", append([]string{"run", "--rm", "--name", name,
 		"--network", "host", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"--volume", work + ":" + work, "--volume", keysDir + ":" + keysDir + ":ro",
-		phpseclibImage, script, "127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
+		p.image, script, "127.0.0.1", srv.port, testUser, testPassword, hostKeysFile, work}, args...)...)
 	// Killing docker run would leave the container running.
 	cmd.Cancel = func() error {
 		_ = exec.Command("docker", "rm", "--force", name).Run()
@@ -684,21 +688,48 @@ func runPhpseclib(tb testing.TB, srv *server, script, work string, args ...strin
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil || stderr.Len() > 0 {
-		tb.Fatalf("phpseclib %s: %v\nstdout:\n%s\nstderr:\n%s", script, err, out, stderr.Bytes())
+		tb.Fatalf("%s %s: %v\nstdout:\n%s\nstderr:\n%s", p.name, script, err, out, stderr.Bytes())
 	}
 	return splitLines(out)
+}
+
+// transfer uploads work/orders.csv to /orders.csv, or downloads it, and
+// fails the test unless that succeeds.
+func (p *phpseclib) transfer(tb testing.TB, srv *server, work string, upload bool) {
+	tb.Helper()
+	op := "get"
+	if upload {
+		op = "put"
+	}
+	transcript := p.run(tb, srv, "transfer.php", work, op)
+	if phpseclibResults(tb, transcript)[op] != true {
+		tb.Fatalf("%s %s failed: %v", p.name, op, transcript)
+	}
+}
+
+// failedUpload uploads work/orders.csv to /orders.csv, which must fail, and
+// returns what p reports.
+func (p *phpseclib) failedUpload(t *testing.T, srv *server, work string) string {
+	t.Helper()
+	transcript := p.run(t, srv, "transfer.php", work, "put")
+	report, failed := phpseclibFailures(t, transcript)["put"]
+	if !failed {
+		t.Errorf("%s put succeeded, want it to fail: %v", p.name, transcript)
+	}
+	return report
 }
 
 // containers numbers the phpseclib client's containers, so that each has a
 // name of its own.
 var containers atomic.Int64
 
-// transcriptEntry is one operation in a transcript: its result, and the
-// SFTP error for a false one.
+// transcriptEntry is one operation in a transcript: its result, the SFTP
+// error for a false one, and the notices phpseclib 2 raised on the way.
 type transcriptEntry struct {
-	Op     string `json:"op"`
-	Result any    `json:"result"`
-	Error  string `json:"error"`
+	Op      string   `json:"op"`
+	Result  any      `json:"result"`
+	Error   string   `json:"error"`
+	Notices []string `json:"notices"`
 }
 
 func decodeTranscript(tb testing.TB, transcript []line) []transcriptEntry {
@@ -725,13 +756,14 @@ func phpseclibResults(tb testing.TB, transcript []line) map[string]any {
 }
 
 // phpseclibFailures maps each operation in a transcript that failed to its
-// error: the SFTP error for a false result, or the exception it threw.
+// error: the SFTP error for a false result, or else its notices, or the
+// exception it threw.
 func phpseclibFailures(tb testing.TB, transcript []line) map[string]string {
 	tb.Helper()
 	byOp := make(map[string]string)
 	for _, entry := range decodeTranscript(tb, transcript) {
 		if entry.Result == false {
-			byOp[entry.Op] = entry.Error
+			byOp[entry.Op] = cmp.Or(entry.Error, strings.Join(entry.Notices, "; "))
 		} else if thrown, ok := entry.Result.(map[string]any); ok && thrown["exception"] != nil {
 			byOp[entry.Op] = fmt.Sprintf("%v: %v", thrown["exception"], thrown["message"])
 		}

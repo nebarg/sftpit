@@ -48,7 +48,8 @@ func TestCorruptedDownloadsAreTheSameForEveryClient(t *testing.T) {
 		transfer func(t testing.TB, srv *server, work string, upload bool)
 	}{
 		{name: "OpenSSH", transfer: transferWithOpenSSH},
-		{name: "phpseclib", transfer: transferWithPhpseclib},
+		{name: "phpseclib", transfer: phpseclib3.transfer},
+		{name: "phpseclib2", transfer: phpseclib2.transfer},
 	}
 
 	for _, c := range clients {

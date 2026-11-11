@@ -19,7 +19,7 @@ import (
 // poll, and the idempotent one only deletes it again.
 func TestLaravelConsumerAcknowledgementDenied(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	seed := t.TempDir()
 	data := randomBytes(64<<10 + 321)
@@ -50,7 +50,7 @@ func TestLaravelConsumerAcknowledgementDenied(t *testing.T) {
 			opts.SeedDir = seed
 			_, srv := startRuns(t, opts)
 
-			transcript := runPhpseclib(t, srv, "consume.php", t.TempDir(), tt.consumer, "3")
+			transcript := phpseclib3.run(t, srv, "consume.php", t.TempDir(), tt.consumer, "3")
 			srv.waitForSessions()
 
 			want := []line{
@@ -96,7 +96,7 @@ func step(tb testing.TB, op string, result any) line {
 // whole.
 func TestLaravelConsumerOfACutOffDownload(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
+	phpseclib3.orSkip(t)
 
 	seed := t.TempDir()
 	data := randomBytes(4<<20 + 321)
@@ -136,7 +136,7 @@ func TestLaravelConsumerOfACutOffDownload(t *testing.T) {
 			opts.SeedDir = seed
 			_, srv := startRuns(t, opts)
 
-			transcript := runPhpseclib(t, srv, "consume.php", t.TempDir(), tt.consumer, "2")
+			transcript := phpseclib3.run(t, srv, "consume.php", t.TempDir(), tt.consumer, "2")
 			srv.waitForSessions()
 
 			if got, want := lines(transcript), lines(tt.want); got != want {

@@ -1,0 +1,13 @@
+{
+    "description": "phpseclib 2 for sftpit's integration tests, as code that predates phpseclib 3 runs it. No 2.0 release fixes CVE-2026-84308, a timing leak in key exchange, which does not matter to a test client of a local server.",
+    "require": {
+        "php": ">=8.1",
+        "phpseclib/phpseclib": "2.0.56"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.1.0"
+        }
+    }
+}

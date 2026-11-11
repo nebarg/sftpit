@@ -10,6 +10,34 @@ use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Filesystem\FilesystemManager;
 use phpseclib3\Net\SFTP;
 
+// phpseclib 2's SFTP class, under the name phpseclib 3 gives it, so that the
+// scripts run with either.
+if (!class_exists(SFTP::class)) {
+    class_alias(\phpseclib\Net\SFTP::class, SFTP::class);
+}
+
+// phpseclib 2 reports a lost connection with user_error, which PHP would
+// print. Each notice is kept instead, for the transcript's next line, and
+// any left at the end make a line of their own.
+$GLOBALS['notices'] = [];
+set_error_handler(function (int $level, string $message): bool {
+    $GLOBALS['notices'][] = $message;
+    return true;
+}, E_USER_NOTICE | E_USER_WARNING);
+register_shutdown_function(function (): void {
+    if ($GLOBALS['notices'] !== []) {
+        echo json_encode(['op' => 'end', 'notices' => takeNotices()], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR), "\n";
+    }
+});
+
+// takeNotices returns the notices kept since it was last called.
+function takeNotices(): array
+{
+    $notices = $GLOBALS['notices'];
+    $GLOBALS['notices'] = [];
+    return $notices;
+}
+
 // connect logs in with the script's arguments, and exits if the server's
 // host key is not in $hostKeysFile, which uses authorized_keys format, or the
 // login fails.
@@ -46,6 +74,10 @@ function record(SFTP $sftp, string $op, mixed $result): void
     $line = ['op' => $op, 'result' => $result];
     if ($result === false) {
         $line['error'] = $sftp->getLastSFTPError();
+    }
+    $notices = takeNotices();
+    if ($notices !== []) {
+        $line['notices'] = $notices;
     }
     echo json_encode($line, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR), "\n";
 }

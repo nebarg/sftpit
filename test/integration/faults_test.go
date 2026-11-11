@@ -93,17 +93,23 @@ func TestOpenSSHRenameFaults(t *testing.T) {
 }
 
 // TestPhpseclibRenameFaults injects each response fault into phpseclib's
-// rename, as Flysystem's move() makes it, and checks what phpseclib reports
-// and which name the file ends up under.
+// rename, as Flysystem's move() makes it, and checks what each version of
+// phpseclib reports and which name the file ends up under.
 func TestPhpseclibRenameFaults(t *testing.T) {
 	t.Parallel()
-	phpseclibOrSkip(t)
-
 	const (
-		closed = `phpseclib3\Exception\ConnectionClosedException: Connection closed by server`
 		delay  = 200 * time.Millisecond
 		freeze = time.Second
+		// closed stands in for each version's report of a lost connection,
+		// which starts as lost says.
+		closed = "connection lost"
 	)
+	lost := map[string]string{
+		"phpseclib": `phpseclib3\Exception\ConnectionClosedException: Connection closed by server`,
+		// phpseclib 2 returns false and raises notices, the first with how
+		// long it waited.
+		"phpseclib2": "Connection closed (by server) prematurely ",
+	}
 	tests := []struct {
 		name   string
 		action sftpproxy.Action
@@ -126,43 +132,51 @@ func TestPhpseclibRenameFaults(t *testing.T) {
 	}
 
 	data := []byte("id,total\n1,9.99\n")
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			srv := startServer(t, proxied, sftpproxy.Options{Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
-				if r.Target == "/in/orders.csv" {
-					return tt.action
-				}
-				return nil
-			})})
-			work := t.TempDir()
-			writeFile(t, filepath.Join(work, "orders.csv"), data)
+	for _, p := range phpseclibs {
+		for _, tt := range tests {
+			t.Run(p.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				p.orSkip(t)
+				srv := startServer(t, proxied, sftpproxy.Options{Faults: faultsOf(func(r sftpproxy.Request) sftpproxy.Action {
+					if r.Target == "/in/orders.csv" {
+						return tt.action
+					}
+					return nil
+				})})
+				work := t.TempDir()
+				writeFile(t, filepath.Join(work, "orders.csv"), data)
 
-			start := time.Now()
-			transcript := runPhpseclib(t, srv, "rename.php", work)
-			elapsed := time.Since(start)
-			if phpseclibResults(t, transcript)["put"] != true {
-				t.Fatalf("phpseclib put failed: %v", transcript)
-			}
-			if got := phpseclibFailures(t, transcript)["rename"]; got != tt.report {
-				t.Errorf("rename error = %q, want %q", got, tt.report)
-			}
-			switch a := tt.action.(type) {
-			case sftpproxy.Delay:
-				if elapsed < a.Duration {
-					t.Errorf("phpseclib finished after %v, want at least %v", elapsed, a.Duration)
+				start := time.Now()
+				transcript := p.run(t, srv, "rename.php", work)
+				elapsed := time.Since(start)
+				if phpseclibResults(t, transcript)["put"] != true {
+					t.Fatalf("%s put failed: %v", p.name, transcript)
 				}
-			case sftpproxy.Freeze:
-				if elapsed < a.Limit {
-					t.Errorf("phpseclib finished after %v, want at least %v", elapsed, a.Limit)
+				got := phpseclibFailures(t, transcript)["rename"]
+				if tt.report == closed {
+					if !strings.HasPrefix(got, lost[p.name]) {
+						t.Errorf("rename error = %q, want it to start %q", got, lost[p.name])
+					}
+				} else if got != tt.report {
+					t.Errorf("rename error = %q, want %q", got, tt.report)
 				}
-			}
+				switch a := tt.action.(type) {
+				case sftpproxy.Delay:
+					if elapsed < a.Duration {
+						t.Errorf("%s finished after %v, want at least %v", p.name, elapsed, a.Duration)
+					}
+				case sftpproxy.Freeze:
+					if elapsed < a.Limit {
+						t.Errorf("%s finished after %v, want at least %v", p.name, elapsed, a.Limit)
+					}
+				}
 
-			name := "in/orders.part"
-			if tt.renamed {
-				name = "in/orders.csv"
-			}
-			assertFiles(t, readTree(t, srv.files, start), map[string][]byte{name: data})
-		})
+				name := "in/orders.part"
+				if tt.renamed {
+					name = "in/orders.csv"
+				}
+				assertFiles(t, readTree(t, srv.files, start), map[string][]byte{name: data})
+			})
+		}
 	}
 }

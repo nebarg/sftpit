@@ -40,8 +40,15 @@ record($sftp, 'rename after delete', $sftp->rename('/incoming/orders.csv.part', 
 record($sftp, 'get orders.csv', $sftp->get('/incoming/orders.csv'));
 
 record($sftp, 'put replacement.csv', $sftp->put('/incoming/replacement.csv', 'replacement'));
-record($sftp, 'posix_rename onto existing', $sftp->posix_rename('/incoming/replacement.csv', '/incoming/orders.csv'));
-record($sftp, 'get after posix_rename', $sftp->get('/incoming/orders.csv'));
+// phpseclib 2 has no posix_rename, so it replaces the file as Flysystem
+// does, leaving the same files.
+if (method_exists($sftp, 'posix_rename')) {
+    record($sftp, 'posix_rename onto existing', $sftp->posix_rename('/incoming/replacement.csv', '/incoming/orders.csv'));
+} else {
+    record($sftp, 'delete before replacing', $sftp->delete('/incoming/orders.csv', false));
+    record($sftp, 'rename onto deleted', $sftp->rename('/incoming/replacement.csv', '/incoming/orders.csv'));
+}
+record($sftp, 'get after replacing', $sftp->get('/incoming/orders.csv'));
 
 record($sftp, 'put at an offset', $sftp->put('/incoming/orders.csv', 'XYZ', SFTP::SOURCE_STRING, 4));
 record($sftp, 'get after offset put', $sftp->get('/incoming/orders.csv'));
