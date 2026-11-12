@@ -176,6 +176,12 @@ type activeRun struct {
 	// those of each change of its rules. They are guarded by the Manager's
 	// resetting.
 	stops []func()
+
+	// faults are the faults added to the run in plain terms, in the order
+	// added, and lastFault numbers them. They are guarded by the Manager's
+	// resetting.
+	faults    []plainFault
+	lastFault int
 }
 
 // stopTimers stops every timer armed for the run.
@@ -369,6 +375,13 @@ func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, 
 	if run != current.run.ID {
 		return faults.RuleSet{}, staleRun(current, run)
 	}
+	return m.replaceRules(current, revision, rules, chaos)
+}
+
+// replaceRules replaces the rules and chaos of current, the current run, as
+// ChangeRules does. The caller holds resetting.
+func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
+	run := current.run.ID
 	if m.isDrained(current) {
 		return faults.RuleSet{}, fmt.Errorf("runs: change rules: %w", ErrDrained)
 	}

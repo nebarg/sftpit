@@ -54,6 +54,14 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	ui := dashboard()
 	mux.Handle("GET /{$}", ui)
 	mux.Handle("GET /ui/", http.StripPrefix("/ui", ui))
+	mux.HandleFunc("GET /api/presets", a.presets)
+	mux.HandleFunc("GET /api/faults", a.faults)
+	mux.HandleFunc("POST /api/faults", a.addFault)
+	mux.HandleFunc("DELETE /api/faults", a.removeFaults)
+	mux.HandleFunc("GET /api/faults/{id}", a.fault)
+	mux.HandleFunc("PATCH /api/faults/{id}", a.switchFault)
+	mux.HandleFunc("DELETE /api/faults/{id}", a.removeFault)
+	mux.HandleFunc("POST /api/reset", a.startAgain)
 	mux.HandleFunc("GET /api/v1/health", a.health)
 	mux.HandleFunc("GET /api/v1/server", a.server)
 	mux.HandleFunc("GET /api/v1/ready", a.ready)
@@ -138,7 +146,7 @@ func statusFor(err error) int {
 		return http.StatusServiceUnavailable
 	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios), errors.Is(err, config.ErrInvalidScenarioFile):
 		return http.StatusBadRequest
-	case errors.Is(err, runs.ErrUnknownRun):
+	case errors.Is(err, runs.ErrUnknownRun), errors.Is(err, runs.ErrUnknownFault):
 		return http.StatusNotFound
 	}
 	return http.StatusInternalServerError

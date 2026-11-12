@@ -212,6 +212,57 @@ func TestServeLogsEveryRequestAtTheDebugLevel(t *testing.T) {
 	}
 }
 
+func TestServeTurnsFaultsOnFromATest(t *testing.T) {
+	seed := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(seed, "outgoing", "report.csv"), "id,total\n")
+	s := startServe(t, "--seed-dir", seed)
+	api := "http://" + s.apiAddr + "/api"
+	do := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req, err := http.NewRequest(method, api+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(control.RequestHeader, "1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		var decoded map[string]any
+		if resp.StatusCode != http.StatusNoContent {
+			if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+				t.Fatalf("%s %s: %v", method, path, err)
+			}
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("%s %s = %s %v, want %d", method, path, resp.Status, decoded, want)
+		}
+		return decoded
+	}
+
+	fault := do("POST", "/faults", `{"preset": "deletes_fail", "folder": "/outgoing"}`, http.StatusCreated)
+	c := s.dial(t, "test", "test")
+	if err := c.Remove("/outgoing/report.csv"); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("a delete with the fault on = %v, want it refused", err)
+	}
+	if got := do("GET", "/faults/"+fault["id"].(string), "", http.StatusOK); got["happened"] != 1.0 {
+		t.Errorf("the fault = %v, want it to have happened once", got)
+	}
+	if !strings.Contains(s.stderr.String(), "rule=deletes-fail-1") {
+		t.Errorf("the log does not name the fault:\n%s", s.stderr.String())
+	}
+
+	do("POST", "/reset", "", http.StatusNoContent)
+	c = s.dial(t, "test", "test")
+	if err := c.Remove("/outgoing/report.csv"); err != nil {
+		t.Errorf("a delete after a reset = %v, want the seed's file back and the fault gone", err)
+	}
+	if got := do("GET", "/faults", "", http.StatusOK); len(got["faults"].([]any)) != 0 {
+		t.Errorf("after a reset, faults = %v, want none", got)
+	}
+}
+
 func TestServeInjectsTheSelectedScenariosFaults(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	testutil.WriteFile(t, config, `schema_version: 1
