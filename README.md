@@ -89,7 +89,7 @@ Stop sftpit with Ctrl+C.
 ./bin/sftpit serve
 ```
 
-With no configuration, sftpit serves SFTP on `127.0.0.1:2122`, accepts the user `test` with the password `test`, and injects no faults. The [dashboard](#dashboard) and [control API](#control-api) are on `127.0.0.1:8122`. At startup sftpit prints the address, the host-key fingerprints, the run's ID and the workspace directory. The workspace is temporary and is deleted when sftpit stops.
+With no configuration, sftpit serves SFTP on `127.0.0.1:2122`, accepts the user `test` with the password `test`, and injects no faults. The [dashboard](#dashboard) and [control API](#control-api) are on `127.0.0.1:8122`. At startup sftpit prints the address, the host-key fingerprints, the run's ID and the workspace directory. The workspace is temporary and is deleted when sftpit stops. The host keys are kept in `sftpit/hostkeys` under your user config directory (`~/Library/Application Support` on macOS, `~/.config` on Linux), so clients see the same fingerprints at every start, from any directory.
 
 `--sftp-listen` and `--http-listen` change the addresses. Both must be loopback addresses, such as `127.0.0.1:2200` or `[::1]:2122`, unless sftpit runs in a container with [`--profile container`](#docker-compose). Port `0` picks a free port.
 
@@ -112,7 +112,7 @@ sftpit copies the directory at startup, keeping permissions and modification tim
 ```
 
 The directory must be empty or an existing sftpit workspace, and only one sftpit can use it at a time. It holds:
-- the host keys, so clients see the same fingerprints at every start;
+- its own host keys, which it uses in place of those in your user config directory;
 - the last five runs, with each run's files in `runs/<run>/fs/`;
 - the seed's copy in `fixtures/seed/`, with each file's size and SHA-256 listed in `fixtures/seed.json`.
 
@@ -147,7 +147,7 @@ Put the [configuration](#configuration) in `sftpit/sftpit.yaml`, add `sftpit` to
 - **Ports:** the application reaches SFTP at `sftpit:2122` and the control API at `http://sftpit:8122`. The host reaches both on `127.0.0.1` only, on the ports `SFTPIT_PORT` and `SFTPIT_CONTROL_PORT` set.
 - **`--profile container`** listens on all of the container's interfaces. sftpit never picks it itself, because on a host that would include interfaces other machines can reach.
 - **`--control-host sftpit`** lets the control API answer requests addressed to `sftpit`, so any container on the compose network can reset runs and change rules.
-- **`user`** runs sftpit as you, so that it can create the host keys in `sftpit/hostkeys` on the first start. Commit the keys so everyone sees the same fingerprints.
+- **`user`** runs sftpit as you, so that it can create the host keys in `sftpit/hostkeys` on the first start. Commit the keys so everyone sees the same fingerprints. Without `host_key`, the container profile keeps its keys in the workspace, so they change whenever the workspace does.
 - **The workspace** is temporary. Mount a directory and pass `--data-dir` to keep runs.
 
 ## Configuration
@@ -165,7 +165,7 @@ scenarios_dir: "./scenarios" # scenario files, one for each; the default
 server:
   sftp_listen: "127.0.0.1:2122"
   http_listen: "127.0.0.1:8122" # the control API
-  host_key: "./hostkeys" # or "workspace" (the default) for the workspace's own keys
+  host_key: "./hostkeys" # or "workspace" for the workspace's own; by default, a kept workspace's, or your user config directory's
   reply_order: "request" # or "completion"
 
 storage:

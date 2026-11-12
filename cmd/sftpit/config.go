@@ -65,6 +65,7 @@ func configCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sftpit config %s: --config is required\n", command)
 		return exitUsage
 	}
+	opts.UserHostKeyDir = userHostKeyDir(opts.Profile, userConfigDir, "config "+command, stderr)
 
 	if command == "explain" {
 		explained, err := config.Explain(opts)

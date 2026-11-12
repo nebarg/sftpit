@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	opts.UserHostKeyDir = userHostKeyDir(opts.Profile, userConfigDir, "serve", stderr)
 	cfg, err := config.Load(opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n", err)
@@ -327,7 +329,14 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 		}
 		fmt.Fprintf(w, "  read-only: %s\n", strings.Join(paths, ", "))
 	}
-	fmt.Fprintln(w, "  host keys:")
+	switch {
+	case cfg.HostKeyDir != "":
+		fmt.Fprintf(w, "  host keys, from %s:\n", cfg.HostKeyDir)
+	case workspace.Temporary():
+		fmt.Fprintln(w, "  host keys, new at every start:")
+	default:
+		fmt.Fprintln(w, "  host keys, from the workspace:")
+	}
 	for _, key := range hostKeys {
 		fmt.Fprintf(w, "    %s %s\n", key.PublicKey().Type(), ssh.FingerprintSHA256(key.PublicKey()))
 	}
@@ -383,4 +392,26 @@ func loginMethods(u sshfront.User) string {
 		return "password"
 	}
 	return "key"
+}
+
+// userConfigDir is os.UserConfigDir, which tests replace so that they never
+// touch the user's own host keys.
+var userConfigDir = os.UserConfigDir
+
+// userHostKeyDir returns the directory for host keys that no configuration
+// places: one per user, since OpenSSH's known_hosts trusts a key for an
+// address and port whichever sftpit serves there. A container gets none,
+// since its home rarely outlives it or belongs to the user it runs as. It
+// warns on stderr when configDir, which finds the user config directory,
+// fails.
+func userHostKeyDir(profile config.Profile, configDir func() (string, error), command string, stderr io.Writer) string {
+	if profile == config.Container {
+		return ""
+	}
+	dir, err := configDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "sftpit %s: warning: host keys will change at every start: %v\n", command, err)
+		return ""
+	}
+	return filepath.Join(dir, "sftpit", "hostkeys")
 }

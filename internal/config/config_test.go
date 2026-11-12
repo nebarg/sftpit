@@ -30,6 +30,40 @@ func TestLoadWithoutAConfigFileUsesTheDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadPlacesTheHostKeys(t *testing.T) {
+	const userDir = "/home/me/.config/sftpit/hostkeys"
+	tests := []struct {
+		name    string
+		server  string
+		dataDir bool
+		userDir string
+		want    func(dir string) string
+	}{
+		{name: "no setting", userDir: userDir, want: func(string) string { return userDir }},
+		{name: "no setting and no user directory", want: func(string) string { return "" }},
+		{name: "a directory", server: "host_key: ./keys", userDir: userDir, want: func(dir string) string { return filepath.Join(dir, "keys") }},
+		{name: "the workspace", server: "host_key: workspace", userDir: userDir, want: func(string) string { return "" }},
+		{name: "a kept workspace", dataDir: true, userDir: userDir, want: func(string) string { return "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nserver: {"+tt.server+"}\n")
+			opts := Options{ConfigFile: config, LookupEnv: noEnv, UserHostKeyDir: tt.userDir}
+			if tt.dataDir {
+				opts.DataDir = filepath.Join(dir, "sandbox-data")
+			}
+			cfg, err := Load(opts)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if want := tt.want(dir); cfg.HostKeyDir != want {
+				t.Errorf("HostKeyDir = %q, want %q", cfg.HostKeyDir, want)
+			}
+		})
+	}
+}
+
 func TestLoadReadsEachStorageLimit(t *testing.T) {
 	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `
 schema_version: 1

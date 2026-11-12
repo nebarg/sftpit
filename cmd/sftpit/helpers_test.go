@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,6 +18,20 @@ import (
 )
 
 const startTimeout = 10 * time.Second
+
+// TestMain gives the tests a user config directory of their own, so that
+// serve never touches the user's own host keys.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "sftpit-cmd-config-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	userConfigDir = func() (string, error) { return dir, nil }
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // running is a serve command running in the background.
 type running struct {

@@ -206,6 +206,11 @@ type Options struct {
 
 	// LookupEnv reads the process environment. Nil means os.LookupEnv.
 	LookupEnv func(string) (string, bool)
+
+	// UserHostKeyDir holds the host keys when neither host_key nor a kept
+	// workspace places them, so that clients see the same fingerprints at
+	// every start. "" leaves them in the temporary workspace, new each time.
+	UserHostKeyDir string
 }
 
 type fileConfig struct {
@@ -415,6 +420,9 @@ func read(opts Options) (*reading, error) {
 			return nil, err
 		}
 		cfg.DataDir = resolved
+	}
+	if f.Server.HostKey == "" && cfg.DataDir == "" {
+		cfg.HostKeyDir = opts.UserHostKeyDir
 	}
 	limits, err := f.Storage.limits()
 	if err != nil {

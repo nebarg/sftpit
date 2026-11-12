@@ -130,6 +130,55 @@ users:
 	}
 }
 
+func TestServeKeepsTheUsersHostKeysWithoutASetting(t *testing.T) {
+	configDir, err := userConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDir := filepath.Join(configDir, "sftpit", "hostkeys")
+
+	first := startServe(t)
+	first.stop(t)
+	second := startServe(t)
+	second.stop(t)
+	if out := first.stdout.String(); !strings.Contains(out, "host keys, from "+keyDir+":") {
+		t.Errorf("banner does not say the host keys come from %s:\n%s", keyDir, out)
+	}
+	if a, b := fingerprints(first.stdout.String()), fingerprints(second.stdout.String()); strings.Count(a, "SHA256:") != 2 || a != b {
+		t.Errorf("host keys changed between starts: %v then %v", a, b)
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "ssh_host_ed25519_key")); err != nil {
+		t.Errorf("host key not kept in the user's directory: %v", err)
+	}
+}
+
+func TestUserHostKeyDir(t *testing.T) {
+	found := func() (string, error) { return "/home/me/.config", nil }
+	tests := []struct {
+		name      string
+		profile   config.Profile
+		configDir func() (string, error)
+		want      string
+		warning   string
+	}{
+		{name: "loopback", profile: config.Loopback, configDir: found, want: filepath.Join("/home/me/.config", "sftpit", "hostkeys")},
+		{name: "container", profile: config.Container, configDir: found},
+		{
+			name: "no user config directory", profile: config.Loopback,
+			configDir: func() (string, error) { return "", errors.New("$HOME is not defined") },
+			warning:   "sftpit serve: warning: host keys will change at every start: $HOME is not defined\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr strings.Builder
+			if got := userHostKeyDir(tt.profile, tt.configDir, "serve", &stderr); got != tt.want || stderr.String() != tt.warning {
+				t.Errorf("userHostKeyDir = %q, warning %q; want %q, %q", got, stderr.String(), tt.want, tt.warning)
+			}
+		})
+	}
+}
+
 func TestServeInjectsTheSelectedScenariosFaults(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	testutil.WriteFile(t, config, `schema_version: 1
@@ -334,8 +383,8 @@ func TestServeKeepsADataDirectory(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "sandbox-data")
 
 	first := startServe(t, "--data-dir", dataDir)
-	if !strings.Contains(first.stdout.String(), "workspace: "+dataDir+" (kept, with its last five runs)") {
-		t.Errorf("banner does not say the workspace is kept:\n%s", first.stdout.String())
+	if out := first.stdout.String(); !strings.Contains(out, "workspace: "+dataDir+" (kept, with its last five runs)") || !strings.Contains(out, "host keys, from the workspace:") {
+		t.Errorf("banner does not say the workspace, and its host keys, are kept:\n%s", out)
 	}
 	c := first.dial(t, "test", "test")
 	f, err := c.Create("/orders.csv")
