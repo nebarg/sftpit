@@ -637,6 +637,7 @@ func (s *Server) handshakeConfig(ctx context.Context, conn *Conn) *ssh.ServerCon
 		}
 		user := s.users[meta.User()]
 		conn.user, conn.home = user.Name, user.Home
+		conn.clientVersion = string(meta.ClientVersion())
 		if s.hooks.Authenticate != nil {
 			s.hooks.Authenticate(ctx, conn)
 		}

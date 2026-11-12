@@ -135,3 +135,15 @@ func send(t *testing.T, api http.Handler, method, path, body string) (int, strin
 	api.ServeHTTP(rec, req)
 	return rec.Code, rec.Body.String()
 }
+
+func TestActivityRefusesABadLimit(t *testing.T) {
+	_, api := start(t, runs.Options{})
+	if code, body := call(t, api, "GET", "/api/activity", ""); code != http.StatusOK || len(body["lines"].([]any)) != 0 || body["partial"] != false {
+		t.Errorf("GET /api/activity = %d %v, want no lines yet", code, body)
+	}
+	for _, limit := range []string{"0", "5001", "many"} {
+		if code, body := call(t, api, "GET", "/api/activity?limit="+limit, ""); code != http.StatusBadRequest || !strings.Contains(body["error"].(string), "is not a number from 1 to 5000") {
+			t.Errorf("GET /api/activity?limit=%s = %d %v, want 400", limit, code, body)
+		}
+	}
+}

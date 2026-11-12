@@ -27,7 +27,7 @@ func connectionHooks(rules *faults.Engine, logger *slog.Logger, record func(even
 	return sshfront.Hooks{
 		Connect: func(ctx context.Context, conn *sshfront.Conn) {
 			logger.Info("connected", "conn", conn.ID(), "remote", conn.RemoteAddr())
-			record(events.Event{Kind: events.Connected, Connection: conn.ID()})
+			record(events.Event{Kind: events.Connected, Connection: conn.ID(), Remote: conn.RemoteAddr().String()})
 			inject(ctx, logger, record, rules, conn, faults.Connect, rules.Connect(faults.Client{Connection: conn.ID()}))
 		},
 		Authenticate: func(ctx context.Context, conn *sshfront.Conn) {
@@ -36,7 +36,7 @@ func connectionHooks(rules *faults.Engine, logger *slog.Logger, record func(even
 				attrs = append(attrs, "key", fp)
 			}
 			logger.Info("logged in", attrs...)
-			record(events.Event{Kind: events.Authenticated, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint()})
+			record(events.Event{Kind: events.Authenticated, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Client: conn.ClientVersion()})
 			client := faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID()}
 			inject(ctx, logger, record, rules, conn, faults.Authenticate, rules.Authenticate(client))
 		},

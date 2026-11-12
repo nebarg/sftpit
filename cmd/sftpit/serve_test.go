@@ -263,6 +263,107 @@ func TestServeTurnsFaultsOnFromATest(t *testing.T) {
 	}
 }
 
+func TestServeShowsWhatClientsDidAsActivity(t *testing.T) {
+	s := startServe(t)
+	api := "http://" + s.apiAddr + "/api"
+	c := s.dial(t, "test", "test")
+	if err := c.Mkdir("/outgoing"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	f, err := c.Create("/outgoing/report.csv")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write(bytes.Repeat([]byte("x"), 100000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	f.Close()
+	if _, err := c.ReadDir("/outgoing"); err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for range 2 {
+		f, err := c.Open("/outgoing/report.csv")
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if _, err := io.ReadAll(f); err != nil {
+			t.Fatalf("download: %v", err)
+		}
+		f.Close()
+	}
+	requestJSONStatus(t, "POST", api+"/faults", `{"preset": "deletes_fail"}`, http.StatusCreated)
+	if err := c.Remove("/outgoing/report.csv"); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("Remove = %v, want it refused", err)
+	}
+	if _, err := c.Stat("/missing.csv"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat = %v, want no such file", err)
+	}
+
+	// An event is recorded as its reply is sent, so the client's last
+	// reply means the activity holds every line.
+	var got []string
+	lines := requestJSON(t, "GET", api+"/activity", "")["lines"].([]any)
+	for _, l := range lines {
+		l := l.(map[string]any)
+		var line strings.Builder
+		fmt.Fprint(&line, l["kind"], " ", l["outcome"])
+		for _, field := range []string{"path", "reason", "bytes"} {
+			if v, ok := l[field]; ok {
+				fmt.Fprint(&line, " ", field, "=", v)
+			}
+		}
+		if f, ok := l["fault"].(map[string]any); ok {
+			fmt.Fprint(&line, " fault=", f["name"])
+		}
+		if _, ok := l["repeat"]; ok {
+			line.WriteString(" repeat")
+		}
+		got = append(got, line.String())
+	}
+	want := []string{
+		"connected ok",
+		"mkdir ok path=/outgoing",
+		"upload ok path=/outgoing/report.csv bytes=100000",
+		"listing ok path=/outgoing",
+		"download ok path=/outgoing/report.csv bytes=100000",
+		"download ok path=/outgoing/report.csv bytes=100000 repeat",
+		"delete fault path=/outgoing/report.csv reason=permission_denied fault=Deletes fail",
+		// The client's own follow-up to a refused delete.
+		"rmdir failed path=/outgoing/report.csv reason=no_such_file",
+		"check ok path=/outgoing/report.csv",
+		"check failed path=/missing.csv reason=no_such_file",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("activity:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if first := lines[0].(map[string]any); !strings.HasPrefix(first["client"].(string), "SSH-2.0-") || !strings.HasPrefix(first["remote"].(string), "127.0.0.1:") {
+		t.Errorf("the connection line = %v, want the client's version and address", first)
+	}
+	latest := requestJSON(t, "GET", api+"/activity?limit=2", "")["lines"].([]any)
+	if len(latest) != 2 || latest[1].(map[string]any)["path"] != "/missing.csv" {
+		t.Errorf("activity?limit=2 = %v, want the latest two lines", latest)
+	}
+}
+
+// requestJSONStatus makes a request to the control API and checks its
+// status.
+func requestJSONStatus(t *testing.T, method, url, body string, want int) {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(control.RequestHeader, "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != want {
+		t.Fatalf("%s %s = %s, want %d", method, url, resp.Status, want)
+	}
+}
+
 func TestServeInjectsTheSelectedScenariosFaults(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	testutil.WriteFile(t, config, `schema_version: 1

@@ -62,6 +62,7 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("PATCH /api/faults/{id}", a.switchFault)
 	mux.HandleFunc("DELETE /api/faults/{id}", a.removeFault)
 	mux.HandleFunc("POST /api/reset", a.startAgain)
+	mux.HandleFunc("GET /api/activity", a.activity)
 	mux.HandleFunc("GET /api/v1/health", a.health)
 	mux.HandleFunc("GET /api/v1/server", a.server)
 	mux.HandleFunc("GET /api/v1/ready", a.ready)

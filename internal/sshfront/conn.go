@@ -18,6 +18,7 @@ type Conn struct {
 	user           string
 	home           string
 	keyFingerprint string
+	clientVersion  string
 	authenticated  time.Time
 	server         *Server
 	gate           *gate
@@ -35,6 +36,10 @@ func (c *Conn) Home() string { return c.home }
 // KeyFingerprint returns the SHA256 fingerprint of the public key the client
 // authenticated with, or "" if it logged in with a password.
 func (c *Conn) KeyFingerprint() string { return c.keyFingerprint }
+
+// ClientVersion returns the version the client announced, such as
+// SSH-2.0-OpenSSH_9.6, once it has logged in. Clients choose it freely.
+func (c *Conn) ClientVersion() string { return c.clientVersion }
 
 // RemoteAddr returns the client's address.
 func (c *Conn) RemoteAddr() net.Addr { return c.gate.RemoteAddr() }

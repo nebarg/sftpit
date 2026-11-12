@@ -87,6 +87,11 @@ type Event struct {
 	User           string `json:"user,omitempty"`
 	KeyFingerprint string `json:"key_fingerprint,omitempty"`
 
+	// Remote is the address a connection came from, and Client the
+	// version its client announced as it logged in.
+	Remote string `json:"remote,omitempty"`
+	Client string `json:"client,omitempty"`
+
 	// Request is the SFTP request an event is about, such as SSH_FXP_OPEN,
 	// or connect or authenticate for a fault as a client connects or logs
 	// in. RequestID is the client's ID for an SFTP request, and Path and
@@ -95,6 +100,10 @@ type Event struct {
 	RequestID *uint32 `json:"request_id,omitempty"`
 	Path      string  `json:"path,omitempty"`
 	Target    string  `json:"target,omitempty"`
+
+	// Mode is how an SSH_FXP_OPEN asked for its file: "read", "write" or
+	// "read_write".
+	Mode string `json:"mode,omitempty"`
 
 	// Reply is what the client got: a status, such as SSH_FX_OK, or the
 	// type of another reply, such as SSH_FXP_HANDLE. BackendReply is what

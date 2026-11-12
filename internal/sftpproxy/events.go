@@ -143,6 +143,9 @@ func (s *session) recordOperation(req *request, reply sftpwire.Packet) {
 		Duration:     events.Millis(time.Since(req.received)),
 		ReadOnly:     req.readOnly,
 	}
+	if open, ok := req.packet.(*sftpwire.Open); ok {
+		e.Mode = mode(open.Flags)
+	}
 	if req.injected {
 		e.Rule = req.rule
 	}
