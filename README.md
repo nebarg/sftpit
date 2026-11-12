@@ -25,10 +25,8 @@ Start it with the `upload-recovery` scenario from [`examples/quickstart`](exampl
 In another terminal, in the same directory, log in as `test` with the password `test`:
 
 ```bash
-sftp -o PubkeyAuthentication=no -P 2122 test@127.0.0.1
+sftp -P 2122 test@127.0.0.1
 ```
-
-`-o PubkeyAuthentication=no` stops `sftp` offering your SSH agent's keys first. Like OpenSSH's server, sftpit ends a login after six failed attempts, and each key counts as one.
 
 Upload `orders.csv` under a temporary name, upload it again when that fails, then rename it into place:
 
@@ -201,6 +199,7 @@ policy:
 - Unknown fields and duplicate keys are errors.
 - Flags override the file.
 - Without `users`, sftpit accepts `test` with the password `test`.
+- sftpit offers public-key login only if some user has `authorized_keys`, and password login only if some user has a password. As on OpenSSH's server, a login ends after six failed attempts, and each key an SSH agent offers counts as one, so log in as a key user with `-i KEY -o IdentitiesOnly=yes`.
 - A `host_key` directory gets an Ed25519 and an RSA key the first time it is used. Commit them so a team shares the fingerprints.
 
 ### Reply order

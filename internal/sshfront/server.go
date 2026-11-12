@@ -169,10 +169,16 @@ func New(cfg Config) (*Server, error) {
 		s.logger = slog.Default()
 	}
 
-	s.sshConfig = &ssh.ServerConfig{
-		PasswordCallback:            s.checkPassword,
-		KeyboardInteractiveCallback: s.challengePassword,
-		PublicKeyCallback:           s.checkPublicKey,
+	// Offering a method no user has would cost clients login attempts: an
+	// OpenSSH client offers every key in its agent before it asks for a
+	// password, and the server ends a login after six failures.
+	s.sshConfig = &ssh.ServerConfig{}
+	if anyUser(users, func(u User) bool { return u.Password != "" }) {
+		s.sshConfig.PasswordCallback = s.checkPassword
+		s.sshConfig.KeyboardInteractiveCallback = s.challengePassword
+	}
+	if anyUser(users, func(u User) bool { return len(u.AuthorizedKeys) > 0 }) {
+		s.sshConfig.PublicKeyCallback = s.checkPublicKey
 	}
 	for _, key := range cfg.HostKeys {
 		s.sshConfig.AddHostKey(key)
@@ -205,6 +211,15 @@ func indexUsers(users []User) (map[string]User, error) {
 		byName[u.Name] = u
 	}
 	return byName, nil
+}
+
+func anyUser(users map[string]User, has func(User) bool) bool {
+	for _, u := range users {
+		if has(u) {
+			return true
+		}
+	}
+	return false
 }
 
 // Serve accepts connections on ln until Close is called, then returns

@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -197,6 +198,96 @@ func TestPublicKeyLogin(t *testing.T) {
 		client.Close()
 		t.Error("login with another user's key succeeded")
 	}
+}
+
+func TestOnlyUsableLoginMethodsAreOffered(t *testing.T) {
+	key := newClientKey(t).PublicKey()
+	tests := []struct {
+		name  string
+		users []sshfront.User
+		want  []string
+	}{
+		{
+			name:  "passwords only",
+			users: []sshfront.User{{Name: "test", Password: testPassword}},
+			want:  []string{"keyboard-interactive", "password"},
+		},
+		{
+			name:  "keys only",
+			users: []sshfront.User{{Name: "partner-b", AuthorizedKeys: []ssh.PublicKey{key}}},
+			want:  []string{"publickey"},
+		},
+		{
+			name: "one user of each",
+			users: []sshfront.User{
+				{Name: "test", Password: testPassword},
+				{Name: "partner-b", AuthorizedKeys: []ssh.PublicKey{key}},
+			},
+			want: []string{"keyboard-interactive", "password", "publickey"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, _ := startServer(t, sshfront.Config{Users: tt.users})
+			if got := offeredMethods(t, addr); !slices.Equal(got, tt.want) {
+				t.Errorf("offered methods = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// offeredMethods returns the login methods addr offers, sorted, as the
+// methods its client tried with wrong credentials. The client tries only
+// those the server offers.
+func offeredMethods(t *testing.T, addr string) []string {
+	t.Helper()
+	var tried []string
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User: "test",
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+				tried = append(tried, "publickey")
+				return []ssh.Signer{newClientKey(t)}, nil
+			}),
+			ssh.PasswordCallback(func() (string, error) {
+				tried = append(tried, "password")
+				return "wrong", nil
+			}),
+			ssh.KeyboardInteractive(func(string, string, []string, []bool) ([]string, error) {
+				tried = append(tried, "keyboard-interactive")
+				return []string{"wrong"}, nil
+			}),
+		},
+		HostKeyCallback: trustHostKeys,
+		Timeout:         waitTimeout,
+	})
+	if err == nil {
+		client.Close()
+		t.Fatal("login with wrong credentials succeeded")
+	}
+	slices.Sort(tried)
+	return tried
+}
+
+// TestPasswordLoginAfterManyKeys logs in as a client whose agent holds more
+// keys than the server allows failed attempts, as OpenSSH's client offers
+// them all before it asks for a password.
+func TestPasswordLoginAfterManyKeys(t *testing.T) {
+	addr, _ := startServer(t, sshfront.Config{})
+	var keys []ssh.Signer
+	for range 7 {
+		keys = append(keys, newClientKey(t))
+	}
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            "test",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(keys...), ssh.Password(testPassword)},
+		HostKeyCallback: trustHostKeys,
+		Timeout:         waitTimeout,
+	})
+	if err != nil {
+		t.Fatalf("login after offering %d keys: %v", len(keys), err)
+	}
+	client.Close()
 }
 
 func TestHostKeyAlgorithms(t *testing.T) {
