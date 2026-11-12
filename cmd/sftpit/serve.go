@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,8 @@ Flags:
   --ready-file FILE    once listening, write the addresses, workspace and
                        host-key fingerprints to FILE as JSON, for a test
                        harness or sftpit reset; FILE is removed at exit
+  --log-level LEVEL    log at LEVEL: debug, which adds every SFTP request,
+                       info (the default), warn or error
 `
 
 func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -90,6 +93,13 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	})
 	var readyPath string
 	flags.StringVar(&readyPath, "ready-file", "", "")
+	var logLevel slog.Level
+	flags.Func("log-level", "", func(s string) error {
+		if err := logLevel.UnmarshalText([]byte(s)); err != nil || !slices.Contains(logLevels, logLevel) {
+			return fmt.Errorf("log level %q is not debug, info, warn or error", s)
+		}
+		return nil
+	})
 	flags.Func("env-file", "", func(name string) error {
 		opts.EnvFiles = append(opts.EnvFiles, name)
 		return nil
@@ -126,7 +136,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "sftpit serve: warning: %s\n", warning)
 	}
-	if err := runServer(ctx, cfg, readyPath, stdout, stderr); err != nil {
+	if err := runServer(ctx, cfg, readyPath, logLevel, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n", err)
 		if errors.Is(err, backend.ErrUnsupportedFile) || errors.Is(err, backend.ErrLimit) ||
 			errors.Is(err, runs.ErrSeedOverlapsWorkspace) || errors.Is(err, runs.ErrNotWorkspace) {
@@ -141,8 +151,8 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // temporary one, and the control API, until ctx is cancelled, then shuts
 // down and deletes a temporary workspace. If readyPath is set, it writes
 // the ready file there once it serves, and removes it as it shuts down.
-func runServer(ctx context.Context, cfg *config.Config, readyPath string, stdout, stderr io.Writer) (err error) {
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
+func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLevel slog.Level, stdout, stderr io.Writer) (err error) {
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: logLevel}))
 
 	// Listening first makes a busy port fail before the workspace changes.
 	sftpLn, err := listen(cfg.Profile, "sftp_listen", cfg.SFTPListen)
@@ -393,6 +403,9 @@ func loginMethods(u sshfront.User) string {
 	}
 	return "key"
 }
+
+// logLevels are the levels --log-level takes.
+var logLevels = []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError}
 
 // userConfigDir is os.UserConfigDir, which tests replace so that they never
 // touch the user's own host keys.

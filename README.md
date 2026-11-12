@@ -91,6 +91,8 @@ Stop sftpit with Ctrl+C.
 
 With no configuration, sftpit serves SFTP on `127.0.0.1:2122`, accepts the user `test` with the password `test`, and injects no faults. The [dashboard](#dashboard) and [control API](#control-api) are on `127.0.0.1:8122`. At startup sftpit prints the address, the host-key fingerprints, the run's ID and the workspace directory. The workspace is temporary and is deleted when sftpit stops. The host keys are kept in `sftpit/hostkeys` under your user config directory (`~/Library/Application Support` on macOS, `~/.config` on Linux), so clients see the same fingerprints at every start, from any directory.
 
+sftpit logs to standard error: each connection, login and disconnection, each finished transfer with its path, bytes and duration, and every fault it injects. `--log-level debug` adds a line for every SFTP request, and `--log-level warn` keeps only warnings and errors.
+
 `--sftp-listen` and `--http-listen` change the addresses. Both must be loopback addresses, such as `127.0.0.1:2200` or `[::1]:2122`, unless sftpit runs in a container with [`--profile container`](#docker-compose). Port `0` picks a free port.
 
 ### Seed files

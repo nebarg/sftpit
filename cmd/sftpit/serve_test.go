@@ -52,8 +52,19 @@ func TestServeTransfersFilesAndCleansUp(t *testing.T) {
 	if code := s.stop(t); code != exitOK {
 		t.Fatalf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, s.stderr.String())
 	}
-	if stderr := s.stderr.String(); stderr != "" {
-		t.Errorf("stopping with a client connected logged:\n%s", stderr)
+	stderr := s.stderr.String()
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(`level=INFO msg=connected conn=1 remote=127\.0\.0\.1:\d+\n`),
+		regexp.MustCompile(`level=INFO msg="logged in" conn=1 user=test\n`),
+		regexp.MustCompile(`level=INFO msg=transfer conn=1 user=test path=/orders.csv mode=read_write bytes_read=0 bytes_written=700000 duration=\S+ closed=close\n`),
+		regexp.MustCompile(`level=INFO msg=disconnected conn=1 user=test\n`),
+	} {
+		if !want.MatchString(stderr) {
+			t.Errorf("the log does not match %s:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "level=WARN") || strings.Contains(stderr, "level=ERROR") {
+		t.Errorf("stopping with a client connected logged a warning or an error:\n%s", stderr)
 	}
 	if _, err := os.Stat(s.workspace); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("workspace %s still exists after shutdown (%v)", s.workspace, err)
@@ -174,6 +185,28 @@ func TestUserHostKeyDir(t *testing.T) {
 			var stderr strings.Builder
 			if got := userHostKeyDir(tt.profile, tt.configDir, "serve", &stderr); got != tt.want || stderr.String() != tt.warning {
 				t.Errorf("userHostKeyDir = %q, warning %q; want %q, %q", got, stderr.String(), tt.want, tt.warning)
+			}
+		})
+	}
+}
+
+func TestServeLogsEveryRequestAtTheDebugLevel(t *testing.T) {
+	for _, tt := range []struct {
+		level string
+		debug bool
+	}{{"debug", true}, {"info", false}, {"warn", false}} {
+		t.Run(tt.level, func(t *testing.T) {
+			s := startServe(t, "--log-level", tt.level)
+			if _, err := s.dial(t, "test", "test").Stat("/"); err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			s.stop(t)
+			stderr := s.stderr.String()
+			if got := strings.Contains(stderr, `level=DEBUG msg="sftp request"`); got != tt.debug {
+				t.Errorf("logs requests: %v, want %v:\n%s", got, tt.debug, stderr)
+			}
+			if got := strings.Contains(stderr, "level=INFO"); got != (tt.level != "warn") {
+				t.Errorf("logs at info: %v, want %v:\n%s", got, tt.level != "warn", stderr)
 			}
 		})
 	}
@@ -834,6 +867,7 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
 		{"undefined scenario", []string{"--scenario", "upload-recovery"}, `scenario "upload-recovery" is not defined`},
 		{"seed without a scenario", []string{"--seed", "7"}, "--seed needs --scenario, whose random decisions it pins"},
+		{"unknown log level", []string{"--log-level", "loud"}, `invalid value "loud" for flag -log-level: log level "loud" is not debug, info, warn or error`},
 		{"negative seed", []string{"--scenario", "s", "--seed", "-1"}, `invalid value "-1" for flag -seed: a seed is a whole number from 0 to 18446744073709551615`},
 	}
 	for _, tt := range tests {

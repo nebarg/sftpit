@@ -258,6 +258,7 @@ func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var rec recording
 		var snaps snapshots
+		var logs syncBuffer
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
 			Faults: func(r sftpproxy.Request) sftpproxy.Fault {
 				if _, ok := r.Packet.(*sftpwire.Open); ok {
@@ -267,6 +268,7 @@ func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 			},
 			Snapshot: snaps.take,
 			Record:   rec.record,
+			Logger:   logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
 		p.client.send(t, 2, write("h", 0, 60))
@@ -292,6 +294,11 @@ func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 			"transfer path=/f rule=cut write reads=0/0 writes=2/100 end=100 closed=close faulted=true",
 			"operation request=SSH_FXP_CLOSE id=5 path=/f reply=SSH_FX_OK backend=SSH_FX_OK",
 		)
+		// The bubble's clock moves only while every goroutine waits, so the
+		// handle is open for exactly the second the test spends waiting.
+		if want := "level=INFO msg=transfer path=/f mode=write bytes_read=0 bytes_written=100 duration=1s closed=close rule=cut\n"; !strings.Contains(logs.String(), want) {
+			t.Errorf("logs do not contain %q:\n%s", want, logs.String())
+		}
 	})
 }
 

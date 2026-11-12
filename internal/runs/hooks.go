@@ -21,20 +21,31 @@ import (
 // reset or freeze of the connection, or an outage of the server. A frozen
 // connection is closed at its limit, when its rule is removed or rules
 // releases its stalls, or when the handshake timeout ends the hook. It logs
-// each fault it injects to logger, and records each connection, login,
-// disconnection and fault, and the end of each fault's wait, with record.
+// each connection, login, disconnection and fault to logger, and records
+// each of them, and the end of each fault's wait, with record.
 func connectionHooks(rules *faults.Engine, logger *slog.Logger, record func(events.Event)) sshfront.Hooks {
 	return sshfront.Hooks{
 		Connect: func(ctx context.Context, conn *sshfront.Conn) {
+			logger.Info("connected", "conn", conn.ID(), "remote", conn.RemoteAddr())
 			record(events.Event{Kind: events.Connected, Connection: conn.ID()})
 			inject(ctx, logger, record, rules, conn, faults.Connect, rules.Connect(faults.Client{Connection: conn.ID()}))
 		},
 		Authenticate: func(ctx context.Context, conn *sshfront.Conn) {
+			attrs := []any{"conn", conn.ID(), "user", conn.User()}
+			if fp := conn.KeyFingerprint(); fp != "" {
+				attrs = append(attrs, "key", fp)
+			}
+			logger.Info("logged in", attrs...)
 			record(events.Event{Kind: events.Authenticated, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint()})
 			client := faults.Client{User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Connection: conn.ID()}
 			inject(ctx, logger, record, rules, conn, faults.Authenticate, rules.Authenticate(client))
 		},
 		Disconnect: func(conn *sshfront.Conn) {
+			attrs := []any{"conn", conn.ID()}
+			if conn.User() != "" {
+				attrs = append(attrs, "user", conn.User())
+			}
+			logger.Info("disconnected", attrs...)
 			record(events.Event{Kind: events.Disconnected, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint()})
 		},
 	}

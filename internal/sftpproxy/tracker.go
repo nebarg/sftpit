@@ -151,6 +151,9 @@ type handle struct {
 	// file is set for a handle that OPEN returned, rather than OPENDIR.
 	file bool
 
+	// opened is when the backend returned the handle.
+	opened time.Time
+
 	// counted is set while the tracker's transfers counts the handle.
 	counted bool
 
@@ -420,7 +423,7 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 			return nil, fmt.Errorf("sftpproxy: backend returned handle %q, which is already open", h.Handle)
 		}
 		open, file := req.packet.(*sftpwire.Open)
-		opened := &handle{path: req.path, rule: req.rule, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil}
+		opened := &handle{path: req.path, rule: req.rule, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil, opened: time.Now()}
 		if file {
 			opened.totals.Mode = mode(open.Flags)
 			t.count(opened)

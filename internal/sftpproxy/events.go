@@ -198,9 +198,6 @@ func (s *session) recordTransfer(h *handle, closed string) {
 	// Settled only once recorded, so that Transfers reaches zero only when
 	// the transfer can be read.
 	defer s.tracker.settle(h)
-	if s.record == nil {
-		return
-	}
 	s.tracker.mu.Lock()
 	t := h.totals
 	t.Closed, t.Faulted = closed, h.faulted
@@ -209,5 +206,12 @@ func (s *session) recordTransfer(h *handle, closed string) {
 		rule = h.rule
 	}
 	s.tracker.mu.Unlock()
-	s.record(events.Event{Kind: events.Transfer, Path: h.path, Rule: rule, Transfer: &t})
+	attrs := []any{"path", h.path, "mode", t.Mode, "bytes_read", t.BytesRead, "bytes_written", t.BytesWritten, "duration", time.Since(h.opened).Round(time.Millisecond), "closed", closed}
+	if rule != "" {
+		attrs = append(attrs, "rule", rule)
+	}
+	s.logger.Info("transfer", attrs...)
+	if s.record != nil {
+		s.record(events.Event{Kind: events.Transfer, Path: h.path, Rule: rule, Transfer: &t})
+	}
 }

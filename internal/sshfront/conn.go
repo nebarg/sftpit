@@ -36,6 +36,9 @@ func (c *Conn) Home() string { return c.home }
 // authenticated with, or "" if it logged in with a password.
 func (c *Conn) KeyFingerprint() string { return c.keyFingerprint }
 
+// RemoteAddr returns the client's address.
+func (c *Conn) RemoteAddr() net.Addr { return c.gate.RemoteAddr() }
+
 // Authenticated returns when the client finished logging in: when the
 // server, any Hooks.Authenticate having returned, went on to tell it.
 func (c *Conn) Authenticated() time.Time { return c.authenticated }
