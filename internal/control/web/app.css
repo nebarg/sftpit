@@ -465,6 +465,12 @@ dialog label {
   display: none;
 }
 
+.warning-text {
+  background: var(--policy-bg);
+  border-left: 3px solid var(--policy-edge);
+  padding: 0.5rem 0.75rem;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

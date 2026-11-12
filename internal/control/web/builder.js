@@ -112,6 +112,26 @@ export function compileRule(form) {
   return rule;
 }
 
+// dataWarning returns a warning for a delay or stall, given as a rule in the
+// long form, that acts on reads and writes, or null for any other rule.
+// Clients move a file's data in pieces of about 32 KiB, and the requests on
+// one file reach the server one after another, so a delay on each piece
+// slows a transfer far more than one on a command.
+export function dataWarning(rule) {
+  const type = rule.action?.type;
+  const ops = rule.match?.operation ?? [];
+  if ((type !== "delay" && type !== "stall") || !ops.some((op) => op === "any" || op === "read" || op === "write")) {
+    return null;
+  }
+  const advice = "To slow commands but not data, choose operations such as open_write, open_read, stat, list and rename.";
+  if (type === "stall") {
+    return `This stalls reads and writes too, so a transfer stops at its first piece of data until the stall is released. ${advice}`;
+  }
+  const d = rule.action.duration;
+  const each = typeof d === "object" ? `${d.min} to ${d.max}` : d;
+  return `This delays every read and write too, one after another: a 1 MiB file moves in about 32 pieces, each delayed ${each}. ${advice}`;
+}
+
 // ruleOperations returns the operations a long-form rule matches: those
 // chosen, or the opens if it counts attempts, which count opens, or else
 // the fault's own.

@@ -312,6 +312,7 @@ Rules are tried in order of `priority`, lowest first, then in the order listed. 
 - **Statuses:** `failure`, `no_such_file`, `permission_denied`, `bad_message`, `op_unsupported` and `eof`.
 - **Outages:** a `listener_down` closes the listening socket, so connecting clients are refused and the port is free during the outage. If another process takes the port, sftpit warns and keeps trying to listen again.
 - **Transfers:** a partial or corrupt upload or download is chosen when its file opens. It takes effect, and counts towards `max_triggers`, only once it changes a read or write.
+- **Delays on data:** a `delay` or `stall` that matches `any`, `read` or `write` holds each piece of a transfer, about 32 KiB, and a file's requests reach the server one after another, so a 3 s delay on `any` takes a 1 MiB upload about 100 s. Choose operations such as `open_write`, `stat`, `list` and `rename` to slow commands but not data.
 - **Logs:** sftpit logs `rule fired` with the rule's ID for each fault.
 - **Snapshots:** when a file handle that a fault acted on is closed, or its session ends, sftpit logs `snapshot` with the size and SHA-256 of the file left behind. It keeps a copy under `runs/<run>/snapshots/` unless that would take the run's copies past 64 MiB, in which case it logs `snapshot not copied`.
 
@@ -601,7 +602,7 @@ At the end of a test, [`sftpit assert`](#checking-a-run) gives the verdict throu
 - **Files:** the run's files, with sizes, modes, times, optional hashes and whether clients changed the seed's files, plus previews, downloads and the copies faults left behind.
 - **Rules:** the run's rules in the order they are tried, with their counts, and rules that have never matched marked. Rules can be removed, saved as a [scenario file](#scenario-files), and [queued](#queuing-the-next-run) for the next reset.
 - **Chaos:** turns [chaos](#chaos) on, off or paused for the current run, with a preset, scope and extras.
-- **Builder:** makes a rule from a fault, a scope and a trigger, previews its long form, and applies it now or at the next reset.
+- **Builder:** makes a rule from a fault, a scope and a trigger, previews its long form, and applies it now or at the next reset. It warns when a delay or stall would act on reads and writes, which slows transfers far more than commands.
 - **Scenarios:** the configuration's scenarios and scenario files. A configured scenario can be copied to a file to edit.
 - **Result:** [checks the run's assertions](#checking-a-run), and shows the verdict, the rules that fired and never fired, the final files, and downloads of the report and [trace](#the-trace).
 

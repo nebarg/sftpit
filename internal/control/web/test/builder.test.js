@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { catalogue, compileRule } from "../builder.js";
+import { catalogue, compileRule, dataWarning } from "../builder.js";
 
 // form returns a builder form with every field empty but those given.
 function form(fields) {
@@ -103,4 +103,14 @@ test("every fault offers every match or a probability", () => {
   for (const [name, fault] of Object.entries(catalogue)) {
     assert.ok(fault.triggers.includes("probability"), name);
   }
+});
+
+test("a delay or stall on reads and writes is warned of", () => {
+  const rule = (operation, action) => ({ id: "r", match: { operation }, action });
+  assert.match(dataWarning(rule(["any"], { type: "delay", when: "before", duration: "3s" })), /each delayed 3s\. To slow commands but not data/);
+  assert.match(dataWarning(rule(["write"], { type: "delay", when: "after", duration: { min: "1s", max: "3s" } })), /each delayed 1s to 3s\./);
+  assert.match(dataWarning(rule(["read", "stat"], { type: "stall", when: "before" })), /^This stalls reads and writes too/);
+  assert.equal(dataWarning(rule(["open_write", "stat", "rename"], { type: "delay", when: "before", duration: "3s" })), null);
+  assert.equal(dataWarning(rule(["any"], { type: "fail", when: "before", status: "failure" })), null);
+  assert.equal(dataWarning({ id: "r", fail_upload: { path: "/f", after_bytes: 1 } }), null);
 });

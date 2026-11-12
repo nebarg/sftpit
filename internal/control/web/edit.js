@@ -4,7 +4,7 @@
 // at the next reset.
 
 import { APIError, get, runPath, send } from "./api.js";
-import { anchors, catalogue, compileRule, triggerLabels } from "./builder.js";
+import { anchors, catalogue, compileRule, dataWarning, triggerLabels } from "./builder.js";
 import { chaosOf, chaosScopes, formOf } from "./chaos.js";
 import { el, show } from "./dom.js";
 import { describeAction, describeChaos, describeMatch, keptAssertions } from "./rules.js";
@@ -210,10 +210,12 @@ async function previewRule() {
     const reply = await send("POST", "/api/v1/rules/check", { faults: [rule] });
     checked = rule;
     const long = reply.faults[0];
+    const warning = dataWarning(long);
     show(
       box,
       el("h3", {}, "The rule, as sftpit runs it"),
       el("p", {}, el("code", {}, long.id), `: ${describeMatch(long)}; ${describeAction(long)}.`),
+      ...(warning ? [el("p", { class: "warning-text" }, warning)] : []),
       el("pre", { class: "preview text" }, JSON.stringify(long, null, 2)),
     );
     show($("builder-note"), "Apply it now, to the current run, or at the next reset, to a run that starts with it.");
