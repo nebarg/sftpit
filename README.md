@@ -89,8 +89,9 @@ A custom fault gives `steps`, the requests it acts on, and `do`, what it does to
 | `hold` | The request is held until released from the dashboard or with `POST /api/release`. The connection stays open. | `seconds`: the longest it is held, default 600 |
 | `drop` | The connection closes. | `abrupt`: `true` for a TCP reset instead of a normal close |
 | `freeze` | The server stops responding, keepalives included, then closes the connection. | `seconds`: how long, default 60 |
-| `stop_partway` | The connection closes once a transfer reaches a size. Needs `write` or `read` as its only step. | `kb`, default 32; `abrupt` |
+| `stop_partway` | The connection closes once a transfer reaches a size, or, with `error`, the transfer is answered with that error there. Needs `write` or `read` as its only step. | `kb`, default 32; `abrupt`; `error` |
 | `corrupt` | The first 64 bytes of each upload or download are changed. Needs `write` or `read` as its only step. | |
+| `truncate` | An upload is stored, or a download served, only up to a size. Every reply reports success. Needs `write` or `read` as its only step. | `kb`, default 32 |
 | `wrong_size` | File sizes in checks and listings are reported wrongly. Steps: `stat`, `list`. | `size_off_by`, default -1024 |
 | `hide` | The file seems not to exist. Steps: `open_read`, `stat`, `list`, `remove`, `rename`. | |
 | `down` | Open connections close and new ones are refused. With no steps, the server goes down at once. | `seconds`, default 30 |
@@ -108,7 +109,7 @@ Every fault can be narrowed:
 - **User:** `user` limits it to one user's requests.
 - **How often:** one of `first` (only the first N times), `only` (only time number N), `percent` (that share of the time, chosen at random) or `minutes` (for the next N minutes). Without any, it acts every time.
 
-For `stop_partway` and `corrupt`, `only` counts the uploads or downloads of each file, so `"only": 2` acts on the second upload of each file.
+For `stop_partway`, `corrupt` and `truncate`, `only` counts the uploads or downloads of each file, so `"only": 2` acts on the second upload of each file.
 
 ## Scenarios
 

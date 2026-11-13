@@ -19,6 +19,8 @@ test("a fault reads as what it does, where and how often", () => {
   assert.equal(describeFault({ on: true, happened: 0, name: "Server goes down", do: "down", seconds: 30 }).summary, "down for 30 s · the whole server · every time");
   assert.equal(describeFault({ on: true, happened: 0, name: "Logins fail", steps: ["authenticate"], do: "drop", first: 1 }).summary, "every connection · first time only");
   assert.equal(describeFault({ on: true, happened: 0, name: "x", steps: ["write"], do: "stop_partway", kb: 32, names: "*.csv", only: 2 }).summary, "stops after 32 KB · names like *.csv · only time number 2");
+  assert.equal(describeFault({ on: true, happened: 0, name: "x", steps: ["read"], do: "stop_partway", kb: 32, error: "failure" }).summary, "stops after 32 KB with “failure” · any file · every time");
+  assert.equal(describeFault({ on: true, happened: 0, name: "x", steps: ["write"], do: "truncate", kb: 3072 }).summary, "cut short after 3072 KB · any file · every time");
 });
 
 test("a preset asks for its one setting", () => {
@@ -40,6 +42,9 @@ test("the forms' fields become the body of a new fault", () => {
     user: "partner-b",
     first: 2,
   });
+  assert.deepEqual(faultBody({ steps: ["write"], do: "stop_partway", error: "failure", kb: "64", where: "any", often: "every" }), { steps: ["write"], do: "stop_partway", error: "failure", kb: 64 });
+  assert.deepEqual(faultBody({ steps: ["write"], do: "stop_partway", error: "", kb: "64" }), { steps: ["write"], do: "stop_partway", kb: 64 });
+  assert.deepEqual(faultBody({ steps: ["write"], do: "wait", error: "failure", seconds: "1" }), { steps: ["write"], do: "wait", seconds: 1 });
   assert.throws(() => faultBody({ steps: [], do: "refuse" }), /Choose at least one step/);
   assert.throws(() => faultBody({ preset: "deletes_fail", where: "names", place: "" }), /Give the name pattern/);
   assert.throws(() => faultBody({ preset: "deletes_fail", often: "first", count: "lots" }), /How often must be a number/);
@@ -59,4 +64,7 @@ test("a custom fault reads as a sentence", () => {
     "When the client is deleting a file or renaming or moving (/out/r.csv), refuse with “permission denied”, before the server carries out the request, every time.",
   );
   assert.equal(summarise({ steps: ["remove"], do: "wait", seconds: 2, after: true, first: 1 }, steps), "When the client is deleting a file (any file), wait 2 s, after the server carries out the request, first time only.");
+  const writes = [{ id: "write", name: "Writing file data" }];
+  assert.equal(summarise({ steps: ["write"], do: "truncate", kb: 64 }, writes), "When the client is writing file data (any file), cut the file short after 64 KB, without an error, every time.");
+  assert.equal(summarise({ steps: ["write"], do: "stop_partway", error: "failure", only: 1 }, writes), "When the client is writing file data (any file), stop after 32 KB, answering “failure”, only time number 1.");
 });

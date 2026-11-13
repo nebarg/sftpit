@@ -534,22 +534,35 @@ function showCustom() {
   updateSummary();
 }
 
-// actionSetting returns the field of an action's setting, if it has one.
+// actionSetting returns the fields of an action's settings, if it has any.
 function actionSetting(action, errors) {
   if (action === "refuse") {
     return el("label", { class: "setting" }, "Error", el("select", { name: "error", onchange: updateSummary }, errors.map((e) => el("option", { value: e, selected: e === "permission_denied" }, e.replaceAll("_", " ")))));
+  }
+  if (action === "stop_partway") {
+    return [
+      numberSetting("kb", "After (KB)", "32"),
+      el(
+        "label",
+        { class: "setting" },
+        "Then",
+        el("select", { name: "error", onchange: updateSummary }, el("option", { value: "" }, "close the connection"), errors.map((e) => el("option", { value: e }, `answer “${e.replaceAll("_", " ")}”`))),
+      ),
+    ];
   }
   const fields = {
     wait: ["seconds", "Seconds", "3"],
     hold: ["seconds", "At most (seconds)", "600"],
     freeze: ["seconds", "For up to (seconds)", "60"],
     down: ["seconds", "For (seconds)", "30"],
-    stop_partway: ["kb", "After (KB)", "32"],
+    truncate: ["kb", "After (KB)", "32"],
   }[action];
-  if (!fields) {
-    return null;
-  }
-  const [name, label, value] = fields;
+  return fields ? numberSetting(...fields) : null;
+}
+
+// numberSetting returns the number field of the setting name, labelled
+// label and starting at value.
+function numberSetting(name, label, value) {
   const kind = name === "kb" ? "integer" : "decimal";
   return el(
     "label",

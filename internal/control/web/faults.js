@@ -30,7 +30,9 @@ function settingOf(f) {
     case "freeze":
       return `frozen for up to ${f.seconds} s`;
     case "stop_partway":
-      return `stops after ${f.kb} KB`;
+      return f.error ? `stops after ${f.kb} KB with “${plainReason(f.error)}”` : `stops after ${f.kb} KB`;
+    case "truncate":
+      return `cut short after ${f.kb} KB`;
     case "down":
       return `down for ${f.seconds} s`;
   }
@@ -83,8 +85,8 @@ export function presetSetting(preset) {
 }
 
 // faultBody returns the body of POST /api/faults for a form's fields, all
-// strings: preset, or steps (a list), do, error, seconds, kb and after for
-// a custom fault; where ("any", "folder", "file" or "names") and place;
+// strings: preset, or steps (a list), do, error (of a refusal, or of a
+// transfer stopped partway), seconds, kb and after for a custom fault; where ("any", "folder", "file" or "names") and place;
 // user; often ("every", "first", "only", "percent" or "minutes") and
 // count. It throws an Error saying what a field lacks.
 export function faultBody(form) {
@@ -97,7 +99,7 @@ export function faultBody(form) {
     }
     body.steps = form.steps;
     body.do = form.do;
-    if (form.do === "refuse" && form.error) {
+    if ((form.do === "refuse" || form.do === "stop_partway") && form.error) {
       body.error = form.error;
     }
     if (form.after) {
@@ -144,13 +146,17 @@ export function summarise(body, steps) {
     hold: "hold it until released",
     drop: "drop the connection",
     freeze: "freeze the connection",
-    stop_partway: `stop after ${body.kb ?? 32} KB`,
+    stop_partway: body.error ? `stop after ${body.kb ?? 32} KB, answering “${plainReason(body.error)}”` : `stop after ${body.kb ?? 32} KB, closing the connection`,
     corrupt: "corrupt the data",
+    truncate: `cut the file short after ${body.kb ?? 32} KB, without an error`,
     wrong_size: "report the wrong size",
     hide: "answer “no such file”",
     down: `take the server offline for ${body.seconds ?? 30} s`,
   }[body.do];
   const where = whereOf({ ...body, steps: body.steps ?? ["remove"] });
+  // Only these act before or after the server carries out the request; the
+  // others change what a transfer or an answer holds.
+  const timed = ["refuse", "wait", "hold", "drop", "freeze", "down"].includes(body.do);
   const when = body.after ? "after the server carries out the request" : "before the server carries out the request";
-  return `When the client is ${doing} (${where}), ${what}, ${when}, ${oftenOf(body)}.`;
+  return `When the client is ${doing} (${where}), ${[what, timed && when, oftenOf(body)].filter(Boolean).join(", ")}.`;
 }

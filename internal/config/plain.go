@@ -32,12 +32,13 @@ type Fault struct {
 	Steps []string `json:"steps,omitempty" yaml:"steps,flow,omitempty"`
 	Do    string   `json:"do,omitempty" yaml:"do,omitempty"`
 
-	// The settings of what it does: the Error a refusal answers with,
-	// the Seconds of a wait or outage, or the longest a hold or freeze
-	// lasts, the KB a transfer stops
-	// after, how far a reported size is off by, whether a dropped
-	// connection is reset rather than closed, and whether the fault acts
-	// after the server has done what was asked rather than before.
+	// The settings of what it does: the Error a refusal answers with, or a
+	// transfer stopped partway instead of closing the connection, the
+	// Seconds of a wait or outage, or the longest a hold or freeze lasts,
+	// the KB a transfer stops or is cut short after, how far a reported
+	// size is off by, whether a dropped connection is reset rather than
+	// closed, and whether the fault acts after the server has done what was
+	// asked rather than before.
 	Error     string   `json:"error,omitempty" yaml:"error,omitempty"`
 	Seconds   *float64 `json:"seconds,omitempty" yaml:"seconds,omitempty"`
 	KB        *uint64  `json:"kb,omitempty" yaml:"kb,omitempty"`
@@ -101,8 +102,9 @@ var Actions = []Action{
 	{"hold", "Hold the request until released"},
 	{"drop", "Close the connection"},
 	{"freeze", "Stop responding, keeping the connection open"},
-	{"stop_partway", "Close the connection partway through a transfer"},
+	{"stop_partway", "Stop a transfer partway"},
 	{"corrupt", "Change the data"},
+	{"truncate", "Cut the file short, without an error"},
 	{"wrong_size", "Report the wrong file size"},
 	{"hide", "Answer “no such file”"},
 	{"down", "Take the server offline"},
@@ -168,7 +170,7 @@ func (f Fault) Resolve() (Fault, error) {
 		f.Seconds = orPointer(f.Seconds, new(600.0))
 	case "down":
 		f.Seconds = orPointer(f.Seconds, new(30.0))
-	case "stop_partway":
+	case "stop_partway", "truncate":
 		f.KB = orPointer(f.KB, new(uint64(32)))
 	case "wrong_size":
 		f.SizeOffBy = orPointer(f.SizeOffBy, new(int64(-1024)))
@@ -328,11 +330,8 @@ func (f Fault) action(events bool) (sftpproxy.Action, error) {
 		if events {
 			return nil, errors.New("connecting and logging in can't be refused with an error; drop the connection instead")
 		}
-		code, ok := errorCodes[f.Error]
-		if !ok {
-			return nil, fmt.Errorf("error %q is not one of %s", f.Error, strings.Join(ErrorNames(), ", "))
-		}
-		return sftpproxy.Fail{When: when, Status: code}, nil
+		code, err := errorCode(f.Error)
+		return sftpproxy.Fail{When: when, Status: code}, err
 	case "wait":
 		d, err := seconds(f.Seconds)
 		return sftpproxy.Delay{When: when, Duration: d}, err
@@ -351,7 +350,18 @@ func (f Fault) action(events bool) (sftpproxy.Action, error) {
 		if err := transferStep(f.Steps, "stopping partway"); err != nil {
 			return nil, err
 		}
-		cutoff, result := *f.KB*1024, sftpproxy.Drop{Reset: f.Abrupt}
+		cutoff := *f.KB * 1024
+		var result sftpproxy.Action = sftpproxy.Drop{Reset: f.Abrupt}
+		if f.Error != "" {
+			if f.Abrupt {
+				return nil, errors.New("a transfer stopped partway either answers with an error or closes the connection abruptly, not both")
+			}
+			code, err := errorCode(f.Error)
+			if err != nil {
+				return nil, err
+			}
+			result = sftpproxy.Fail{Status: code}
+		}
 		if f.Steps[0] == "write" {
 			return sftpproxy.PartialUpload{Cutoff: cutoff, Result: result}, nil
 		}
@@ -364,6 +374,14 @@ func (f Fault) action(events bool) (sftpproxy.Action, error) {
 			return sftpproxy.CorruptUpload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
 		}
 		return sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
+	case "truncate":
+		if err := transferStep(f.Steps, "cutting a file short"); err != nil {
+			return nil, err
+		}
+		if f.Steps[0] == "write" {
+			return sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
+		}
+		return sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
 	case "wrong_size":
 		if err := onlySteps(f.Steps, "a wrong size", "stat", "list"); err != nil {
 			return nil, err
@@ -421,6 +439,15 @@ func (f Fault) often(r *faults.Rule) error {
 		r.Trigger = &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{Until: time.Duration(*f.Minutes * float64(time.Minute))}}
 	}
 	return nil
+}
+
+// errorCode returns the status of the error named name.
+func errorCode(name string) (sftpwire.StatusCode, error) {
+	code, ok := errorCodes[name]
+	if !ok {
+		return 0, fmt.Errorf("error %q is not one of %s", name, strings.Join(ErrorNames(), ", "))
+	}
+	return code, nil
 }
 
 // transferStep reports steps other than writing or reading file data alone.

@@ -253,6 +253,10 @@ func (b *builder) disconnected(e events.Event) {
 			l.addRequest(r)
 			continue
 		}
+		if l := b.closing[openKey{fault.Connection, fault.Path, false}]; l != nil && (r.Request == "read" || r.Request == "write") {
+			l.addRequest(r)
+			continue
+		}
 		l := b.newLine(fault, kindOf(r.Request))
 		l.addRequest(r)
 	}
@@ -364,7 +368,10 @@ func (b *builder) transfer(e events.Event) {
 	t := e.Transfer
 	l := b.open[key]
 	delete(b.open, key)
-	if l != nil && t != nil && t.Closed == "close" {
+	// The transfer's line takes the reply to the client's CLOSE, or the
+	// requests that a fault stopped as it ended the connection, which the
+	// connection's end reports.
+	if l != nil && t != nil {
 		b.closing[key] = l
 	}
 	if l == nil {

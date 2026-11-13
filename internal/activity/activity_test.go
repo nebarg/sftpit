@@ -170,6 +170,22 @@ func TestLines(t *testing.T) {
 `,
 		},
 		{
+			"an upload cut off by a dropped connection, with its write's reply lost",
+			append(login(),
+				open(1, "/in/a.csv", "write"),
+				fault(1, 2, "SSH_FXP_WRITE", "/in/a.csv", "cut", "partial_upload"),
+				events.Event{Kind: events.Transfer, Connection: 1, Path: "/in/a.csv", Rule: "cut", Transfer: &events.Totals{Mode: "write", Writes: 1, BytesWritten: 32768, Closed: "session_ended", Faulted: true}},
+				events.Event{Kind: events.Disconnected, Connection: 1, User: "test"},
+			),
+			`2 connected ok remote=127.0.0.1:50000 client=SSH-2.0-Test_1.0
+3 upload fault path=/in/a.csv fault=cut(cut) bytes=32768 took=2s
+  open_write ok ok
+  write ok ok count=1 bytes=32768
+  write connection_closed fault
+6 disconnected ok took=4s
+`,
+		},
+		{
 			"a download its connection's end cut off, and one still going",
 			append(login(),
 				open(1, "/out/a.csv", "read"),
