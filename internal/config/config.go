@@ -61,10 +61,6 @@ func DefaultLimits() backend.Limits {
 	return backend.Limits{MaxFileBytes: 1 << 30, MaxTotalBytes: 4 << 30, MaxFiles: 10000, MaxOpenFiles: 256}
 }
 
-// DefaultMaxTraceBytes bounds each run's trace, the file of its events, when
-// the configuration sets no bound.
-const DefaultMaxTraceBytes = 64 << 20
-
 // hostKeyWorkspace selects the host keys kept in the workspace.
 const hostKeyWorkspace = "workspace"
 
@@ -94,20 +90,12 @@ type Config struct {
 	// workspace at startup, or "" for an empty workspace.
 	SeedDir string
 
-	// ExpectedDir is the absolute path of the directory of the fixtures that
-	// assertions compare files with, or "" for none. It is copied into the
-	// workspace at startup, where no client can see it.
-	ExpectedDir string
-
 	// DataDir is the absolute path of the workspace to keep, or "" for a
 	// temporary one.
 	DataDir string
 
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
-
-	// MaxTraceBytes bounds each run's trace, the file of its events.
-	MaxTraceBytes int64
 
 	// Users are the configured users, with their passwords resolved and
 	// their homes cleaned, or the built-in test user if none are configured.
@@ -131,9 +119,6 @@ type Config struct {
 	// none.
 	Scenario string
 
-	// Seed is the seed given in place of the chosen scenario's own, or nil.
-	Seed *faults.Seed
-
 	// Warnings describe problems that do not prevent sftpit from starting.
 	Warnings []string
 
@@ -153,19 +138,12 @@ type Scenario struct {
 	// Description says what the scenario is for.
 	Description string
 
-	// Seed is the seed the scenario pins, or nil.
-	Seed *faults.Seed
-
 	// Rules are the scenario's fault rules, in the order they were given.
 	Rules []faults.Rule
 
 	// Chaos is the scenario's chaos, whose rules are tried after its own, or
 	// nil.
 	Chaos *faults.Chaos
-
-	// Assertions are what a run of the scenario must have done, or left
-	// behind, once it is over.
-	Assertions []Assertion
 }
 
 // Options are the command-line settings. They take precedence over the
@@ -197,9 +175,6 @@ type Options struct {
 	// faults.
 	Scenario string
 
-	// Seed, if set, overrides the seed the scenario pins.
-	Seed *faults.Seed
-
 	// EnvFiles are read after the configuration's env files, so their
 	// values override those.
 	EnvFiles []string
@@ -221,7 +196,6 @@ type fileConfig struct {
 	Storage       storageConfig `yaml:"storage"`
 	Users         []userConfig  `yaml:"users,omitempty"`
 	Policy        policyConfig  `yaml:"policy,omitempty"`
-	Events        eventsConfig  `yaml:"events,omitempty"`
 
 	Scenarios map[string]scenarioConfig `yaml:"scenarios,omitempty"`
 }
@@ -229,15 +203,10 @@ type fileConfig struct {
 type storageConfig struct {
 	DataDir       string `yaml:"data_dir,omitempty"`
 	SeedDir       string `yaml:"seed_dir,omitempty"`
-	ExpectedDir   string `yaml:"expected_dir,omitempty"`
 	MaxFileBytes  *int64 `yaml:"max_file_bytes,omitempty"`
 	MaxTotalBytes *int64 `yaml:"max_total_bytes,omitempty"`
 	MaxFiles      *int64 `yaml:"max_files,omitempty"`
 	MaxOpenFiles  *int64 `yaml:"max_open_files,omitempty"`
-}
-
-type eventsConfig struct {
-	MaxDiskBytes *int64 `yaml:"max_disk_bytes,omitempty"`
 }
 
 type serverConfig struct {
@@ -429,9 +398,6 @@ func read(opts Options) (*reading, error) {
 		return nil, err
 	}
 	cfg.Limits = limits
-	if cfg.MaxTraceBytes, err = f.Events.maxTraceBytes(); err != nil {
-		return nil, err
-	}
 
 	if err := validateUsers(f.Users); err != nil {
 		return nil, err
@@ -469,19 +435,14 @@ func read(opts Options) (*reading, error) {
 	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
 		return nil, err
 	}
-	if f.Storage.ExpectedDir != "" {
-		if cfg.ExpectedDir, err = checkExpectedDir(resolvePath(dir, f.Storage.ExpectedDir), cfg.SeedDir); err != nil {
-			return nil, err
-		}
-	}
-	if cfg.Scenarios, err = scenarios(f.Scenarios, cfg.Users, cfg.ExpectedDir); err != nil {
+	if cfg.Scenarios, err = scenarios(f.Scenarios, cfg.Users); err != nil {
 		return nil, err
 	}
 	defaultDir := defaultScenariosDir
 	if opts.ConfigFile == "" {
 		defaultDir = defaultScenariosDirWithoutConfig
 	}
-	cfg.ScenarioFiles = NewScenarioFiles(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), cfg.Users, cfg.Scenarios, cfg.ExpectedDir)
+	cfg.ScenarioFiles = NewScenarioFiles(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), cfg.Users, cfg.Scenarios)
 	files, err := cfg.ScenarioFiles.List()
 	if err != nil {
 		return nil, err
@@ -494,7 +455,7 @@ func read(opts Options) (*reading, error) {
 	if cfg.chosen, err = choose(opts.Scenario, cfg.Scenarios, files); err != nil {
 		return nil, err
 	}
-	cfg.Scenario, cfg.Seed = opts.Scenario, opts.Seed
+	cfg.Scenario = opts.Scenario
 	return &reading{cfg: cfg, file: f, dir: dir, envFiles: envFiles, secrets: secrets}, nil
 }
 
@@ -564,21 +525,6 @@ func checkFixtureDir(field, name string) (string, error) {
 	return abs, nil
 }
 
-// checkExpectedDir checks the expected directory as checkFixtureDir does,
-// and refuses one inside the seed, whose files clients can see.
-func checkExpectedDir(name, seedDir string) (string, error) {
-	abs, err := checkFixtureDir("expected_dir", name)
-	if err != nil {
-		return "", err
-	}
-	if seedDir != "" {
-		if rel, err := filepath.Rel(seedDir, abs); err == nil && filepath.IsLocal(rel) {
-			return "", fmt.Errorf("expected_dir %s is inside seed_dir %s, so clients would see its fixtures", abs, seedDir)
-		}
-	}
-	return abs, nil
-}
-
 // isRootOrHome reports whether the absolute path abs is the filesystem root
 // or the home directory.
 func isRootOrHome(abs string) bool {
@@ -633,18 +579,6 @@ func (s storageConfig) limits() (backend.Limits, error) {
 		*setting.limit = *setting.value
 	}
 	return limits, nil
-}
-
-// maxTraceBytes returns the configured bound on each run's trace, or the
-// default if none is set. Like a storage limit, it cannot be turned off.
-func (e eventsConfig) maxTraceBytes() (int64, error) {
-	if e.MaxDiskBytes == nil {
-		return DefaultMaxTraceBytes, nil
-	}
-	if *e.MaxDiskBytes < 1 {
-		return 0, fmt.Errorf("events.max_disk_bytes is %d; it must be at least 1 and cannot be turned off", *e.MaxDiskBytes)
-	}
-	return *e.MaxDiskBytes, nil
 }
 
 func sameFile(a, b string) bool {

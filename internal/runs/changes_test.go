@@ -27,12 +27,12 @@ func TestRulesChangeDuringARun(t *testing.T) {
 		t.Fatalf("a stat before the change = %v", err)
 	}
 
-	set, err := m.ChangeRules(run, 1, []faults.Rule{denyStats}, nil)
+	set, err := m.changeRules(run, 1, []faults.Rule{denyStats}, nil)
 	if err != nil {
-		t.Fatalf("ChangeRules: %v", err)
+		t.Fatalf("changeRules: %v", err)
 	}
 	if set.Revision != 2 || len(set.Rules) != 1 || set.Rules[0].ID != "deny-stats" {
-		t.Errorf("ChangeRules = %+v, want revision 2 with deny-stats", set)
+		t.Errorf("changeRules = %+v, want revision 2 with deny-stats", set)
 	}
 	if got, err := m.Rules(run); err != nil || got.Revision != 2 || len(got.Rules) != 1 {
 		t.Errorf("Rules = %+v, %v; want the changed rules", got, err)
@@ -44,10 +44,10 @@ func TestRulesChangeDuringARun(t *testing.T) {
 		t.Errorf("a stat after the change = %v, want it denied on the session already open", err)
 	}
 
-	if _, err := m.ChangeRules(run, 1, nil, nil); !errors.Is(err, faults.ErrStaleRevision) {
+	if _, err := m.changeRules(run, 1, nil, nil); !errors.Is(err, faults.ErrStaleRevision) {
 		t.Errorf("a change from revision 1 = %v, want ErrStaleRevision", err)
 	}
-	if _, err := m.ChangeRules("20261024-101500.123-3f9a", 2, nil, nil); !errors.Is(err, ErrStaleRun) {
+	if _, err := m.changeRules("20261024-101500.123-3f9a", 2, nil, nil); !errors.Is(err, ErrStaleRun) {
 		t.Errorf("a change to another run = %v, want ErrStaleRun", err)
 	}
 	if _, err := m.Rules("20261024-101500.123-3f9a"); !errors.Is(err, ErrStaleRun) {
@@ -88,8 +88,8 @@ func TestARemovedRuleReleasesAConnectionItHolds(t *testing.T) {
 			}
 			defer raw.Close()
 			testutil.ReceiveUntil(t, logs, "injected fault")
-			if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil, nil); err != nil {
-				t.Fatalf("ChangeRules: %v", err)
+			if _, err := m.changeRules(m.Status().Run.ID, 1, nil, nil); err != nil {
+				t.Fatalf("changeRules: %v", err)
 			}
 			if err := raw.SetDeadline(time.Now().Add(waitTimeout)); err != nil {
 				t.Fatal(err)
@@ -111,19 +111,19 @@ func TestALiveRuleTakesTheServerDownAtItsMoment(t *testing.T) {
 		m := newManager(t, Options{})
 		run := m.Status().Run.ID
 		// A moment that a change removes before it comes never comes.
-		if _, err := m.ChangeRules(run, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
-			t.Fatalf("ChangeRules: %v", err)
+		if _, err := m.changeRules(run, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
+			t.Fatalf("changeRules: %v", err)
 		}
-		if _, err := m.ChangeRules(run, 2, nil, nil); err != nil {
-			t.Fatalf("ChangeRules: %v", err)
+		if _, err := m.changeRules(run, 2, nil, nil); err != nil {
+			t.Fatalf("changeRules: %v", err)
 		}
 		time.Sleep(time.Hour)
 		if s := m.Status(); s.State != StateUp {
 			t.Errorf("the status is %+v, want the server up once the outage's rule is removed", s)
 		}
 
-		if _, err := m.ChangeRules(run, 3, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
-			t.Fatalf("ChangeRules: %v", err)
+		if _, err := m.changeRules(run, 3, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
+			t.Fatalf("changeRules: %v", err)
 		}
 		time.Sleep(300*time.Millisecond - time.Nanosecond)
 		synctest.Wait()
@@ -141,8 +141,8 @@ func TestALiveRuleTakesTheServerDownAtItsMoment(t *testing.T) {
 func TestResetStopsTheTimersOfLiveRules(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m := newManager(t, Options{})
-		if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
-			t.Fatalf("ChangeRules: %v", err)
+		if _, err := m.changeRules(m.Status().Run.ID, 1, []faults.Rule{outageAt(300 * time.Millisecond)}, nil); err != nil {
+			t.Fatalf("changeRules: %v", err)
 		}
 		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
 			t.Fatalf("Reset: %v", err)
@@ -168,9 +168,9 @@ func TestALiveRuleIsNotTimedForSessionsThatHaveEnded(t *testing.T) {
 	deadline := time.Now().Add(waitTimeout)
 	for revision := uint64(1); ; revision++ {
 		later := faults.Rule{ID: fmt.Sprintf("later-%d", revision), Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.EndSession{}}
-		set, err := m.ChangeRules(run, revision, []faults.Rule{later}, nil)
+		set, err := m.changeRules(run, revision, []faults.Rule{later}, nil)
 		if err != nil {
-			t.Fatalf("ChangeRules: %v", err)
+			t.Fatalf("changeRules: %v", err)
 		}
 		if set.Counts[later.ID].Matched == 0 {
 			break
@@ -190,8 +190,8 @@ func TestALiveRuleClosesConnectionsAlreadyOpenAtItsMoment(t *testing.T) {
 	}
 	moment := &faults.Range[time.Duration]{Min: 100 * time.Millisecond, Max: 100 * time.Millisecond}
 	hangUp := faults.Rule{ID: "hang-up", Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.Drop{}}
-	if _, err := m.ChangeRules(m.Status().Run.ID, 1, []faults.Rule{hangUp}, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
+	if _, err := m.changeRules(m.Status().Run.ID, 1, []faults.Rule{hangUp}, nil); err != nil {
+		t.Fatalf("changeRules: %v", err)
 	}
 	_ = testutil.Receive(t, ended)
 	if got := m.Status(); got.State != StateUp {

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs the example in examples/compose with a stand-in application that
 # reaches sftpit over the compose network, then checks that the host reaches
-# the control API on loopback only. It needs the sftpit:local image, from
+# the API on loopback only. It needs the sftpit:local image, from
 # make image.
 set -eu
 cd "$(dirname "$0")/../.."
@@ -21,5 +21,5 @@ for port in 2122 8122; do
 	*) echo "FAIL: port $port is published on $published, want host loopback" >&2; exit 1 ;;
 	esac
 done
-health="$(curl --fail --silent --show-error "http://$($compose port sftpit 8122)/api/v1/health")"
-echo "ok: the host reaches the control API: $health"
+status="$(curl --fail --silent --show-error "http://$($compose port sftpit 8122)/api/status")"
+echo "ok: the host reaches the API: $status"

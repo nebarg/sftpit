@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -175,7 +174,7 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 		if opts.Logger == nil {
 			opts.Logger = logger
 		}
-		handler = runs.Handler(run, embedded, nil, config.Policy{}, opts)
+		handler = runs.Handler(embedded, nil, config.Policy{}, opts)
 	}
 	var sessions sync.WaitGroup
 	s := &server{files: run.Files, run: run, wait: sessions.Wait}
@@ -203,12 +202,11 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 }
 
 // startScenario starts runs, as sftpit serve does, whose first run injects
-// the faults of rules, drawing from seed, and logs to logger, or nowhere if
-// it is nil.
-func startScenario(tb testing.TB, rules []faults.Rule, seed faults.Seed, logger *slog.Logger) *server {
+// the faults of rules, and logs to logger, or nowhere if it is nil.
+func startScenario(tb testing.TB, rules []faults.Rule, logger *slog.Logger) *server {
 	tb.Helper()
 	_, srv := startRuns(tb, runs.Options{
-		Scenarios: map[string]config.Scenario{"test": {Rules: rules, Seed: &seed}},
+		Scenarios: map[string]config.Scenario{"test": {Rules: rules}},
 		Scenario:  "test",
 		Logger:    logger,
 	})
@@ -285,7 +283,7 @@ scenarios:
 	if err != nil {
 		tb.Fatalf("Load: %v", err)
 	}
-	return runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario, Seed: cfg.Seed}
+	return runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario}
 }
 
 // testUsers are the users of a server: the test user, with a password and
@@ -468,34 +466,6 @@ func (l *capturedLog) text() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.buf.String()
-}
-
-// assertSnapshot checks that srv has logged one snapshot: of the file at the
-// virtual path name holding data, closed as one of closedBy says, with a copy
-// of data in the run's snapshots directory.
-func (l *capturedLog) assertSnapshot(t *testing.T, srv *server, name string, data []byte, closedBy ...string) {
-	t.Helper()
-	var got []string
-	for record := range strings.Lines(l.text()) {
-		if strings.Contains(record, "msg=snapshot") {
-			// Leave out the time, and the connection, which differ between
-			// runs.
-			_, rest, _ := strings.Cut(strings.TrimSpace(record), " ")
-			got = append(got, connID.ReplaceAllString(rest, "conn=N "))
-		}
-	}
-	stored := backend.StoredName(name)
-	var want []string
-	for _, by := range closedBy {
-		want = append(want, fmt.Sprintf("level=INFO msg=snapshot conn=N user=%s path=%s closed_by=%s size=%d sha256=%s copy=snapshots/1/%s", testUser, name, by, len(data), digest(data), stored))
-	}
-	if len(got) != 1 || !slices.Contains(want, got[0]) {
-		t.Errorf("snapshots logged:\n%s\nwant one of:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
-	}
-	copied, err := os.ReadFile(filepath.Join(srv.run.Dir, "snapshots", "1", filepath.FromSlash(stored)))
-	if err != nil || !bytes.Equal(copied, data) {
-		t.Errorf("the snapshot's copy has %d bytes (%v), want the %d snapshotted", len(copied), err, len(data))
-	}
 }
 
 // connID matches the connection a session's log record names.
@@ -778,22 +748,6 @@ func phpseclibFailures(tb testing.TB, transcript []line) map[string]string {
 // uploadCutoff is where partial uploads are cut off. It falls inside a write
 // for both clients, so the write that crosses it is trimmed.
 const uploadCutoff = 1<<20 + 1000
-
-// phpseclibClosedBy holds how a snapshot may say phpseclib closed a handle
-// whose upload failed. phpseclib takes the reply to its first WRITE for its
-// CLOSE's, so it disconnects without waiting for its CLOSE to be answered.
-// The session can end before then, and the end closes the handle.
-var phpseclibClosedBy = []string{"client", `"session end"`}
-
-// snapshotClosedBy returns how a snapshot may say a handle was closed when
-// its upload gets result: by the fault, if result drops the connection, or
-// else as the client closes it, which byClient holds.
-func snapshotClosedBy(byClient []string, result sftpproxy.Action) []string {
-	if _, ok := result.(sftpproxy.Drop); ok {
-		return []string{"fault"}
-	}
-	return byClient
-}
 
 // The paths an application uploads to and then publishes at.
 const (

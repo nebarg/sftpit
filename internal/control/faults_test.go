@@ -51,9 +51,6 @@ func TestFaultsThroughTheAPI(t *testing.T) {
 
 func TestFaultsAreRemovedAllAtOnceAndByAReset(t *testing.T) {
 	m, api := start(t, runs.Options{Scenario: "own"})
-	if code, body := call(t, api, "PUT", "/api/v1/runs/"+m.Status().Run.ID+"/rules", `{"revision": 1, "faults": [`+denyStats+`]}`); code != http.StatusOK {
-		t.Fatalf("PUT rules = %d %v", code, body)
-	}
 	for range 2 {
 		if code, body := call(t, api, "POST", "/api/faults", `{"preset": "slow_responses", "seconds": 1}`); code != http.StatusCreated {
 			t.Fatalf("POST /api/faults = %d %v", code, body)
@@ -63,7 +60,7 @@ func TestFaultsAreRemovedAllAtOnceAndByAReset(t *testing.T) {
 		t.Errorf("DELETE /api/faults = %d, leaving %+v; want 204 and none", code, m.Faults())
 	}
 	if set, _ := m.Rules(m.Status().Run.ID); len(set.Rules) != 1 || set.Rules[0].ID != "deny-stats" {
-		t.Errorf("after removing the faults, the rules are %+v, want the run's own", set.Rules)
+		t.Errorf("after removing the faults, the rules are %+v, want the scenario's", set.Rules)
 	}
 
 	if code, body := call(t, api, "POST", "/api/faults", `{"preset": "deletes_fail"}`); code != http.StatusCreated {

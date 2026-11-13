@@ -60,8 +60,8 @@ func (m *Manager) Fault(id string) (Fault, error) {
 
 // AddFault adds spec to the current run, switched on, as a rule tried after
 // the run's own rules, and returns it. Its ID comes from its name. It fails
-// with spec's error if spec is not a fault the run can inject, with
-// ErrDrained once the run has been drained, and once Close has returned.
+// with spec's error if spec is not a fault the run can inject, and once
+// Close has returned.
 func (m *Manager) AddFault(spec config.Fault) (Fault, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()

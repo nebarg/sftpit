@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -533,58 +532,4 @@ func inMemoryBackend(t *testing.T) net.Conn {
 		}
 	})
 	return clientEnd
-}
-
-// snapshotTime is how long each snapshot takes in these tests, as it might
-// for a large file.
-const snapshotTime = time.Second
-
-// snapshots is a Snapshot hook that records the paths it is called with.
-// Each snapshot takes snapshotTime.
-type snapshots struct {
-	mu    sync.Mutex
-	paths []string
-}
-
-func (s *snapshots) take(path string) (sftpproxy.Snapshot, error) {
-	time.Sleep(snapshotTime)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.paths = append(s.paths, path)
-	return snapshotOf(path), nil
-}
-
-func (s *snapshots) taken() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return slices.Clone(s.paths)
-}
-
-// snapshotLog is the log line for snapshotOf("/f"), closed as closedBy says,
-// quoted as the log quotes it.
-func snapshotLog(closedBy string) string {
-	const path = "/f"
-	snap := snapshotOf(path)
-	return fmt.Sprintf("level=INFO msg=snapshot path=%s closed_by=%s size=%d sha256=%x", path, closedBy, snap.Size, snap.SHA256)
-}
-
-// assertSnapshotsLogged checks that logs has exactly the snapshot lines in
-// want.
-func assertSnapshotsLogged(t *testing.T, logs string, want ...string) {
-	t.Helper()
-	var got []string
-	for line := range strings.Lines(logs) {
-		if strings.Contains(line, "msg=snapshot") {
-			_, after, _ := strings.Cut(strings.TrimSpace(line), " ")
-			got = append(got, after)
-		}
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("snapshots logged:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
-	}
-}
-
-// snapshotOf is the snapshot that snapshots gives the file at path.
-func snapshotOf(path string) sftpproxy.Snapshot {
-	return sftpproxy.Snapshot{Size: cutoff, SHA256: sha256.Sum256([]byte(path))}
 }

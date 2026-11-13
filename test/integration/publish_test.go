@@ -2,20 +2,19 @@ package integration
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
-	"time"
 )
 
 // TestOpenSSHPublishesThroughAPartFile has OpenSSH's sftp stand in for an
 // application that uploads under a temporary name and then renames the file
-// into place, with a scenario that cuts off its first upload, and checks the
-// run's verdict. An uploader that tries again publishes the whole file and
-// passes; one that ignores the failure publishes what was stored and fails,
-// on the published file's hash.
+// into place, with a scenario that cuts off its first upload. An uploader
+// that tries again publishes the whole file; one that ignores the failure
+// publishes only what was stored before the cutoff.
 func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
 	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
@@ -43,10 +42,6 @@ func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
           path: `+temporaryPath+`
           attempts: [1]
           after_bytes: `+strconv.Itoa(uploadCutoff)+`
-    assertions:
-      - {type: rule_fired, rule_id: first-upload-cutoff, exactly: 1}
-      - {type: file_hash, path: `+publishedPath+`, sha256: `+hex.EncodeToString(sum[:])+`}
-      - {type: path_absent, path: `+temporaryPath+`}
 `, "publish")
 			m, srv := startRuns(t, opts)
 			work := t.TempDir()
@@ -61,20 +56,19 @@ func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
 				}
 			}
 
-			r, err := m.Assert(t.Context(), srv.run.ID, 5*time.Second)
+			srv.waitForSessions()
+			if set, err := m.Rules(srv.run.ID); err != nil || set.Counts["first-upload-cutoff"].Fired != 1 {
+				t.Errorf("the cutoff fired %+v (%v), want once", set.Counts["first-upload-cutoff"], err)
+			}
+			published, err := os.ReadFile(srv.path(publishedPath))
 			if err != nil {
-				t.Fatalf("Assert: %v", err)
+				t.Fatalf("the published file: %v", err)
 			}
-			if r.Passed != tt.passed {
-				t.Errorf("the run passed %v, want %v: %+v", r.Passed, tt.passed, r)
+			if got := sha256.Sum256(published); (got == sum) != tt.passed {
+				t.Errorf("the published file holds %d bytes with sha256 %x; want the whole upload: %v", len(published), got, tt.passed)
 			}
-			if got := r.Rules["first-upload-cutoff"].Fired; got != 1 {
-				t.Errorf("the cutoff fired %d times, want once", got)
-			}
-			for _, a := range r.Assertions {
-				if wantPass := tt.passed || !strings.HasPrefix(a.Description, "file_hash "); a.Passed != wantPass {
-					t.Errorf("%s passed %v, want %v: %s", a.Description, a.Passed, wantPass, a.Detail)
-				}
+			if _, err := os.Stat(srv.path(temporaryPath)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the temporary file is still there (%v)", err)
 			}
 		})
 	}

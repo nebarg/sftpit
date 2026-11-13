@@ -16,11 +16,9 @@ import (
 func TestPartialDownloadShortensTheReadThatCrossesItsCutoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var logs syncBuffer
-		var snaps snapshots
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults:   inSequence(sftpproxy.PartialDownload{Cutoff: 100, Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}}),
-			Snapshot: snaps.take,
-			Logger:   logs.logger(),
+			Faults: inSequence(sftpproxy.PartialDownload{Cutoff: 100, Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}}),
+			Logger: logs.logger(),
 		})
 		openForDownload(t, p, fb)
 		data := bytes.Repeat([]byte{'x'}, 200)
@@ -56,9 +54,6 @@ func TestPartialDownloadShortensTheReadThatCrossesItsCutoff(t *testing.T) {
 		p.client.send(t, 6, &sftpwire.Close{Handle: "h"})
 		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
 		p.client.assertReplies(t, 6)
-		if got := snaps.taken(); len(got) != 0 {
-			t.Errorf("snapshots of %q, want none for a download", got)
-		}
 		logs.assertLogged(t, `level=INFO msg="injected fault" request=SSH_FXP_READ path=/f fault=partial_download cutoff=100 offset=50 length=100`)
 		logs.assertLogged(t, `level=INFO msg="injected fault" request=SSH_FXP_READ path=/f fault=fail when=before status=SSH_FX_FAILURE cutoff=100 offset=100`)
 		if n := strings.Count(logs.String(), "injected fault"); n != 2 {

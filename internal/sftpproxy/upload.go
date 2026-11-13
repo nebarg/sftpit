@@ -75,7 +75,7 @@ type stored struct {
 
 // corruptStored applies the upload corruption on req's handle if req is a
 // write that it changes, and reports whether it did. A write it changes
-// faults the handle, so its file is snapshotted. Only the first write it
+// faults the handle. Only the first write it
 // changes is logged as a fault; the writes it changes after that are its
 // effects.
 func (s *session) corruptStored(req *request) bool {

@@ -1,9 +1,8 @@
-// Package control serves sftpit's control API over HTTP: whether sftpit is
-// alive and ready, how to connect to the SFTP server, the status of the
-// current run, its rules and chaos, which can change during the run, the
-// release of its stalls, the events, files and snapshot copies of recent
-// runs, the scenarios, and resets that start the next run. It serves the
-// dashboard, which uses the API, too. Its Client calls the API.
+// Package control serves sftpit's API over HTTP: the faults of the current
+// run, which can be added, turned on and off and removed, what clients did,
+// the run's files, how to connect, the server's status, the release of
+// held requests, and resets that turn every fault off and restore the
+// starting files. It serves the dashboard, which uses the API, too.
 //
 // The API answers only requests addressed to a loopback host, or to a host
 // name it is given, such as a compose service's, so a web page cannot reach
@@ -14,7 +13,6 @@
 package control
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +21,6 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -67,30 +64,7 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("GET /api/files", a.current(a.files))
 	mux.HandleFunc("GET /api/files/content", a.current(a.fileContent))
-	mux.HandleFunc("POST /api/release", a.current(a.releaseStalls))
-	mux.HandleFunc("GET /api/v1/health", a.health)
-	mux.HandleFunc("GET /api/v1/server", a.server)
-	mux.HandleFunc("GET /api/v1/ready", a.ready)
-	mux.HandleFunc("GET /api/v1/status", a.status)
-	mux.HandleFunc("POST /api/v1/reset", a.reset)
-	mux.HandleFunc("GET /api/v1/next", a.next)
-	mux.HandleFunc("PUT /api/v1/next", a.queue)
-	mux.HandleFunc("DELETE /api/v1/next", a.unqueue)
-	mux.HandleFunc("POST /api/v1/rules/check", a.checkRules)
-	mux.HandleFunc("GET /api/v1/runs/{id}/rules", a.rules)
-	mux.HandleFunc("PUT /api/v1/runs/{id}/rules", a.changeRules)
-	mux.HandleFunc("POST /api/v1/runs/{id}/release-stalls", a.releaseStalls)
-	mux.HandleFunc("POST /api/v1/runs/{id}/drain", a.drain)
-	mux.HandleFunc("POST /api/v1/runs/{id}/assert", a.assert)
-	mux.HandleFunc("GET /api/v1/runs/{id}/report", a.report)
-	mux.HandleFunc("GET /api/v1/runs/{id}/events", a.events)
-	mux.HandleFunc("GET /api/v1/runs/{id}/trace", a.trace)
-	mux.HandleFunc("GET /api/v1/runs/{id}/files", a.files)
-	mux.HandleFunc("GET /api/v1/runs/{id}/files/content", a.fileContent)
-	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots", a.snapshots)
-	mux.HandleFunc("GET /api/v1/runs/{id}/snapshots/{n}/content", a.snapshotContent)
-	mux.HandleFunc("GET /api/v1/scenarios", a.scenarios)
-	mux.HandleFunc("PUT /api/v1/scenarios/{name}", a.saveScenario)
+	mux.HandleFunc("POST /api/release", a.releaseStalls)
 	return protect(mux, opts.Hosts)
 }
 
@@ -99,48 +73,8 @@ type api struct {
 	opts Options
 }
 
-func (a *api) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// ready reports whether the runs can be used, which they cannot once a
-// reset has failed, until another succeeds.
-func (a *api) ready(w http.ResponseWriter, _ *http.Request) {
-	if err := a.runs.Status().Err; err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ready": true})
-}
-
 func (a *api) status(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
-}
-
-func (a *api) reset(w http.ResponseWriter, r *http.Request) {
-	var body ResetRequest
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	req := runs.ResetRequest{Run: body.Run, Scenario: body.Scenario, Seed: (*faults.Seed)(body.Seed)}
-	if given(body.Faults) || given(body.Chaos) || given(body.Assertions) {
-		inline, err := a.inline(body.Faults, body.Chaos, body.Assertions)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		req.Inline = inline
-	}
-	// A reset runs to its end even if the client goes away, as stopping
-	// part way would leave admission closed.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resetTimeout)
-	defer cancel()
-	status, err := a.runs.Reset(ctx, req)
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, newStatus(status))
 }
 
 // current returns h for the current run, as a route of the run whose ID is
@@ -155,11 +89,9 @@ func (a *api) current(h http.HandlerFunc) http.HandlerFunc {
 // statusFor returns the HTTP status that answers err from the runs.
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision), errors.Is(err, runs.ErrDrained):
+	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
 		return http.StatusConflict
-	case errors.Is(err, runs.ErrUnavailable):
-		return http.StatusServiceUnavailable
-	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, runs.ErrSeedWithoutScenario), errors.Is(err, runs.ErrTwoScenarios), errors.Is(err, config.ErrInvalidScenarioFile):
+	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, config.ErrInvalidScenarioFile):
 		return http.StatusBadRequest
 	case errors.Is(err, runs.ErrUnknownRun), errors.Is(err, runs.ErrUnknownFault):
 		return http.StatusNotFound
@@ -167,161 +99,18 @@ func statusFor(err error) int {
 	return http.StatusInternalServerError
 }
 
-func (a *api) rules(w http.ResponseWriter, r *http.Request) {
-	set, err := a.runs.Rules(r.PathValue("id"))
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-	a.writeRules(w, r.PathValue("id"), set)
-}
-
-func (a *api) changeRules(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Revision *uint64 `json:"revision"`
-		RulesRequest
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	if body.Revision == nil {
-		writeError(w, http.StatusBadRequest, errors.New("revision is required: the revision of the rules that the change replaces"))
-		return
-	}
-	rules, chaos, err := a.parseRules(body.RulesRequest)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	set, err := a.runs.ChangeRules(r.PathValue("id"), *body.Revision, rules, chaos)
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-	a.writeRules(w, r.PathValue("id"), set)
-}
-
-// inline returns the inline scenario of a reset that gives rules, chaos or
-// both.
-func (a *api) inline(rules, chaos, assertions json.RawMessage) (*runs.InlineScenario, error) {
-	s := &runs.InlineScenario{}
-	var err error
-	if given(rules) {
-		if s.Rules, err = config.ParseRules(rules, a.runs.Users()); err != nil {
-			return nil, err
-		}
-	}
-	if s.Chaos, err = a.chaos(chaos); err != nil {
-		return nil, err
-	}
-	if s.Assertions, err = a.assertions(assertions, s.Rules, s.Chaos); err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
-// chaos returns the chaos that raw gives, or nil if it gives none.
-func (a *api) chaos(raw json.RawMessage) (*faults.Chaos, error) {
-	if !given(raw) {
-		return nil, nil
-	}
-	return config.ParseChaos(raw, a.runs.Users())
-}
-
-// given reports whether a field of a request body is set, to anything but
-// null.
-func given(raw json.RawMessage) bool {
-	return len(raw) > 0 && string(raw) != "null"
-}
-
-func (a *api) releaseStalls(w http.ResponseWriter, r *http.Request) {
-	if err := a.runs.ReleaseStalls(r.PathValue("id")); err != nil {
+func (a *api) releaseStalls(w http.ResponseWriter, _ *http.Request) {
+	if err := a.runs.ReleaseStalls(a.runs.Status().Run.ID); err != nil {
 		writeError(w, statusFor(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
 }
 
-// writeRules writes set, the rules of run, as the reply to a request for a
-// run's rules or a change of them: the revision, the chaos, if any, the
-// rules in the long form, in the order they are tried, and what each rule
-// has done, those of chaos included, by rule ID.
-func (a *api) writeRules(w http.ResponseWriter, run string, set faults.RuleSet) {
-	rec, err := a.runs.Events(run)
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-	rules, err := config.RulesJSON(set.Rules)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	var chaos json.RawMessage
-	if set.Chaos != nil {
-		if chaos, err = config.ChaosJSON(set.Chaos); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-	var assertions json.RawMessage
-	stated, err := a.runs.Assertions(run)
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-	if len(stated) > 0 {
-		if assertions, err = config.AssertionsJSON(stated); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-	counts := make(map[string]ruleCounts, len(set.Counts))
-	for id, c := range set.Counts {
-		counts[id] = ruleCounts{Matched: c.Matched, Selected: c.Selected, Fired: c.Fired, Canceled: rec.Canceled(id)}
-	}
-	writeJSON(w, http.StatusOK, struct {
-		Revision uint64                `json:"revision"`
-		Chaos    json.RawMessage       `json:"chaos,omitempty"`
-		Faults   json.RawMessage       `json:"faults"`
-		Counts   map[string]ruleCounts `json:"counts"`
-
-		Assertions json.RawMessage `json:"assertions,omitempty"`
-	}{set.Revision, chaos, rules, counts, assertions})
-}
-
-// ruleCounts are what a rule has done in the run, as faults.Counts, and
-// how many of its faults' waits a change of rules canceled.
-type ruleCounts struct {
-	Matched  uint64 `json:"matched"`
-	Selected uint64 `json:"selected"`
-	Fired    uint64 `json:"fired"`
-	Canceled uint64 `json:"canceled"`
-}
-
-// ResetRequest is the body of a reset, which chooses the next run as
-// runs.ResetRequest does. Every field is optional, so an empty body repeats
-// the current run. Faults, Chaos and Assertions, if any is given, are an
-// inline scenario's rules and chaos, as a change of rules gives them, and
-// its assertions, as a scenario gives them.
-type ResetRequest struct {
-	Run        string          `json:"run,omitempty"`
-	Scenario   *string         `json:"scenario,omitempty"`
-	Faults     json.RawMessage `json:"faults,omitempty"`
-	Chaos      json.RawMessage `json:"chaos,omitempty"`
-	Assertions json.RawMessage `json:"assertions,omitempty"`
-	Seed       *Seed           `json:"seed,omitempty"`
-}
-
-// Status is the reply to a status request, a reset or a release of stalls.
+// Status is the reply to a status request or a release of held requests.
 type Status struct {
-	SFTP    SFTPStatus `json:"sftp"`
-	Backend string     `json:"backend"`
-	Run     RunStatus  `json:"run"`
-
-	// Queued reports whether the next reset's rules are queued, as
-	// GET /api/v1/next gives them.
-	Queued bool `json:"queued"`
+	SFTP SFTPStatus `json:"sftp"`
+	Run  RunStatus  `json:"run"`
 }
 
 // SFTPStatus says whether clients can reach the current run.
@@ -331,85 +120,25 @@ type SFTPStatus struct {
 	Error     string     `json:"error,omitempty"`
 }
 
-// RunStatus describes the current run: the scenario it started with, if
-// any, named or inline, its seed and the revision of its rules.
+// RunStatus describes the current run: its ID, the scenario it started
+// with, if any, how many requests and replies holds are holding, and how
+// many connections freezes are holding.
 type RunStatus struct {
-	ID         string `json:"id"`
-	Scenario   string `json:"scenario,omitempty"`
-	Inline     bool   `json:"inline,omitempty"`
-	Seed       Seed   `json:"seed"`
-	SeedPinned bool   `json:"seed_pinned,omitempty"`
-	Revision   uint64 `json:"revision"`
-
-	// Stalled counts the requests and replies that stalls hold, and Frozen
-	// the connections that freezes hold.
-	Stalled int `json:"stalled"`
-	Frozen  int `json:"frozen"`
-
-	Trace TraceStatus `json:"trace"`
-}
-
-// TraceStatus describes a run's trace, the file of its events that
-// GET /api/v1/runs/{id}/trace serves: its size, and whether it holds every
-// event so far. A trace stops at its limit, or at the first error writing
-// it, which Error gives.
-type TraceStatus struct {
-	Bytes    int64  `json:"bytes"`
-	Complete bool   `json:"complete"`
-	Error    string `json:"error,omitempty"`
+	ID       string `json:"id"`
+	Scenario string `json:"scenario,omitempty"`
+	Stalled  int    `json:"stalled"`
+	Frozen   int    `json:"frozen"`
 }
 
 func newStatus(s runs.Status) Status {
-	sc := s.Run.Scenario
 	body := Status{
-		SFTP:    SFTPStatus{State: s.State, DownUntil: s.DownUntil.UTC()},
-		Backend: "embedded",
-		Run: RunStatus{
-			ID:         s.Run.ID,
-			Scenario:   sc.Name,
-			Inline:     sc.Inline,
-			Seed:       Seed(sc.Seed),
-			SeedPinned: sc.Pinned,
-			Revision:   s.Revision,
-			Stalled:    s.Stalled,
-			Frozen:     s.Frozen,
-			Trace:      TraceStatus{Bytes: s.Trace.Size, Complete: s.Trace.Complete},
-		},
-		Queued: s.Queued,
+		SFTP: SFTPStatus{State: s.State, DownUntil: s.DownUntil.UTC()},
+		Run:  RunStatus{ID: s.Run.ID, Scenario: s.Run.Scenario.Name, Stalled: s.Stalled, Frozen: s.Frozen},
 	}
 	if s.Err != nil {
 		body.SFTP.Error = s.Err.Error()
 	}
-	if s.Trace.Err != nil {
-		body.Run.Trace.Error = s.Trace.Err.Error()
-	}
 	return body
-}
-
-// Seed is a faults.Seed in JSON. It is written as a decimal string, as the
-// proto3 JSON mapping writes a uint64, since JavaScript reads a number past
-// 2^53 inexactly, and read from a string or a number.
-type Seed faults.Seed
-
-// MarshalJSON writes s as a decimal string.
-func (s Seed) MarshalJSON() ([]byte, error) {
-	return json.Marshal(strconv.FormatUint(uint64(s), 10))
-}
-
-// UnmarshalJSON reads a seed written as a decimal string or a number.
-func (s *Seed) UnmarshalJSON(b []byte) error {
-	text := string(b)
-	if strings.HasPrefix(text, `"`) {
-		if err := json.Unmarshal(b, &text); err != nil {
-			return err
-		}
-	}
-	seed, err := faults.ParseSeed(text)
-	if err != nil {
-		return err
-	}
-	*s = Seed(seed)
-	return nil
 }
 
 // decodeBody decodes the JSON body of r into v, which an empty body leaves

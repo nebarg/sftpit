@@ -14,17 +14,14 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/control"
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/testutil"
 )
 
@@ -302,7 +299,7 @@ func TestServeShowsWhatClientsDidAsActivity(t *testing.T) {
 	// An event is recorded as its reply is sent, so the client's last
 	// reply means the activity holds every line.
 	var got []string
-	lines := requestJSON(t, "GET", api+"/activity", "")["lines"].([]any)
+	lines := requestJSON(t, api+"/activity")["lines"].([]any)
 	for _, l := range lines {
 		l := l.(map[string]any)
 		var line strings.Builder
@@ -339,7 +336,7 @@ func TestServeShowsWhatClientsDidAsActivity(t *testing.T) {
 	if first := lines[0].(map[string]any); !strings.HasPrefix(first["client"].(string), "SSH-2.0-") || !strings.HasPrefix(first["remote"].(string), "127.0.0.1:") {
 		t.Errorf("the connection line = %v, want the client's version and address", first)
 	}
-	latest := requestJSON(t, "GET", api+"/activity?limit=2", "")["lines"].([]any)
+	latest := requestJSON(t, api+"/activity?limit=2")["lines"].([]any)
 	if len(latest) != 2 || latest[1].(map[string]any)["path"] != "/missing.csv" {
 		t.Errorf("activity?limit=2 = %v, want the latest two lines", latest)
 	}
@@ -491,79 +488,6 @@ scenarios:
 	}
 }
 
-func TestServeShowsRecordsAndDrawsFromTheScenariosSeed(t *testing.T) {
-	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	slowStat := `
-      - id: slow-stat
-        match: {operation: stat}
-        action: {type: delay, when: before, duration: {min: 1ms, max: 20ms}}
-`
-	testutil.WriteFile(t, config, "schema_version: 1\nserver:\n  host_key: keys\nscenarios:\n  pinned:\n    seed: 481516\n    faults:"+slowStat+"  fresh:\n    faults:"+slowStat)
-	freshLine := regexp.MustCompile(`  seed: (\d+) \(fresh; --seed (\d+) repeats its decisions\)\n`)
-	tests := []struct {
-		args []string
-		// pinned is the seed shown and recorded, or "" for a fresh one.
-		pinned string
-	}{
-		{[]string{"--scenario", "pinned"}, "481516"},
-		{[]string{"--scenario", "pinned", "--seed", "7"}, "7"},
-		{[]string{"--scenario", "fresh", "--seed", "18446744073709551615"}, "18446744073709551615"},
-		{[]string{"--scenario", "fresh"}, ""},
-		{[]string{"--scenario", "fresh"}, ""},
-	}
-	var fresh []string
-	for _, tt := range tests {
-		s := startServe(t, append([]string{"--config", config}, tt.args...)...)
-		var record struct {
-			Scenario   string `json:"scenario"`
-			Seed       uint64 `json:"seed"`
-			SeedPinned bool   `json:"seed_pinned"`
-		}
-		b, err := os.ReadFile(filepath.Join(s.workspace, "runs", s.run, "run.json"))
-		if err == nil {
-			err = json.Unmarshal(b, &record)
-		}
-		c := s.dial(t, "test", "test")
-		if _, err := c.Stat("/"); err != nil {
-			t.Errorf("%v: Stat: %v", tt.args, err)
-		}
-		c.Close()
-		s.stop(t)
-		if err != nil {
-			t.Fatalf("%v: run.json: %v", tt.args, err)
-		}
-
-		out := s.stdout.String()
-		shown := tt.pinned
-		if tt.pinned != "" {
-			if !strings.Contains(out, "  seed: "+tt.pinned+" (pinned)\n") {
-				t.Errorf("%v: banner does not show seed %s as pinned:\n%s", tt.args, tt.pinned, out)
-			}
-		} else if m := freshLine.FindStringSubmatch(out); m == nil || m[1] != m[2] {
-			t.Fatalf("%v: banner does not show a fresh seed and how to repeat it:\n%s", tt.args, out)
-		} else {
-			shown = m[1]
-			fresh = append(fresh, shown)
-			if _, err := strconv.ParseUint(shown, 10, 32); err != nil {
-				t.Errorf("%v: fresh seed %s does not fit in 32 bits", tt.args, shown)
-			}
-		}
-		if want := tt.args[1]; record.Scenario != want || strconv.FormatUint(record.Seed, 10) != shown || record.SeedPinned != (tt.pinned != "") {
-			t.Errorf("%v: run.json records %+v, want scenario %s and seed %s, pinned: %v", tt.args, record, want, shown, tt.pinned != "")
-		}
-		seed, _ := strconv.ParseUint(shown, 10, 64)
-		key := faults.Key{Rule: "slow-stat", Choice: "duration", User: "test", Path: "/", Operation: "stat", Ordinal: 1}
-		duration := faults.Between(faults.Seed(seed).Draw(key), time.Millisecond, 20*time.Millisecond)
-		if fired := fmt.Sprintf(`msg="rule fired" rule=slow-stat operation=stat path=/ user=test ordinal=1 duration=%v`, duration); !strings.Contains(s.stderr.String(), fired) {
-			t.Errorf("%v: stderr lacks %s, drawn from seed %s:\n%s", tt.args, fired, shown, s.stderr.String())
-		}
-	}
-	// Two fresh 32-bit seeds coincide with a chance of 1 in 2^32.
-	if len(fresh) == 2 && fresh[0] == fresh[1] {
-		t.Errorf("two runs drew the same fresh seed %s", fresh[0])
-	}
-}
-
 func TestServeKeepsADataDirectory(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "sandbox-data")
 
@@ -667,15 +591,15 @@ func TestServeResetsThroughTheControlAPI(t *testing.T) {
 	if err := c.Remove("/orders.csv"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	api := "http://" + s.apiAddr + "/api/v1"
-	if status := requestJSON(t, "GET", api+"/status", ""); status["run"].(map[string]any)["id"] != s.run {
+	api := "http://" + s.apiAddr + "/api"
+	if status := requestJSON(t, api+"/status"); status["run"].(map[string]any)["id"] != s.run {
 		t.Errorf("status = %v, want the run in the banner, %s", status, s.run)
 	}
 
-	reset := requestJSON(t, "POST", api+"/reset", `{"run": "`+s.run+`"}`)
-	next, _ := reset["run"].(map[string]any)["id"].(string)
+	requestJSONStatus(t, "POST", api+"/reset", "", http.StatusNoContent)
+	next, _ := requestJSON(t, api+"/status")["run"].(map[string]any)["id"].(string)
 	if next == "" || next == s.run {
-		t.Fatalf("reset = %v, want a new run", reset)
+		t.Fatalf("after a reset the run is %q, want a new one", next)
 	}
 	if _, err := s.dial(t, "test", "test").Stat("/orders.csv"); err != nil {
 		t.Errorf("the next run lacks the seeded file: %v", err)
@@ -691,7 +615,7 @@ func TestServeAnswersTheControlHostsItIsGiven(t *testing.T) {
 		t.Errorf("banner does not list the control hosts:\n%s", s.stdout.String())
 	}
 	for host, want := range map[string]int{"sftpit:8122": http.StatusOK, "FILES.test": http.StatusOK, "other:8122": http.StatusForbidden} {
-		req, err := http.NewRequest(http.MethodGet, "http://"+s.apiAddr+"/api/v1/status", nil)
+		req, err := http.NewRequest(http.MethodGet, "http://"+s.apiAddr+"/api/status", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -776,7 +700,7 @@ func TestServeReportsHowToConnectAndServesTheDashboard(t *testing.T) {
 		t.Errorf("GET / = %s with %q, want the dashboard", resp.Status, resp.Header.Get("Content-Type"))
 	}
 
-	server := requestJSON(t, "GET", "http://"+s.apiAddr+"/api/v1/server", "")
+	server := requestJSON(t, "http://"+s.apiAddr+"/api/server")
 	if server["sftp_address"] != s.addr || server["profile"] != "loopback" || server["workspace"] != s.workspace {
 		t.Errorf("server = %v, want %s in the loopback profile, with workspace %s", server, s.addr, s.workspace)
 	}
@@ -797,9 +721,9 @@ func TestServeKeepsConfiguredPasswordsOutOfTheAPI(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "sftpit.yaml")
 	testutil.WriteFile(t, config, "schema_version: 1\nusers:\n  - {name: partner, password_env: SFTPIT_SERVE_TEST_PASSWORD, home: /partner}\n")
 	s := startServe(t, "--config", config)
-	resp, err := http.Get("http://" + s.apiAddr + "/api/v1/server")
+	resp, err := http.Get("http://" + s.apiAddr + "/api/server")
 	if err != nil {
-		t.Fatalf("GET /api/v1/server: %v", err)
+		t.Fatalf("GET /api/server: %v", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
@@ -814,25 +738,7 @@ func TestServeKeepsConfiguredPasswordsOutOfTheAPI(t *testing.T) {
 	}
 }
 
-func TestServeRecordsEventsThatTheAPIServes(t *testing.T) {
-	s := startServe(t)
-	c := s.dial(t, "test", "test")
-	if _, err := c.Stat("/missing"); err == nil {
-		t.Fatal("Stat of a missing file succeeded")
-	}
-	// The event is recorded before the client has its reply.
-	page := requestJSON(t, "GET", "http://"+s.apiAddr+"/api/v1/runs/"+s.run+"/events?kind=operation&path=/missing", "")
-	ops, _ := page["events"].([]any)
-	if len(ops) != 1 {
-		t.Fatalf("operations on /missing = %v, want the STAT", ops)
-	}
-	op := ops[0].(map[string]any)
-	if op["request"] != "SSH_FXP_STAT" || op["user"] != "test" || op["reply"] != "SSH_FX_NO_SUCH_FILE" || op["connection"] == nil {
-		t.Errorf("operation = %v, want test's STAT answered no such file", op)
-	}
-}
-
-func TestServeRunsScenarioFilesAndSavesThemThroughTheAPI(t *testing.T) {
+func TestServeRunsScenarioFiles(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "sftpit.yaml")
 	testutil.WriteFile(t, config, "schema_version: 1\nscenarios:\n  configured: {faults: []}\n")
@@ -848,116 +754,18 @@ faults:
 		t.Errorf("Stat = %v, want the scenario file's fault", err)
 	}
 
-	api := "http://" + s.apiAddr + "/api/v1"
-	req, err := http.NewRequest(http.MethodPut, api+"/scenarios/saved", strings.NewReader(`{"faults": [{"id": "deny-mkdir", "match": {"operation": "mkdir"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set(control.RequestHeader, "1")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("PUT scenarios/saved: %v", err)
-	}
-	resp.Body.Close()
-	saved := filepath.Join(dir, "scenarios", "saved.yaml")
-	if _, err := os.Stat(saved); resp.StatusCode != http.StatusCreated || err != nil {
-		t.Fatalf("PUT scenarios/saved = %s, and the file: %v", resp.Status, err)
-	}
-
-	requestJSON(t, "POST", api+"/reset", `{"scenario": "saved"}`)
-	c := s.dial(t, "test", "test")
-	if err := c.Mkdir("/new"); !errors.Is(err, os.ErrPermission) {
-		t.Errorf("Mkdir = %v, want the saved scenario's fault", err)
-	}
-	if _, err := c.Stat("/"); err != nil {
-		t.Errorf("Stat = %v, want no fault from the first scenario", err)
-	}
 }
 
-func TestServeKeepsAScenariosAssertionsAndItsExpectedFixtures(t *testing.T) {
-	dir := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(dir, "expected", "orders.csv"), "id,total\n")
-	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
-storage: {data_dir: ./work, expected_dir: ./expected}
-scenarios:
-  recovery:
-    faults: []
-    assertions:
-      - {type: file_equals_fixture, path: /orders.csv, fixture: orders.csv}
-`)
-	s := startServe(t, "--config", config, "--scenario", "recovery")
-	got, err := os.ReadFile(filepath.Join(dir, "work", "fixtures", "expected", "orders.csv"))
-	if err != nil || string(got) != "id,total\n" {
-		t.Errorf("the workspace's expected fixture holds %q, %v", got, err)
-	}
-	if _, err := s.dial(t, "test", "test").Stat("/orders.csv"); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("Stat of the fixture = %v, want a client not to see it", err)
-	}
-	api := "http://" + s.apiAddr + "/api/v1"
-	status := requestJSON(t, "GET", api+"/status", "")
-	rules := requestJSON(t, "GET", api+"/runs/"+status["run"].(map[string]any)["id"].(string)+"/rules", "")
-	assertions, _ := rules["assertions"].([]any)
-	if len(assertions) != 1 || assertions[0].(map[string]any)["fixture"] != "orders.csv" {
-		t.Errorf("the run's assertions are %v, want the scenario's", rules["assertions"])
-	}
-}
-
-func TestServeKeepsACopyOfACutOffUploadThatTheAPIServes(t *testing.T) {
-	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	testutil.WriteFile(t, config, `schema_version: 1
-scenarios:
-  cut:
-    faults:
-      - id: cut
-        fail_upload: {path: /Orders.csv, attempts: [1], after_bytes: 5}
-`)
-	s := startServe(t, "--config", config, "--scenario", "cut")
-	c := s.dial(t, "test", "test")
-	f, err := c.Create("/Orders.csv")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if _, err := f.Write([]byte("0123456789")); err == nil {
-		t.Error("the upload succeeded, want it cut off")
-	}
-	f.Close()
-
-	api := "http://" + s.apiAddr + "/api/v1/runs/" + s.run
-	page := requestJSON(t, "GET", api+"/snapshots?hash=true", "")
-	copies, _ := page["snapshots"].([]any)
-	if len(copies) != 1 {
-		t.Fatalf("snapshots = %v, want the cut-off upload's", page)
-	}
-	if c := copies[0].(map[string]any); c["number"] != 1.0 || c["path"] != "/Orders.csv" || c["size"] != 5.0 {
-		t.Errorf("snapshot = %v, want 1 of /Orders.csv, 5 bytes", c)
-	}
-	resp, err := http.Get(api + "/snapshots/1/content")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if b, err := io.ReadAll(resp.Body); err != nil || resp.StatusCode != http.StatusOK || string(b) != "01234" {
-		t.Errorf("the copy = %s %q (%v), want the 5 bytes below the cutoff", resp.Status, b, err)
-	}
-}
-
-// requestJSON makes a request to the control API, with the header that a
-// change needs, and decodes its JSON reply, which must be a success.
-func requestJSON(t *testing.T, method, url, body string) map[string]any {
+func requestJSON(t *testing.T, url string) map[string]any {
 	t.Helper()
-	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	resp, err := http.Get(url)
 	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set(control.RequestHeader, "1")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, url, err)
+		t.Fatalf("GET %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 	var decoded map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("%s %s = %s %v (%v)", method, url, resp.Status, decoded, err)
+		t.Fatalf("GET %s = %s %v (%v)", url, resp.Status, decoded, err)
 	}
 	return decoded
 }
@@ -1018,9 +826,7 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		{"missing config", []string{"--config", "missing.yaml"}, "missing.yaml"},
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
 		{"undefined scenario", []string{"--scenario", "upload-recovery"}, `scenario "upload-recovery" is not defined`},
-		{"seed without a scenario", []string{"--seed", "7"}, "--seed needs --scenario, whose random decisions it pins"},
 		{"unknown log level", []string{"--log-level", "loud"}, `invalid value "loud" for flag -log-level: log level "loud" is not debug, info, warn or error`},
-		{"negative seed", []string{"--scenario", "s", "--seed", "-1"}, `invalid value "-1" for flag -seed: a seed is a whole number from 0 to 18446744073709551615`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

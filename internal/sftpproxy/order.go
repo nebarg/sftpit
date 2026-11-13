@@ -106,11 +106,8 @@ func (r *request) files() []string {
 }
 
 // mayWait reports whether processing r can wait, for a fault that holds it
-// before the backend or for the snapshot of the handle it closes.
+// before the backend.
 func (r *request) mayWait() bool {
-	if r.snapshot != nil {
-		return true
-	}
 	switch a := r.action.(type) {
 	case Delay:
 		return a.When != After

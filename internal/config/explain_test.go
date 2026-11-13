@@ -99,13 +99,11 @@ func writeEveryAction(t *testing.T) Options {
 	writeAuthorizedKeys(t, filepath.Join(dir, "keys", "robot.pub"), "")
 	testutil.WriteFile(t, filepath.Join(dir, ".env"), "P2=second-secret\n")
 	testutil.WriteFile(t, filepath.Join(dir, "seed", "incoming", ".gitkeep"), "")
-	testutil.WriteFile(t, filepath.Join(dir, "expected", "out", "orders.csv"), "id,total\n")
 	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), `schema_version: 1
 env_file: .env
 scenarios_dir: ./saved
 server: {sftp_listen: "127.0.0.1:2200", http_listen: "127.0.0.1:8200", host_key: ./hostkeys, reply_order: completion}
-storage: {data_dir: ./data, seed_dir: ./seed, expected_dir: ./expected, max_files: 500}
-events: {max_disk_bytes: 1048576}
+storage: {data_dir: ./data, seed_dir: ./seed, max_files: 500}
 users:
   - {name: test, password_env: P}
   - {name: partner-b, password_env: P2, authorized_keys: keys/partner-b.pub, home: /partner-b}
@@ -116,14 +114,12 @@ policy:
     - {path_prefix: /outgoing, users: [partner-b, robot]}
 scenarios:
   empty: {faults: []}
-  zero: {seed: 0, faults: []}
   dev-chaos:
     description: "Heavy chaos for partner-b's orders,\nand no removals."
     chaos: {preset: heavy, scope: {user: partner-b, filename: orders.csv}, extras: [wrong_size, corrupt_download], paused: true}
     faults:
       - {id: deny, match: {operation: remove}, action: {type: fail, when: before, status: permission_denied}}
   every-action:
-    seed: 7
     faults:
       - {id: slow-reply, match: {operation: rename}, action: {type: delay, when: after, duration: 1500ms}}
       - {id: stuck-open, match: {operation: open_write}, action: {type: stall, when: before, max_stall: 30s}}
@@ -168,18 +164,6 @@ scenarios:
         fail_randomly: {operations: [write, rename], path_glob: /incoming/*, probability: 0.05}
       - id: missing-chunk
         corrupt_download: {path_glob: /outgoing/*.csv, attempts: [1], transform: omit_range, offset: 1048576, length: 4096}
-    assertions:
-      - {type: rule_fired, rule_id: first-upload-cutoff, exactly: 1}
-      - {type: rule_fired, rule_id: fin, exactly: 0}
-      - {type: rule_fired, rule_id: slow-stat}
-      - {type: rule_fired, rule_id: random-failures, at_least: 2, at_most: 9}
-      - {type: rule_fired, rule_id: gone, at_most: 3}
-      - {type: successful_operation, operation: rename, source: /in/orders.csv.part, target: /in/orders.csv, at_least: 1}
-      - {type: successful_operation, operation: rename, target: /in/orders.csv}
-      - {type: successful_operation, operation: remove, path: /in/old.csv, exactly: 2}
-      - {type: file_equals_fixture, path: /in/orders.csv, fixture: out/orders.csv}
-      - {type: file_hash, path: /in/orders.csv, sha256: E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855}
-      - {type: path_absent, path: /in/orders.csv.part}
 `)
 	return Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "first-secret"}.lookup}
 }
@@ -188,7 +172,6 @@ func TestExplainWritesRecipesInTheLongForm(t *testing.T) {
 	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
 scenarios:
   upload-recovery:
-    seed: 481516
     faults:
       - id: first-upload-cutoff
         fail_upload: {path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576, result: status}
@@ -199,7 +182,6 @@ scenarios:
 	}
 	want := `scenarios:
   upload-recovery:
-    seed: 481516
     faults:
       - id: first-upload-cutoff
         priority: 0

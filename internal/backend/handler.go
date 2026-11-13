@@ -17,7 +17,6 @@ import (
 // passes it absolute virtual paths that it has already cleaned.
 type handler struct {
 	root  *os.Root
-	holds *holds
 	usage *usage
 
 	// perm is the permissions the OPEN or MKDIR being served asks for
@@ -74,8 +73,8 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 	if pflags.Excl {
 		flag |= os.O_EXCL
 	}
-	// An open that cannot write neither waits for a snapshot nor holds back
-	// other changes, unless it creates or truncates the file.
+	// An open that cannot write holds back no other change, unless it
+	// creates or truncates the file.
 	if pflags.Write || flag&(os.O_CREATE|os.O_TRUNC) != 0 {
 		defer h.changing(r.Filepath)()
 		if flag&os.O_CREATE != 0 {
@@ -91,7 +90,7 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 	if !pflags.Write {
 		return &file{f: f, usage: h.usage}, nil
 	}
-	return &file{f: f, usage: h.usage, appending: pflags.Append, name: r.Filepath, holds: h.holds}, nil
+	return &file{f: f, usage: h.usage, appending: pflags.Append, name: r.Filepath}, nil
 }
 
 // open opens the file at the virtual path name with flag, creating it with
@@ -108,18 +107,12 @@ func (h *handler) open(name string, flag int, perm os.FileMode) (*os.File, error
 	return f, nil
 }
 
-// changing waits until no snapshot holds any of the virtual paths names,
-// and then keeps every other change to the tree waiting until the returned
+// changing keeps every other change to the tree waiting until the returned
 // function is called, counting what the caller changes at names. Empty names
 // are ignored.
 func (h *handler) changing(names ...string) (done func()) {
 	names = slices.DeleteFunc(names, func(name string) bool { return name == "" })
-	released := h.holds.change(names...)
-	counted := h.usage.change(names...)
-	return func() {
-		counted()
-		released()
-	}
+	return h.usage.change(names...)
 }
 
 func (h *handler) Filecmd(r *sftp.Request) error {
@@ -367,12 +360,11 @@ type file struct {
 	f     *os.File
 	usage *usage
 
-	// appending, name and holds are set for a handle that can write, whose
-	// writes wait for any snapshot of its file. Writes through other
-	// handles never reach the handler.
+	// appending and name are set for a handle that can write: whether it
+	// was opened for appending, and the virtual path it was opened at.
+	// Writes through other handles never reach the handler.
 	appending bool
 	name      string
-	holds     *holds
 }
 
 func (f *file) ReadAt(p []byte, off int64) (int, error) {
@@ -381,7 +373,6 @@ func (f *file) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *file) WriteAt(p []byte, off int64) (int, error) {
-	defer f.holds.change(f.name)()
 	// Under the lock the size cannot change between the check and the write,
 	// so appends through several handles land one after another.
 	defer f.usage.lock()()

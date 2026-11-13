@@ -11,11 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
-
-	"github.com/nebarg/sftpit/internal/config"
-	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
-	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
@@ -113,50 +108,5 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 		if _, _, err := m.Files(id, "/", false); !errors.Is(err, ErrUnknownRun) {
 			t.Errorf("Files of run %q = %v, want ErrUnknownRun", id, err)
 		}
-	}
-}
-
-func TestSnapshotsListTheCopiesARunKept(t *testing.T) {
-	cut := faults.Rule{ID: "cut", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.PartialUpload{Cutoff: 5, Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}}}
-	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"cut": {Rules: []faults.Rule{cut}}}, Scenario: "cut"})
-	run := m.Status().Run.ID
-	if copies, err := m.Snapshots(run, false); err != nil || len(copies) != 0 {
-		t.Fatalf("Snapshots before any = %+v, %v; want none", copies, err)
-	}
-	c, _ := dialSFTP(t, addr)
-	f, err := c.Create("/Orders.csv")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write([]byte("0123456789")); err == nil {
-		t.Error("the upload succeeded, want it cut off")
-	}
-	f.Close()
-
-	copies, err := m.Snapshots(run, true)
-	if err != nil {
-		t.Fatalf("Snapshots: %v", err)
-	}
-	want := sha256.Sum256([]byte("01234"))
-	if len(copies) != 1 {
-		t.Fatalf("Snapshots = %+v, want one", copies)
-	}
-	if s := copies[0]; s.Number != 1 || s.Path != "/Orders.csv" || s.Copy != "snapshots/1/^orders.csv" || s.Size != 5 || s.SHA256 != hex.EncodeToString(want[:]) {
-		t.Errorf("snapshot = %+v, want 1 of /Orders.csv, 5 bytes, %x", s, want)
-	}
-	opened, s, err := m.OpenSnapshot(run, 1)
-	if err != nil {
-		t.Fatalf("OpenSnapshot: %v", err)
-	}
-	b, err := io.ReadAll(opened)
-	opened.Close()
-	if err != nil || string(b) != "01234" || s.Path != "/Orders.csv" {
-		t.Errorf("snapshot 1 of %s holds %q, %v; want /Orders.csv holding 01234", s.Path, b, err)
-	}
-	if _, _, err := m.OpenSnapshot(run, 2); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("OpenSnapshot of a copy that does not exist = %v, want fs.ErrNotExist", err)
-	}
-	if _, err := m.Snapshots("20261024-101500.123-3f9a", false); !errors.Is(err, ErrUnknownRun) {
-		t.Errorf("Snapshots of an unknown run = %v, want ErrUnknownRun", err)
 	}
 }

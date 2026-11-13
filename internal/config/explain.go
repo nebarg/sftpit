@@ -39,13 +39,11 @@ func Explain(opts Options) ([]byte, error) {
 		Storage: storageConfig{
 			DataDir:       cfg.DataDir,
 			SeedDir:       cfg.SeedDir,
-			ExpectedDir:   cfg.ExpectedDir,
 			MaxFileBytes:  &cfg.Limits.MaxFileBytes,
 			MaxTotalBytes: &cfg.Limits.MaxTotalBytes,
 			MaxFiles:      &cfg.Limits.MaxFiles,
 			MaxOpenFiles:  &cfg.Limits.MaxOpenFiles,
 		},
-		Events: eventsConfig{MaxDiskBytes: &cfg.MaxTraceBytes},
 	}
 	for i, u := range r.file.Users {
 		f.Users = append(f.Users, userConfig{Name: u.Name, PasswordEnv: u.PasswordEnv, Home: cfg.Users[i].Home})
@@ -177,7 +175,7 @@ func (r valueRange[T]) MarshalJSON() ([]byte, error) {
 // longScenario returns s with every rule in the long form, in the order
 // given.
 func longScenario(s Scenario) scenarioConfig {
-	sc := scenarioConfig{Description: s.Description, Seed: s.Seed, Faults: []ruleConfig{}, Assertions: longAssertions(s.Assertions)}
+	sc := scenarioConfig{Description: s.Description, Faults: []ruleConfig{}}
 	for _, rule := range s.Rules {
 		sc.Faults = append(sc.Faults, longForm(rule))
 	}

@@ -42,13 +42,6 @@ const (
 	identityDir = "identity"
 	runsDir     = "runs"
 
-	// snapshotsDir holds a run's copies of the files that faulted handles
-	// left behind, in its directory.
-	snapshotsDir = "snapshots"
-
-	// traceFile holds a run's events, in its directory.
-	traceFile = "events.jsonl"
-
 	// workspaceVersion is the layout version the marker records.
 	workspaceVersion = 1
 
@@ -223,28 +216,20 @@ type Run struct {
 // Scenario is the scenario whose faults a run starts with.
 type Scenario struct {
 	// Name names the scenario, or is "" for a run that starts without
-	// faults or with an inline scenario.
+	// faults.
 	Name string
 
-	// Inline reports whether the scenario was given at the reset that
-	// started the run, rather than named in the configuration.
-	Inline bool
-
 	// Seed fixes the run's random decisions, those of rules applied during
-	// the run included, and Pinned reports whether it was given rather than
-	// drawn for the run.
-	Seed   faults.Seed
-	Pinned bool
+	// the run included. Each run draws its own.
+	Seed faults.Seed
 }
 
 // runRecord is the content of a run's run.json.
 type runRecord struct {
-	ID         string      `json:"id"`
-	Started    time.Time   `json:"started"`
-	Scenario   string      `json:"scenario,omitempty"`
-	Inline     bool        `json:"inline,omitempty"`
-	Seed       faults.Seed `json:"seed"`
-	SeedPinned bool        `json:"seed_pinned,omitempty"`
+	ID       string      `json:"id"`
+	Started  time.Time   `json:"started"`
+	Scenario string      `json:"scenario,omitempty"`
+	Seed     faults.Seed `json:"seed"`
 }
 
 // runIDPattern matches the IDs NewRun gives. They sort in the order the
@@ -264,7 +249,7 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	if err := w.root.MkdirAll(path.Join(rel, "fs"), 0o700); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
-	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Inline: scenario.Inline, Seed: scenario.Seed, SeedPinned: scenario.Pinned}
+	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Seed: scenario.Seed}
 	if err := writeJSON(w.root, path.Join(rel, "run.json"), record); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
@@ -273,15 +258,6 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	}
 	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
 	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Scenario: scenario}, nil
-}
-
-// createTrace creates the file of the run id's trace, for writing.
-func (w *Workspace) createTrace(id string) (*os.File, error) {
-	f, err := w.root.OpenFile(path.Join(runsDir, id, traceFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("runs: create the run's trace: %w", err)
-	}
-	return f, nil
 }
 
 // openRun opens sub, a directory of the run id, which must be one of the

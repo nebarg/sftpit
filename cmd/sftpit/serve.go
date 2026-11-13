@@ -23,7 +23,6 @@ import (
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/control"
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
@@ -42,8 +41,6 @@ Flags:
   --config FILE        read settings, users and scenarios from FILE
   --scenario NAME      inject the faults of the scenario NAME in the
                        config; without it, no faults are injected
-  --seed N             pin the scenario's random decisions to seed N, in
-                       place of its own seed or a fresh one every run
   --sftp-listen ADDR   listen on ADDR instead of the configured address
                        (default 127.0.0.1:2122, or :2122 in the container
                        profile; port 0 picks a free port)
@@ -60,7 +57,7 @@ Flags:
                        later files override earlier ones
   --ready-file FILE    once listening, write the addresses, workspace and
                        host-key fingerprints to FILE as JSON, for a test
-                       harness or sftpit reset; FILE is removed at exit
+                       harness; FILE is removed at exit
   --log-level LEVEL    log at LEVEL: debug, which adds every SFTP request,
                        info (the default), warn or error
 `
@@ -83,14 +80,6 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&opts.SeedDir, "seed-dir", "", "")
 	flags.StringVar(&opts.DataDir, "data-dir", "", "")
 	flags.StringVar(&opts.Scenario, "scenario", "", "")
-	flags.Func("seed", "", func(s string) error {
-		seed, err := faults.ParseSeed(s)
-		if err != nil {
-			return err
-		}
-		opts.Seed = &seed
-		return nil
-	})
 	var readyPath string
 	flags.StringVar(&readyPath, "ready-file", "", "")
 	var logLevel slog.Level
@@ -114,10 +103,6 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "sftpit serve: unexpected arguments %q\n", flags.Args())
-		return exitUsage
-	}
-	if opts.Seed != nil && opts.Scenario == "" {
-		fmt.Fprintln(stderr, "sftpit serve: --seed needs --scenario, whose random decisions it pins")
 		return exitUsage
 	}
 	if readyPath != "" {
@@ -184,15 +169,12 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 	manager, err := runs.Start(workspace, runs.Options{
 		Server:        sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
 		SeedDir:       cfg.SeedDir,
-		ExpectedDir:   cfg.ExpectedDir,
 		Limits:        cfg.Limits,
-		MaxTraceBytes: cfg.MaxTraceBytes,
 		ReplyOrder:    cfg.ReplyOrder,
 		Policy:        cfg.Policy,
 		Scenarios:     cfg.Scenarios,
 		ScenarioFiles: cfg.ScenarioFiles,
 		Scenario:      cfg.Scenario,
-		Seed:          cfg.Seed,
 		Logger:        logger,
 	})
 	if err != nil {
@@ -297,7 +279,7 @@ func listen(profile config.Profile, setting, addr string) (net.Listener, error) 
 func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, run runs.Run, hostKeys []ssh.Signer, cfg *config.Config) {
 	fmt.Fprintf(w, "sftpit is serving SFTP on %s\n", addr)
 	fmt.Fprintf(w, "  dashboard: http://%s/\n", apiAddr)
-	fmt.Fprintf(w, "  control API: http://%s/api/v1/\n", apiAddr)
+	fmt.Fprintf(w, "  API: http://%s/api/\n", apiAddr)
 	if cfg.Profile == config.Container {
 		fmt.Fprintln(w, "  profile: container (every interface in the container; publish ports on host loopback)")
 	}
@@ -318,11 +300,6 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 				paused = ", paused"
 			}
 			fmt.Fprintf(w, "  chaos: %s%s\n", c.Preset, paused)
-		}
-		if s.Pinned {
-			fmt.Fprintf(w, "  seed: %d (pinned)\n", s.Seed)
-		} else {
-			fmt.Fprintf(w, "  seed: %d (fresh; --seed %[1]d repeats its decisions)\n", s.Seed)
 		}
 	}
 	if cfg.SeedDir != "" {

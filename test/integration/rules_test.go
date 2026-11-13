@@ -25,7 +25,7 @@ func TestRulesMatchTheKeyAClientLoggedInWith(t *testing.T) {
 			Operations:     []faults.Operation{faults.Mkdir},
 		},
 		Action: sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusPermissionDenied},
-	}}, 0, nil)
+	}}, nil)
 
 	byKey := pkgSFTPClient(t, srv, ssh.PublicKeys(clientSigner))
 	defer byKey.Close()

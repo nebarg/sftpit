@@ -1,8 +1,8 @@
 // Package events records what happens in a run, numbered in the order it
-// happens, for the control API's timeline and facts: the run's start,
-// connections and logins, each request and the reply its client got, the
-// faults injected and how their waits ended, random decisions, rule changes
-// and snapshots. A Recorder keeps a run's latest events in memory, bounded,
+// happens, for the activity the API serves: the run's start, connections
+// and logins, each request and the reply its client got, the faults
+// injected and how their waits ended, random decisions and rule changes. A
+// Recorder keeps a run's latest events in memory, bounded,
 // and lets readers follow it as events arrive.
 package events
 
@@ -58,15 +58,6 @@ const (
 
 	// RulesChanged is a change of the run's rules, with the new rules.
 	RulesChanged Kind = "rules_changed"
-
-	// Snapshotted is a snapshot of a file that a faulted handle left
-	// behind.
-	Snapshotted Kind = "snapshot"
-
-	// RunDrained is the end of a run's clients, once a drain has closed
-	// admission and ended every connection, with the paths of the files
-	// whose handles were still open in Unfinished.
-	RunDrained Kind = "drained"
 )
 
 // Event is one thing that happened in a run. Which fields are set depends
@@ -121,28 +112,13 @@ type Event struct {
 	// ReadOnly is the read-only path that refused a request.
 	ReadOnly string `json:"read_only,omitempty"`
 
-	// Reason says why a fault's wait ended or a fault was suppressed, or
-	// what closed the handle whose file was snapshotted: "client", "fault"
-	// or "session_ended".
+	// Reason says why a fault's wait ended or a fault was suppressed.
 	Reason string `json:"reason,omitempty"`
 
 	Transfer *Totals   `json:"transfer,omitempty"`
 	Decision *Decision `json:"decision,omitempty"`
 	Run      *Run      `json:"run,omitempty"`
 	Rules    *Rules    `json:"rules,omitempty"`
-
-	Snapshot *Snapshot `json:"snapshot,omitempty"`
-
-	Unfinished []string `json:"unfinished,omitempty"`
-}
-
-// Snapshot describes a file that a faulted handle left behind: its size
-// and SHA-256, and the path of its copy in the run's directory, if the run
-// kept one.
-type Snapshot struct {
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
-	Copy   string `json:"copy,omitempty"`
 }
 
 // Fault describes a fault: its Type, as rules name it, such as fail or
@@ -197,9 +173,7 @@ type Decision struct {
 type Run struct {
 	ID       string `json:"id"`
 	Scenario string `json:"scenario,omitempty"`
-	Inline   bool   `json:"inline,omitempty"`
 	Seed     string `json:"seed"`
-	Pinned   bool   `json:"seed_pinned"`
 }
 
 // Rules describes a run's rules: their Revision, the one they replaced, if

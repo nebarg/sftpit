@@ -21,15 +21,10 @@ const (
 	// seedManifest describes it.
 	seedDir      = "fixtures/seed"
 	seedManifest = "fixtures/seed.json"
-
-	// expectedDir holds the snapshot of the expected fixtures, and
-	// expectedManifest describes it.
-	expectedDir      = "fixtures/expected"
-	expectedManifest = "fixtures/expected.json"
 )
 
 // fixtureSnapshot is a snapshot of a directory of fixtures: the seed that
-// each run of a workspace starts from, or the expected fixtures.
+// each run of a workspace starts from.
 type fixtureSnapshot struct {
 	// what names the snapshot in errors.
 	what     string
@@ -69,15 +64,6 @@ func (w *Workspace) snapshotSeed(src string) (*fixtureSnapshot, error) {
 	return w.snapshotFixtures("seed", src, seedDir, seedManifest)
 }
 
-// snapshotExpected replaces the workspace's snapshot of the expected
-// fixtures as snapshotSeed does the seed's. The snapshot lies outside every
-// run's files, so no client can see it.
-func (w *Workspace) snapshotExpected(src string) (*fixtureSnapshot, error) {
-	return w.snapshotFixtures("expected", src, expectedDir, expectedManifest)
-}
-
-// snapshotFixtures replaces the snapshot of what in dir, with its manifest
-// in manifestName, by a copy of src.
 func (w *Workspace) snapshotFixtures(what, src, dir, manifestName string) (*fixtureSnapshot, error) {
 	if src != "" {
 		// A src that does not exist yet could come to exist below, within

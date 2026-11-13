@@ -22,8 +22,8 @@ func TestFilesListARunsFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(seed, "Incoming", "Orders.csv"), []byte("id,total\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	m, api := start(t, runs.Options{SeedDir: seed})
-	path := "/api/v1/runs/" + m.Status().Run.ID + "/files"
+	_, api := start(t, runs.Options{SeedDir: seed})
+	path := "/api/files"
 
 	code, body := call(t, api, "GET", path, "")
 	if code != http.StatusOK || body["live"] != true {
@@ -61,9 +61,6 @@ func TestFilesListARunsFiles(t *testing.T) {
 			t.Errorf("GET %s = %d %v, want %d", query, code, body, want)
 		}
 	}
-	if code, _ := call(t, api, "GET", "/api/v1/runs/20261024-101500.123-3f9a/files", ""); code != http.StatusNotFound {
-		t.Errorf("files of an unknown run = %d, want 404", code)
-	}
 }
 
 func TestFileContentIsADownloadThatAnswersRanges(t *testing.T) {
@@ -71,8 +68,8 @@ func TestFileContentIsADownloadThatAnswersRanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(seed, "page.html"), []byte("<script>alert(1)</script>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m, api := start(t, runs.Options{SeedDir: seed})
-	path := "/api/v1/runs/" + m.Status().Run.ID + "/files/content?path=/page.html"
+	_, api := start(t, runs.Options{SeedDir: seed})
+	path := "/api/files/content?path=/page.html"
 
 	resp := get(t, api, path, nil)
 	if b, _ := io.ReadAll(resp.Body); resp.StatusCode != http.StatusOK || string(b) != "<script>alert(1)</script>" {
@@ -102,21 +99,8 @@ func TestFileContentIsADownloadThatAnswersRanges(t *testing.T) {
 		"?path=/missing":     http.StatusNotFound,
 		"?path=relative.txt": http.StatusBadRequest,
 	} {
-		if code, body := call(t, api, "GET", "/api/v1/runs/"+m.Status().Run.ID+"/files/content"+query, ""); code != want {
+		if code, body := call(t, api, "GET", "/api/files/content"+query, ""); code != want {
 			t.Errorf("content %q = %d %v, want %d", query, code, body, want)
-		}
-	}
-}
-
-func TestSnapshotsOfARunWithoutAny(t *testing.T) {
-	m, api := start(t, runs.Options{})
-	run := "/api/v1/runs/" + m.Status().Run.ID
-	if code, body := call(t, api, "GET", run+"/snapshots", ""); code != http.StatusOK || len(body["snapshots"].([]any)) != 0 {
-		t.Errorf("snapshots = %d %v, want none", code, body)
-	}
-	for _, n := range []string{"1", "0", "x"} {
-		if code, body := call(t, api, "GET", run+"/snapshots/"+n+"/content", ""); code != http.StatusNotFound {
-			t.Errorf("snapshot %s = %d %v, want 404", n, code, body)
 		}
 	}
 }

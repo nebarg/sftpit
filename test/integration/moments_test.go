@@ -57,7 +57,7 @@ func TestOpenSSHMoments(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var logs capturedLog
-			srv := startScenario(t, []faults.Rule{slow, tt.rule}, 0, logs.logger())
+			srv := startScenario(t, []faults.Rule{slow, tt.rule}, logs.logger())
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
@@ -77,8 +77,8 @@ func TestOpenSSHMoments(t *testing.T) {
 			if got := srv.counts(t, "moment").Fired; got != 1 {
 				t.Errorf("the moment fired %d times, want once", got)
 			}
-			if !strings.Contains(logs.text(), `msg="rule fired" rule=moment`) || !strings.Contains(logs.text(), "closed_by=fault") {
-				t.Errorf("logs lack the moment's firing or the upload's snapshot:\n%s", logs.text())
+			if !strings.Contains(logs.text(), `msg="rule fired" rule=moment`) {
+				t.Errorf("logs lack the moment's firing:\n%s", logs.text())
 			}
 		})
 	}
@@ -93,7 +93,7 @@ func TestEachOpenSSHConnectionHasItsOwnMoment(t *testing.T) {
 	srv := startScenario(t, []faults.Rule{
 		{ID: "slow", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Delay{When: sftpproxy.Before, Duration: 20 * time.Millisecond}},
 		{ID: "moment", Trigger: &faults.Trigger{Anchor: faults.Connection, At: &faults.Range[time.Duration]{Min: 300 * time.Millisecond, Max: 300 * time.Millisecond}}, Action: sftpproxy.Drop{}},
-	}, 0, nil)
+	}, nil)
 	work := t.TempDir()
 	writeFile(t, filepath.Join(work, "orders.csv"), randomBytes(1<<20))
 	for i := range 2 {

@@ -45,7 +45,7 @@ type running struct {
 
 var (
 	addrLine      = regexp.MustCompile(`serving SFTP on (\S+)`)
-	apiLine       = regexp.MustCompile(`control API: http://(\S+)/api/v1/`)
+	apiLine       = regexp.MustCompile(`API: http://(\S+)/api/`)
 	workspaceLine = regexp.MustCompile(`workspace: (.+) \((?:deleted|kept)`)
 	runLine       = regexp.MustCompile(`run: (\S+)`)
 )

@@ -76,9 +76,6 @@ func summary(e events.Event) string {
 	if t := e.Transfer; t != nil {
 		parts = append(parts, fmt.Sprintf("%s reads=%d/%d writes=%d/%d end=%d closed=%s faulted=%v", t.Mode, t.Reads, t.BytesRead, t.Writes, t.BytesWritten, t.End, t.Closed, t.Faulted))
 	}
-	if s := e.Snapshot; s != nil {
-		parts = append(parts, fmt.Sprintf("size=%d sha256=%s copy=%q", s.Size, s.SHA256, s.Copy))
-	}
 	return strings.Join(parts, " ")
 }
 
@@ -257,7 +254,6 @@ func faultName(a sftpproxy.Action) string {
 func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var rec recording
-		var snaps snapshots
 		var logs syncBuffer
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
 			Faults: func(r sftpproxy.Request) sftpproxy.Fault {
@@ -266,9 +262,8 @@ func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 				}
 				return sftpproxy.Fault{}
 			},
-			Snapshot: snaps.take,
-			Record:   rec.record,
-			Logger:   logs.logger(),
+			Record: rec.record,
+			Logger: logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
 		p.client.send(t, 2, write("h", 0, 60))
@@ -290,13 +285,11 @@ func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {
 			"fault request=SSH_FXP_WRITE id=3 path=/f rule=cut fault=fail when=after cutoff=100 offset=60 status=SSH_FX_FAILURE",
 			"operation request=SSH_FXP_WRITE id=3 path=/f reply=SSH_FX_FAILURE backend=SSH_FX_OK rule=cut",
 			"operation request=SSH_FXP_WRITE id=4 path=/f reply=SSH_FX_FAILURE rule=cut",
-			fmt.Sprintf("snapshot path=/f reason=client size=%d sha256=%x copy=\"\"", cutoff, snapshotOf("/f").SHA256),
 			"transfer path=/f rule=cut write reads=0/0 writes=2/100 end=100 closed=close faulted=true",
 			"operation request=SSH_FXP_CLOSE id=5 path=/f reply=SSH_FX_OK backend=SSH_FX_OK",
 		)
-		// The bubble's clock moves only while every goroutine waits, so the
-		// handle is open for exactly the second the test spends waiting.
-		if want := "level=INFO msg=transfer path=/f mode=write bytes_read=0 bytes_written=100 duration=1s closed=close rule=cut\n"; !strings.Contains(logs.String(), want) {
+		// The bubble's clock stands still, as nothing in the test waits.
+		if want := "level=INFO msg=transfer path=/f mode=write bytes_read=0 bytes_written=100 duration=0s closed=close rule=cut\n"; !strings.Contains(logs.String(), want) {
 			t.Errorf("logs do not contain %q:\n%s", want, logs.String())
 		}
 	})

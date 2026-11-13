@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
-	"strings"
 	"testing"
 	"testing/synctest"
 
@@ -230,37 +229,4 @@ func TestCorruptUploadIsReservedBeforeItsFirstChange(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestCorruptUploadSnapshotsTheFileItChanged(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var logs syncBuffer
-		var snaps snapshots
-		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults:   inSequence(sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: 10}),
-			Snapshot: snaps.take,
-			Logger:   logs.logger(),
-		})
-		openForUpload(t, p, fb, "h")
-
-		p.client.send(t, 2, write("h", 0, 20))
-		req := fb.next(t)
-		fb.reply(t, req.id, status(sftpwire.StatusOK))
-		p.client.assertStatus(t, 2, sftpwire.StatusOK, "Success")
-		p.client.send(t, 3, write("h", 20, 20))
-		p.client.assertStatus(t, 3, sftpwire.StatusOK, "Success")
-		p.client.send(t, 4, &sftpwire.Close{Handle: "h"})
-		fb.reply(t, fb.next(t).id, status(sftpwire.StatusOK))
-		p.client.assertStatus(t, 4, sftpwire.StatusOK, "Success")
-
-		if got := snaps.taken(); !slices.Equal(got, []string{"/f"}) {
-			t.Errorf("snapshots of %q, want /f once", got)
-		}
-		// Only the first write the corruption changes is the fault; the
-		// rest are its effects, logged at debug level.
-		logs.assertLogged(t, `level=INFO msg="injected fault" request=SSH_FXP_WRITE path=/f fault=corrupt_upload corruption=truncate at=10 offset=0`)
-		if n := strings.Count(logs.String(), "injected fault"); n != 1 {
-			t.Errorf("logged %d faults at info level, want 1:\n%s", n, logs.String())
-		}
-	})
 }

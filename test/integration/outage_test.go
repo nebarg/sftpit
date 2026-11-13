@@ -62,7 +62,7 @@ func TestOpenSSHOutages(t *testing.T) {
 			if tt.slow {
 				rules = append(rules, slow)
 			}
-			srv := startScenario(t, rules, 0, logs.logger())
+			srv := startScenario(t, rules, logs.logger())
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 

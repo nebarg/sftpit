@@ -84,8 +84,8 @@ func errOf(_ Fault, err error) error { return err }
 func TestFaultsKeepTheRunsOwnRules(t *testing.T) {
 	m, addr := startManager(t, Options{})
 	run := m.Status().Run.ID
-	if _, err := m.ChangeRules(run, 1, []faults.Rule{denyStats}, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
+	if _, err := m.changeRules(run, 1, []faults.Rule{denyStats}, nil); err != nil {
+		t.Fatalf("changeRules: %v", err)
 	}
 	c, _ := dialSFTP(t, addr)
 	if _, err := c.Stat("/"); !errors.Is(err, os.ErrPermission) {

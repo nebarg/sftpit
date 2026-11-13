@@ -3,7 +3,6 @@ package sftpproxy
 import (
 	"fmt"
 	"path"
-	"slices"
 	"sync"
 	"time"
 
@@ -109,10 +108,6 @@ type request struct {
 	// timed is the fault, for an OPEN, that its handle takes after a time.
 	timed *Timed
 
-	// snapshot is set for the CLOSE of a faulted file handle, and closed
-	// once the session has snapshotted the file.
-	snapshot chan struct{}
-
 	reply slot
 
 	// turn is closed, in completion order, once the request has reached the
@@ -126,16 +121,10 @@ type tracker struct {
 	dir        string
 	extensions map[string]bool
 
-	// transfers, if set, counts the session's file handles until it has
-	// recorded their transfers.
-	transfers *Transfers
-
 	mu      sync.Mutex
 	nextID  uint32
 	pending map[uint32]*request
 	handles map[string]*handle
-	// counted is how many of the session's file handles transfers counts.
-	counted int64
 }
 
 // handle is an open handle as the tracker knows it. Its fields are guarded
@@ -154,16 +143,9 @@ type handle struct {
 	// opened is when the backend returned the handle.
 	opened time.Time
 
-	// counted is set while the tracker's transfers counts the handle.
-	counted bool
-
 	// faulted is set once a fault has acted on the OPEN that returned the
 	// handle or on a request through it.
 	faulted bool
-
-	// snapshotted is set once the session has snapshotted the handle's
-	// file.
-	snapshotted bool
 
 	// closing, if set, is closed when the handle's CLOSE is sent.
 	closing chan struct{}
@@ -288,55 +270,6 @@ func (t *tracker) fault(req *request) {
 	req.handle.faulted = true
 }
 
-// faultedFile reports whether h is a file handle that a fault has acted on.
-func (t *tracker) faultedFile(h *handle) bool {
-	if h == nil {
-		return false
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return h.file && h.faulted
-}
-
-// claimSnapshot reports whether the file of h, a faulted file handle, has
-// yet to be snapshotted, and records that it now has been. A client can
-// close a handle twice before the backend has seen either CLOSE.
-func (t *tracker) claimSnapshot(h *handle) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if h.snapshotted {
-		return false
-	}
-	h.snapshotted = true
-	return true
-}
-
-// claimSnapshots returns, in order, the paths of the faulted file handles
-// whose files have yet to be snapshotted, both those still open and those
-// whose CLOSE the backend has not answered, and records that they now have
-// been.
-func (t *tracker) claimSnapshots() []string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	var paths []string
-	claim := func(h *handle) {
-		if h != nil && h.file && h.faulted && !h.snapshotted {
-			h.snapshotted = true
-			paths = append(paths, h.path)
-		}
-	}
-	for _, h := range t.handles {
-		claim(h)
-	}
-	for _, req := range t.pending {
-		if _, ok := req.packet.(*sftpwire.Close); ok {
-			claim(req.handle)
-		}
-	}
-	slices.Sort(paths)
-	return paths
-}
-
 // register records req as pending under a new proxy request ID, and the
 // second backend read of a split READ under another, just before they are
 // forwarded. A request the proxy answers itself is never registered,
@@ -426,7 +359,6 @@ func (t *tracker) complete(proxyID uint32, reply sftpwire.Packet) (*request, err
 		opened := &handle{path: req.path, rule: req.rule, upload: req.upload, partial: req.partial, download: req.download, stored: req.stored, file: file, faulted: req.action != nil, opened: time.Now()}
 		if file {
 			opened.totals.Mode = mode(open.Flags)
-			t.count(opened)
 		}
 		t.handles[h.Handle] = opened
 	}
@@ -487,40 +419,6 @@ func mode(flags uint32) string {
 		return "write"
 	}
 	return "read"
-}
-
-// count counts h, a new file handle, in t's transfers. t.mu must be held.
-func (t *tracker) count(h *handle) {
-	if t.transfers == nil {
-		return
-	}
-	h.counted = true
-	t.counted++
-	t.transfers.open.Add(1)
-}
-
-// settle stops counting h, once its transfer has been recorded.
-func (t *tracker) settle(h *handle) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !h.counted {
-		return
-	}
-	h.counted = false
-	t.counted--
-	t.transfers.open.Add(-1)
-}
-
-// settleAll stops counting every handle still counted as the session ends,
-// including those whose CLOSE was sent but never answered, whose transfers
-// the session cannot record.
-func (t *tracker) settleAll() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.transfers != nil {
-		t.transfers.open.Add(-t.counted)
-	}
-	t.counted = 0
 }
 
 // openFiles returns the file handles still open, in no particular order.

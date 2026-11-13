@@ -11,52 +11,6 @@ import (
 	"github.com/nebarg/sftpit/internal/config"
 )
 
-// errNoScenarioFiles reports a save to a Manager without scenario files.
-var errNoScenarioFiles = errors.New("runs: no scenarios directory is set")
-
-// Scenarios are the scenarios a run can inject the faults of.
-type Scenarios struct {
-	// Configured are the configuration file's scenarios, by name.
-	Configured map[string]config.Scenario
-
-	// Dir is the directory of scenario files, or "" if there is none, and
-	// Files are the files it holds, sorted by name, those that hold no
-	// valid scenario included.
-	Dir   string
-	Files []config.ScenarioFile
-}
-
-// Scenarios returns the scenarios a run can inject the faults of, with each
-// scenario file as it is now.
-func (m *Manager) Scenarios() (Scenarios, error) {
-	s := Scenarios{Configured: m.opts.Scenarios}
-	if m.opts.ScenarioFiles == nil {
-		return s, nil
-	}
-	s.Dir = m.opts.ScenarioFiles.Dir()
-	files, err := m.opts.ScenarioFiles.List()
-	if err != nil {
-		return Scenarios{}, fmt.Errorf("runs: %w", err)
-	}
-	s.Files = files
-	return s, nil
-}
-
-// SaveScenario saves s as the scenario file of name, as
-// config.ScenarioFiles.Save does, replacing the file that hash describes,
-// or none if hash is "". The next run of the scenario injects its faults.
-func (m *Manager) SaveScenario(name string, s config.Scenario, hash string) (config.ScenarioFile, error) {
-	if m.opts.ScenarioFiles == nil {
-		return config.ScenarioFile{}, errNoScenarioFiles
-	}
-	file, err := m.opts.ScenarioFiles.Save(name, s, hash)
-	if err != nil {
-		return config.ScenarioFile{}, fmt.Errorf("runs: %w", err)
-	}
-	m.logger.Info("scenario saved", "scenario", name, "path", file.Path)
-	return file, nil
-}
-
 // named returns the scenario name, from the configuration or else from its
 // file as it is now. A name that neither defines fails with
 // ErrUnknownScenario, and a file that holds no valid scenario with

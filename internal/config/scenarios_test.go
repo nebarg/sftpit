@@ -19,7 +19,6 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 	dir := t.TempDir()
 	key := writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	cfg, err := loadScenarios(t, dir, `  upload-recovery:
-    seed: 481516
     faults:
       - id: first-upload-cutoff
         priority: 10
@@ -199,45 +198,6 @@ func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
 	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Chosen().Rules, want) {
 		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Chosen().Rules, want)
 	}
-	if s := cfg.Scenarios["upload-recovery"].Seed; s == nil || *s != 481516 {
-		t.Errorf("the scenario's Seed = %v, want 481516", s)
-	}
-}
-
-// TestLoadKeepsTheSeedOptionApartFromTheScenariosSeed checks that the seed
-// option, which a run puts in place of its scenario's own, is kept as given,
-// beside the scenario's seed.
-func TestLoadKeepsTheSeedOptionApartFromTheScenariosSeed(t *testing.T) {
-	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `schema_version: 1
-scenarios:
-  pinned:
-    seed: 0
-    faults: []
-  fresh:
-    faults: []
-`)
-	tests := []struct {
-		scenario string
-		seed     *faults.Seed
-	}{
-		{"pinned", nil},
-		{"pinned", new(faults.Seed(7))},
-		{"fresh", nil},
-		{"fresh", new(faults.Seed(7))},
-		{"", nil},
-	}
-	for _, tt := range tests {
-		cfg, err := Load(Options{ConfigFile: config, Scenario: tt.scenario, Seed: tt.seed, LookupEnv: noEnv})
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if !reflect.DeepEqual(cfg.Seed, tt.seed) {
-			t.Errorf("scenario %q with option %v has Seed %v, want the option", tt.scenario, tt.seed, cfg.Seed)
-		}
-		if s := cfg.Scenarios["pinned"].Seed; s == nil || *s != 0 {
-			t.Errorf("scenario pinned's own seed = %v, want 0", s)
-		}
-	}
 }
 
 func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
@@ -334,7 +294,7 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"no size", rule("{operation: stat}", "{type: wrong_size}"), "", "size or a size_delta other than 0 is required"},
 		{"a size delta of 0", rule("{operation: stat}", "{type: wrong_size, size_delta: 0}"), "", "size or a size_delta other than 0 is required"},
 		{"two sizes", rule("{operation: stat}", "{type: wrong_size, size: 1, size_delta: 1}"), "", "set size or size_delta, not both"},
-		{"a negative seed", "  s:\n    seed: -1\n    faults: []\n", "", "cannot unmarshal !!int `-1` into faults.Seed"},
+		{"a seed, which sftpit no longer takes", "  s:\n    seed: 7\n    faults: []\n", "", "field seed not found"},
 		{"a decision without a probability", decided("{scope: operation}", "{operation: stat}", deny), "", "scenarios.s.faults[0] (r): decision: probability is required"},
 		{"a probability above 1", decided("{probability: 1.5}", "{operation: stat}", deny), "", "probability 1.5 is not from 0 to 1"},
 		{"an unknown decision field", decided("{probability: 0.5, chance: 0.5}", "{operation: stat}", deny), "", "field chance not found"},

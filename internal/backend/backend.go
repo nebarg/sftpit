@@ -46,7 +46,6 @@ func init() {
 // methods are safe for concurrent use.
 type Embedded struct {
 	root  *os.Root
-	holds holds
 	usage *usage
 }
 
@@ -84,7 +83,7 @@ func New(root *os.Root, opts Options) (*Embedded, error) {
 // workers, so appends could land out of order and a write could race a later
 // request on the same file.
 func (e *Embedded) Serve(rw io.ReadWriter, home string) error {
-	h := &handler{root: e.root, holds: &e.holds, usage: e.usage}
+	h := &handler{root: e.root, usage: e.usage}
 	conn, serverEnd := net.Pipe()
 	srv := sftp.NewRequestServer(serverEnd,
 		sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h},
@@ -149,35 +148,6 @@ func (e *Embedded) mkdir(dir string) error {
 		return limit
 	}
 	return e.root.Mkdir(rootName(dir), 0o755)
-}
-
-// Hold opens the file at the virtual path name for reading, outside any
-// session, and holds back every change to it from every session until the
-// returned file is closed: changes at name, and writes through handles
-// opened at name. Changes already under way finish first; reads are never
-// held back.
-func (e *Embedded) Hold(name string) (*Held, error) {
-	release := e.holds.hold(name)
-	f, err := e.root.Open(rootName(name))
-	if err != nil {
-		release()
-		return nil, fmt.Errorf("backend: hold: %w", err)
-	}
-	return &Held{File: f, release: sync.OnceFunc(release)}, nil
-}
-
-// Held is a file that no session can change until it is closed.
-type Held struct {
-	*os.File
-	release func()
-}
-
-// Close closes the file and lets changes to it go ahead. Closing it again
-// does nothing more.
-func (h *Held) Close() error {
-	err := h.File.Close()
-	h.release()
-	return err
 }
 
 // StoredName returns the name, relative to the root and slash-separated,

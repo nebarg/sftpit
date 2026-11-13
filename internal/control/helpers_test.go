@@ -20,11 +20,19 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// testScenarios are the scenarios that start configures: chaos, with no
-// seed, and own, which pins seed 9.
-var testScenarios = map[string]config.Scenario{"chaos": {}, "own": {Seed: new(faults.Seed(9))}}
-
 var testUsers = []sshfront.User{{Name: "test", Password: "test", Home: "/"}}
+
+// testScenarios are the scenarios that start configures: chaos, with no
+// rules, and own, whose rule denyStats refuses the test user's stats.
+var testScenarios = map[string]config.Scenario{"chaos": {}, "own": {Rules: mustParseRules("[" + denyStats + "]")}}
+
+func mustParseRules(rules string) []faults.Rule {
+	parsed, err := config.ParseRules([]byte(rules), testUsers)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
+}
 
 // start starts runs with opts, whose scenarios are testScenarios, and
 // returns them with their control API.
@@ -80,31 +88,9 @@ func call(t *testing.T, api http.Handler, method, path, body string) (int, map[s
 	return rec.Code, decoded
 }
 
-func mustJSON(t *testing.T, v any) string {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
 // equalJSON reports whether two decoded JSON values are equal.
 func equalJSON(a, b any) bool {
 	x, errX := json.Marshal(a)
 	y, errY := json.Marshal(b)
 	return errX == nil && errY == nil && string(x) == string(y)
-}
-
-// takeTrace checks that run, the run of a status, has a complete trace
-// holding at least the run's start, and removes it, since its size depends
-// on the run's events.
-func takeTrace(t *testing.T, run any) {
-	t.Helper()
-	r, _ := run.(map[string]any)
-	trace, _ := r["trace"].(map[string]any)
-	if bytes, _ := trace["bytes"].(float64); trace["complete"] != true || bytes <= 0 || trace["error"] != nil {
-		t.Errorf("the run's trace is %v, want it complete and holding the run's start", trace)
-	}
-	delete(r, "trace")
 }

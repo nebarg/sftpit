@@ -1,10 +1,10 @@
 // Package runs serves the runs of a workspace. A Manager serves them one at
 // a time through its own SSH server, each run starting from a snapshot of
-// the seed, and resets to the next run, changes a run's rules and releases
-// its stalls. Each session passes through the proxy, which can inject
-// faults, on its way to the embedded backend, the connection hooks inject
-// faults as clients connect and log in, and the files that faulted handles
-// leave behind are snapshotted from the workspace. The workspace is a
+// the seed, and resets to the next run, adds, switches and removes a run's
+// faults and releases its stalls. Each session passes through the proxy,
+// which can inject faults, on its way to the embedded backend, and the
+// connection hooks inject faults as clients connect and log in. The
+// workspace is a
 // directory that one process at a time locks, holding the host keys and the
 // files of each run.
 package runs
@@ -22,7 +22,7 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// Handler returns an sshfront.Handler that relays each SFTP session of run
+// Handler returns an sshfront.Handler that relays each SFTP session
 // through sftpproxy to a new session on embedded, which serves the run's
 // files, starting in the user's home directory. Each session runs with opts,
 // its own connection as opts.Conn, so a Drop or Freeze acts on the client
@@ -35,15 +35,11 @@ import (
 // session logs with the connection's ID and user, as the SSH server does,
 // and records its events, if opts.Record is set, with the connection's ID,
 // user and key.
-// Snapshots hold back every session's changes to their file, and keep copies
-// in the run's snapshots directory.
-func Handler(run *Run, embedded *backend.Embedded, rules *faults.Engine, policy config.Policy, opts sftpproxy.Options) sshfront.Handler {
+func Handler(embedded *backend.Embedded, rules *faults.Engine, policy config.Policy, opts sftpproxy.Options) sshfront.Handler {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	snaps := &snapshots{run: run, embedded: embedded, logger: logger, budget: maxCopyBytes}
-	opts.Snapshot = snaps.take
 	return func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		opts := opts
 		opts.Conn, opts.Listener = conn, conn.Server()

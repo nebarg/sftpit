@@ -71,46 +71,30 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 	}
 }
 
-func TestResetChoosesTheNextRunsScenarioAndSeed(t *testing.T) {
-	scenarios := map[string]config.Scenario{"chaos": {}, "own": {Seed: new(faults.Seed(9))}}
+func TestResetChoosesTheNextRunsScenario(t *testing.T) {
+	scenarios := map[string]config.Scenario{"chaos": {}, "own": {}}
 	tests := []struct {
 		name     string
 		scenario string
-		seed     *faults.Seed
 		req      ResetRequest
-		want     Scenario
-		// fresh is set if the next run draws a fresh seed, which want
-		// leaves out.
-		fresh bool
+		want     string
 	}{
-		{name: "a fresh seed is drawn again", scenario: "chaos", fresh: true, want: Scenario{Name: "chaos"}},
-		{name: "a pinned seed is kept", scenario: "chaos", seed: new(faults.Seed(7)), want: Scenario{Name: "chaos", Seed: 7, Pinned: true}},
-		{name: "the scenario's seed is kept", scenario: "own", want: Scenario{Name: "own", Seed: 9, Pinned: true}},
-		{name: "a seed is pinned", scenario: "chaos", req: ResetRequest{Seed: new(faults.Seed(8))}, want: Scenario{Name: "chaos", Seed: 8, Pinned: true}},
-		{name: "a seed overrides the scenario's", scenario: "own", req: ResetRequest{Seed: new(faults.Seed(8))}, want: Scenario{Name: "own", Seed: 8, Pinned: true}},
-		{name: "a named scenario draws afresh", scenario: "chaos", seed: new(faults.Seed(7)), req: ResetRequest{Scenario: new("chaos")}, fresh: true, want: Scenario{Name: "chaos"}},
-		{name: "a named scenario has its own seed", scenario: "chaos", seed: new(faults.Seed(7)), req: ResetRequest{Scenario: new("own")}, want: Scenario{Name: "own", Seed: 9, Pinned: true}},
-		{name: "a named scenario with a seed", scenario: "chaos", req: ResetRequest{Scenario: new("own"), Seed: new(faults.Seed(5))}, want: Scenario{Name: "own", Seed: 5, Pinned: true}},
-		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: new("")}, fresh: true, want: Scenario{}},
-		{name: "still no scenario", fresh: true, want: Scenario{}},
+		{name: "the scenario is repeated", scenario: "chaos", want: "chaos"},
+		{name: "a named scenario", scenario: "chaos", req: ResetRequest{Scenario: new("own")}, want: "own"},
+		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: new("")}, want: ""},
+		{name: "still no scenario", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, _ := startManager(t, Options{Scenarios: scenarios, Scenario: tt.scenario, Seed: tt.seed})
+			m, _ := startManager(t, Options{Scenarios: scenarios, Scenario: tt.scenario})
 			first := m.Status().Run
 			next, err := m.Reset(t.Context(), tt.req)
 			if err != nil {
 				t.Fatalf("Reset: %v", err)
 			}
 			got := next.Run.Scenario
-			if tt.fresh {
-				if got.Seed == first.Scenario.Seed {
-					t.Errorf("the next run has seed %d again, want a fresh one", got.Seed)
-				}
-				got.Seed = 0
-			}
-			if got != tt.want {
-				t.Errorf("after %+v, the next run has %+v, want %+v", first.Scenario, got, tt.want)
+			if got.Name != tt.want || got.Seed == first.Scenario.Seed {
+				t.Errorf("after %+v, the next run has %+v, want scenario %q and a fresh seed", first.Scenario, got, tt.want)
 			}
 		})
 	}
@@ -126,9 +110,6 @@ func TestResetRefusesARunItCannotStart(t *testing.T) {
 		want     string
 	}{
 		{name: "an unknown scenario", req: ResetRequest{Scenario: new("flaky")}, err: ErrUnknownScenario, want: `runs: unknown scenario "flaky"; the configuration defines chaos, own`},
-		{name: "a seed without a scenario", scenario: "chaos", req: ResetRequest{Scenario: new(""), Seed: new(faults.Seed(7))}, err: ErrSeedWithoutScenario, want: "a seed needs a scenario"},
-		{name: "a seed for a run without one", req: ResetRequest{Seed: new(faults.Seed(7))}, err: ErrSeedWithoutScenario, want: "a seed needs a scenario"},
-		{name: "a stale run", req: ResetRequest{Run: "20260101-000000.000-0000"}, err: ErrStaleRun, want: "the current run is "},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -138,12 +119,7 @@ func TestResetRefusesARunItCannotStart(t *testing.T) {
 			if _, err := m.Reset(t.Context(), tt.req); !errors.Is(err, tt.err) || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Reset = %v, want %v saying %q", err, tt.err, tt.want)
 			}
-			// The connection's events grow the trace.
-			got := m.Status()
-			if !got.Trace.Complete || got.Trace.Size <= first.Trace.Size {
-				t.Errorf("after the refused reset, the trace is %+v, want it complete and larger than %+v", got.Trace, first.Trace)
-			}
-			if got.Trace = first.Trace; got != first {
+			if got := m.Status(); got != first {
 				t.Errorf("after the refused reset, the status is %+v, want %+v", got, first)
 			}
 			select {
@@ -152,11 +128,6 @@ func TestResetRefusesARunItCannotStart(t *testing.T) {
 			default:
 			}
 		})
-	}
-
-	m, _ := startManager(t, Options{Scenarios: scenarios})
-	if _, err := m.Reset(t.Context(), ResetRequest{Run: m.Status().Run.ID}); err != nil {
-		t.Errorf("Reset of the current run: %v", err)
 	}
 }
 
@@ -485,8 +456,8 @@ func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
 	if runs, err := os.ReadDir(filepath.Join(m.workspace.Dir(), runsDir)); err != nil || len(runs) != 1 {
 		t.Errorf("the workspace holds runs %v (%v), want only the first", runs, err)
 	}
-	if _, err := m.ChangeRules(m.Status().Run.ID, 1, nil, nil); !errors.Is(err, sshfront.ErrServerClosed) {
-		t.Errorf("ChangeRules after Close = %v, want ErrServerClosed", err)
+	if _, err := m.changeRules(m.Status().Run.ID, 1, nil, nil); !errors.Is(err, sshfront.ErrServerClosed) {
+		t.Errorf("changeRules after Close = %v, want ErrServerClosed", err)
 	}
 }
 

@@ -209,9 +209,8 @@ func TestNewRunRecordsItsScenarioAndSeed(t *testing.T) {
 		want     map[string]any
 	}{
 		{runs.Scenario{Seed: 12}, map[string]any{"seed": 12.0}},
-		{runs.Scenario{Name: "upload-recovery", Seed: 0, Pinned: true}, map[string]any{"scenario": "upload-recovery", "seed": 0.0, "seed_pinned": true}},
+		{runs.Scenario{Name: "upload-recovery", Seed: 0}, map[string]any{"scenario": "upload-recovery", "seed": 0.0}},
 		{runs.Scenario{Name: "dev-chaos", Seed: 4294967295}, map[string]any{"scenario": "dev-chaos", "seed": 4294967295.0}},
-		{runs.Scenario{Inline: true, Seed: 3}, map[string]any{"inline": true, "seed": 3.0}},
 	}
 	for _, tt := range tests {
 		r, err := w.NewRun(tt.scenario)

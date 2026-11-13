@@ -59,8 +59,8 @@ func TestEachRunRecordsItsEvents(t *testing.T) {
 		t.Errorf("operation = %+v, want the STAT denied by deny", op)
 	}
 
-	if _, err := m.ChangeRules(first, 1, nil, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
+	if _, err := m.changeRules(first, 1, nil, nil); err != nil {
+		t.Fatalf("changeRules: %v", err)
 	}
 	changed := awaitEvent(t, rec, events.RulesChanged)
 	if r := changed.Rules; r.Revision != 2 || r.Previous != 1 || string(r.Faults) != "[]" {
@@ -133,8 +133,8 @@ func TestStatusCountsWaitsAndEventsCountCancellations(t *testing.T) {
 	}
 
 	// Without the freeze, a client can log in and stall.
-	if _, err := m.ChangeRules(run, 1, []faults.Rule{stuck}, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
+	if _, err := m.changeRules(run, 1, []faults.Rule{stuck}, nil); err != nil {
+		t.Fatalf("changeRules: %v", err)
 	}
 	c, _ := dialSFTP(t, addr)
 	go func() { _, _ = c.Stat("/") }()
@@ -142,8 +142,8 @@ func TestStatusCountsWaitsAndEventsCountCancellations(t *testing.T) {
 	if s := m.Status(); s.Stalled != 1 || s.Frozen != 0 {
 		t.Errorf("status with a stall: %d stalled, %d frozen; want 1 and 0", s.Stalled, s.Frozen)
 	}
-	if _, err := m.ChangeRules(run, 2, nil, nil); err != nil {
-		t.Fatalf("ChangeRules: %v", err)
+	if _, err := m.changeRules(run, 2, nil, nil); err != nil {
+		t.Fatalf("changeRules: %v", err)
 	}
 	deadline := time.Now().Add(waitTimeout)
 	for rec.Canceled("stuck") != 1 {

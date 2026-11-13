@@ -59,13 +59,11 @@ func TestATimerWaitsForTheBackendButWritesNoMoreReplies(t *testing.T) {
 	for _, order := range replyOrders {
 		t.Run(order.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				var snaps snapshots
 				start := time.Now()
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
 					Faults:     inSequence(sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure}),
 					Timers:     []sftpproxy.Timer{{At: start.Add(2 * time.Second), Action: sftpproxy.Drop{}}},
 					ReplyOrder: order,
-					Snapshot:   snaps.take,
 				})
 				// A faulted upload is still open, and a write is with the
 				// backend, when the moment comes.
@@ -85,9 +83,6 @@ func TestATimerWaitsForTheBackendButWritesNoMoreReplies(t *testing.T) {
 				p.client.assertClosed(t)
 				if got := p.conn.events(); !slices.Equal(got, []string{"close"}) {
 					t.Errorf("connection events = %v, want [close]", got)
-				}
-				if got := snaps.taken(); !slices.Equal(got, []string{"/f"}) {
-					t.Errorf("snapshots = %v, want the faulted upload's", got)
 				}
 			})
 		})
@@ -145,11 +140,9 @@ func TestTimedFaultsCountFromTheHandlesOpen(t *testing.T) {
 		t.Run(order.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				var logs syncBuffer
-				var snaps snapshots
 				p, fb := startProxyOnFake(t, sftpproxy.Options{
 					Faults:     on[*sftpwire.Open](sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{Reset: true}}),
 					ReplyOrder: order,
-					Snapshot:   snaps.take,
 					Logger:     logs.logger(),
 				})
 				start := time.Now()
@@ -163,14 +156,12 @@ func TestTimedFaultsCountFromTheHandlesOpen(t *testing.T) {
 				p.client.assertReplies(t, 2)
 
 				p.client.assertClosed(t)
-				// The snapshot takes a second of its own.
-				if got, want := time.Since(start), 3*time.Second+snapshotTime; got != want {
-					t.Errorf("the connection was reset after %v, want %v: 2s after the handle opened, and the snapshot", got, want)
+				if got, want := time.Since(start), 3*time.Second; got != want {
+					t.Errorf("the connection was reset after %v, want %v: 2s after the handle opened", got, want)
 				}
 				if got := p.conn.events(); !slices.Equal(got, []string{"reset"}) {
 					t.Errorf("connection events = %v, want [reset]", got)
 				}
-				assertSnapshotsLogged(t, logs.String(), snapshotLog("fault"))
 				logs.assertLogged(t, `level=INFO msg="injected fault" path=/f fault=close_connection when=timer mode=rst`)
 			})
 		})
@@ -180,11 +171,9 @@ func TestTimedFaultsCountFromTheHandlesOpen(t *testing.T) {
 func TestClosingTheHandleStopsItsTimedFault(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var logs syncBuffer
-		var snaps snapshots
 		p, fb := startProxyOnFake(t, sftpproxy.Options{
-			Faults:   on[*sftpwire.Open](sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{}}),
-			Snapshot: snaps.take,
-			Logger:   logs.logger(),
+			Faults: on[*sftpwire.Open](sftpproxy.Timed{After: 2 * time.Second, Action: sftpproxy.Drop{}}),
+			Logger: logs.logger(),
 		})
 		openForUpload(t, p, fb, "h")
 		time.Sleep(time.Second)
@@ -199,9 +188,8 @@ func TestClosingTheHandleStopsItsTimedFault(t *testing.T) {
 		if got := p.conn.events(); len(got) != 0 {
 			t.Errorf("connection events = %v after the handle closed", got)
 		}
-		// The handle was never faulted, so its file needs no evidence.
-		if got := snaps.taken(); len(got) != 0 || strings.Contains(logs.String(), "injected fault") {
-			t.Errorf("snapshots %v and logs\n%s\nwant neither for a moment that never came", got, logs.String())
+		if strings.Contains(logs.String(), "injected fault") {
+			t.Errorf("logs\n%s\nwant no fault for a moment that never came", logs.String())
 		}
 	})
 }

@@ -11,7 +11,7 @@ import (
 
 func TestRecorderNumbersAndTimesEachEvent(t *testing.T) {
 	start := time.Now().Add(-time.Second)
-	r := events.NewRecorder(start, 10, nil)
+	r := events.NewRecorder(start, 10)
 	r.Record(events.Event{Kind: events.Connected, Connection: 1})
 	r.Record(events.Event{Kind: events.Authenticated, Connection: 1, User: "test"})
 	got := r.Events(0, 100, events.Filter{}).Events
@@ -26,7 +26,7 @@ func TestRecorderNumbersAndTimesEachEvent(t *testing.T) {
 }
 
 func TestRecorderKeepsTheLatestEvents(t *testing.T) {
-	r := events.NewRecorder(time.Now(), 3, nil)
+	r := events.NewRecorder(time.Now(), 3)
 	if last := r.Last(); last != 0 {
 		t.Errorf("Last of no events = %d, want 0", last)
 	}
@@ -46,7 +46,7 @@ func TestRecorderKeepsTheLatestEvents(t *testing.T) {
 }
 
 func TestRecorderPagesThroughMatchingEvents(t *testing.T) {
-	r := events.NewRecorder(time.Now(), 100, nil)
+	r := events.NewRecorder(time.Now(), 100)
 	for _, e := range []events.Event{
 		{Kind: events.Connected, Connection: 1},
 		{Kind: events.Operation, Connection: 1, User: "test", Path: "/a"},
@@ -88,7 +88,7 @@ func TestRecorderPagesThroughMatchingEvents(t *testing.T) {
 }
 
 func TestRecorderWakesItsFollowers(t *testing.T) {
-	r := events.NewRecorder(time.Now(), 10, nil)
+	r := events.NewRecorder(time.Now(), 10)
 	changed := r.Changed()
 	select {
 	case <-changed:
@@ -113,7 +113,7 @@ func TestRecorderWakesItsFollowers(t *testing.T) {
 }
 
 func TestRecorderCountsWaitsAndCancellations(t *testing.T) {
-	r := events.NewRecorder(time.Now(), 2, nil)
+	r := events.NewRecorder(time.Now(), 2)
 	stall := &events.Fault{Type: "stall"}
 	freeze := &events.Fault{Type: "freeze_connection"}
 	for _, e := range []events.Event{

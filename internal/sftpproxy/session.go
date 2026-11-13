@@ -7,8 +7,7 @@
 // the request, or drop or freeze the connection or end the session, before
 // or after the backend acts, or at a moment whatever the client is doing. It
 // can also cut off an upload at a byte offset, corrupt what a download
-// reads, misreport sizes, and snapshot the file that a faulted handle leaves
-// behind before anything else can change it.
+// reads and misreport sizes.
 package sftpproxy
 
 import (
@@ -101,39 +100,17 @@ type Options struct {
 	// value is RequestOrder.
 	ReplyOrder ReplyOrder
 
-	// Snapshot describes the file that a faulted file handle leaves behind,
-	// which the session logs as evidence that a later request, such as a
-	// retry that truncates the file, cannot destroy. A file handle is
-	// faulted once a fault acts on the OPEN that returned it or on a request
-	// through it, including a write that reaches a PartialUpload's cutoff.
-	// Choosing a PartialUpload or CorruptDownload for the OPEN does not
-	// count, and neither a CorruptDownload nor a WrongSize ever faults a
-	// handle, since neither changes a file.
-	//
-	// The session calls Snapshot with the handle's path once nothing more
-	// can be written through the handle: when the backend has answered the
-	// handle's CLOSE, before the client gets that reply; when a fault ends
-	// the session, before it acts on the connection or the session; or else
-	// once the session has closed the backend stream. No later
-	// request on the file reaches the backend until it returns. It is
-	// called once per faulted handle. A nil Snapshot records nothing.
-	Snapshot func(path string) (Snapshot, error)
-
-	// Logger receives injected faults, snapshots and, at debug level, every
+	// Logger receives injected faults and, at debug level, every
 	// request. Nil means slog.Default().
 	Logger *slog.Logger
 
 	// Record, if set, receives the session's events, without the
 	// connection or user, which the caller knows: each request once its
 	// client has the reply, each fault as it takes effect and the end of
-	// each fault's wait, each file handle's transfer, and each snapshot.
+	// each fault's wait, and each file handle's transfer.
 	// It is called from the session's goroutines, so it must be safe for
 	// concurrent use, and must not block.
 	Record func(events.Event)
-
-	// Transfers, if set, counts the session's file handles while they are
-	// open, as it counts those of the other sessions that share it.
-	Transfers *Transfers
 }
 
 // Conn is the connection a client's session runs over.
@@ -176,11 +153,9 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 		conn:      opts.Conn,
 		listener:  opts.Listener,
 		order:     opts.ReplyOrder,
-		snapshot:  opts.Snapshot,
 		released:  opts.Released,
 		logger:    opts.Logger,
 		record:    opts.Record,
-		transfers: opts.Transfers,
 		waits:     make(map[*request]struct{}),
 		replies:   make(chan slot, maxQueuedReplies),
 		moments:   make(chan *request),
@@ -220,12 +195,10 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 	s.wg.Go(func() { s.stop(s.writeReplies()) })
 	s.stop(s.relayRequests())
 	s.wg.Wait()
-	s.snapshotRest(closedBySessionEnd)
 	s.endWaits()
 	for _, h := range s.tracker.openFiles() {
 		s.recordTransfer(h, "session_ended")
 	}
-	s.tracker.settleAll()
 	return s.result()
 }
 
@@ -239,11 +212,9 @@ type session struct {
 	conn      Conn
 	listener  Listener
 	order     ReplyOrder
-	snapshot  func(string) (Snapshot, error)
 	released  func() <-chan struct{}
 	logger    *slog.Logger
 	record    func(events.Event)
-	transfers *Transfers
 	tracker   *tracker
 
 	// wg tracks every goroutine of the session, including those holding
@@ -318,7 +289,6 @@ func (s *session) start() error {
 		return err
 	}
 	s.tracker = newTracker(dir, exts)
-	s.tracker.transfers = s.transfers
 
 	b, err := sftpwire.ReadPacket(s.clientIn, maxPacketLength)
 	if err != nil {
@@ -457,7 +427,6 @@ func (s *session) handleRequest(b []byte) error {
 		s.logRequest(req, req.own)
 		return s.replyNow(replyTo(req, req.own))
 	}
-	s.prepareSnapshot(req)
 	req.reply = make(slot, 1)
 	if s.order == CompletionOrder {
 		return s.schedule(req)
@@ -496,8 +465,8 @@ func (s *session) decide(req *request) error {
 			req.action, req.wrongSize = nil, &a
 		}
 	}
-	// A download's cutoff changes no file, so, like a corruption, it leaves
-	// nothing to snapshot.
+	// A download's cutoff changes no file, so, like a corruption, it does
+	// not fault the handle.
 	if _, read := req.packet.(*sftpwire.Read); req.action != nil && (!req.cut || !read) {
 		s.tracker.fault(req)
 	}
@@ -576,7 +545,7 @@ func (s *session) checkTarget(a Action) error {
 
 // process applies req's fault if that acts before the backend, then
 // forwards req unless the fault answered it or a drop has stopped
-// forwarding, and waits for any snapshot it needs. In request order it runs
+// forwarding. In request order it runs
 // on the request goroutine, so a held request holds back every later one.
 func (s *session) process(req *request) error {
 	if s.isHalted() {
@@ -604,10 +573,7 @@ func (s *session) process(req *request) error {
 			s.listener.Down(a.Duration, false)
 		}
 	}
-	if err := s.send(req); err != nil {
-		return err
-	}
-	return s.awaitSnapshot(req)
+	return s.send(req)
 }
 
 // send forwards req to the backend, as two reads if it is a split READ,
@@ -810,7 +776,6 @@ func (s *session) relayReplies() error {
 			if emptied {
 				s.readOn(req)
 			} else {
-				s.snapshotClosed(req)
 				if _, closed := req.packet.(*sftpwire.Close); closed {
 					s.recordTransfer(req.handle, "close")
 				}
@@ -905,11 +870,8 @@ func (s *session) writeReplies() error {
 // drop ends the session at req's Drop, Freeze, EndSession or ListenerDown
 // that closes every connection. All but an EndSession act on the
 // connection, so the client sees it fail rather than the session close in
-// an orderly way. The backend has answered every request it
-// was sent, so the files of the faulted handles still open are snapshotted
-// first: a client that reconnects to retry must not change them before then.
+// an orderly way.
 func (s *session) drop(req *request) error {
-	s.snapshotRest(closedByFault)
 	var err error
 	switch a := req.action.(type) {
 	case EndSession:

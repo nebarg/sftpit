@@ -1,18 +1,13 @@
 package config
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
@@ -28,23 +23,9 @@ const (
 // is the scenario's.
 const scenarioFileExt = ".yaml"
 
-// scenarioFileHeader opens each scenario file that sftpit writes.
-const scenarioFileHeader = `# A scenario saved by sftpit, which rewrites this file in full each time the
-# scenario is saved again. Edit it by hand if you like, but keep notes in
-# description, since comments are not kept.
-`
-
 var (
 	// ErrScenarioName reports a name that a scenario cannot have.
 	ErrScenarioName = errors.New("invalid scenario name")
-
-	// ErrConfiguredScenario reports a save of a scenario that the
-	// configuration file defines, which only an edit of that file changes.
-	ErrConfiguredScenario = errors.New("the configuration file defines this scenario")
-
-	// ErrScenarioChanged reports a save whose expected content hash does not
-	// match the file it would replace, which has changed since it was read.
-	ErrScenarioChanged = errors.New("the scenario file has changed")
 
 	// ErrInvalidScenarioFile reports a scenario file that does not hold a
 	// valid scenario.
@@ -60,31 +41,21 @@ type ScenarioFiles struct {
 	// configured are the configuration file's scenarios, whose names no
 	// file may have.
 	configured map[string]Scenario
-
-	// expectedDir is the directory of the fixtures that assertions may
-	// refer to, or "" for none.
-	expectedDir string
-
-	// saving serialises saves, so that each checks the file it replaces.
-	saving sync.Mutex
 }
 
 // NewScenarioFiles returns the scenarios saved in dir, an absolute path,
-// whose rules may refer only to users, and keys, that users has, whose
-// assertions may refer only to fixtures under expectedDir, and which may not
-// have the names of the scenarios configured.
-func NewScenarioFiles(dir string, users []sshfront.User, configured map[string]Scenario, expectedDir string) *ScenarioFiles {
-	return &ScenarioFiles{dir: dir, users: users, configured: configured, expectedDir: expectedDir}
+// whose rules may refer only to users, and keys, that users has, and which
+// may not have the names of the scenarios configured.
+func NewScenarioFiles(dir string, users []sshfront.User, configured map[string]Scenario) *ScenarioFiles {
+	return &ScenarioFiles{dir: dir, users: users, configured: configured}
 }
 
 // ScenarioFile is a scenario saved as a file.
 type ScenarioFile struct {
 	Name string
 
-	// Path is the file's absolute path, and Hash the SHA-256 of its
-	// content, in hex.
+	// Path is the file's absolute path.
 	Path string
-	Hash string
 
 	Scenario Scenario
 
@@ -139,45 +110,6 @@ func (f *ScenarioFiles) Load(name string) (ScenarioFile, error) {
 	return file, file.Err
 }
 
-// Save writes s to the scenario file of name, which replaces the file that
-// hash, the SHA-256 of its content, describes, or is a new file if hash is
-// "". If the file holds other content, or hash describes a file that is
-// gone, Save fails with ErrScenarioChanged. A name that the configuration
-// file defines fails with ErrConfiguredScenario, and one that a scenario
-// cannot have with ErrScenarioName. The directory is made if need be.
-func (f *ScenarioFiles) Save(name string, s Scenario, hash string) (ScenarioFile, error) {
-	if err := checkScenarioName(name); err != nil {
-		return ScenarioFile{}, err
-	}
-	if _, ok := f.configured[name]; ok {
-		return ScenarioFile{}, fmt.Errorf("config: scenario %s: %w; edit it there, or save a copy under another name", name, ErrConfiguredScenario)
-	}
-	data, err := renderScenario(s)
-	if err != nil {
-		return ScenarioFile{}, err
-	}
-	f.saving.Lock()
-	defer f.saving.Unlock()
-	file := f.path(name)
-	current, err := os.ReadFile(file)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		if hash != "" {
-			return ScenarioFile{}, fmt.Errorf("config: %s: %w: it was removed", file, ErrScenarioChanged)
-		}
-	case err != nil:
-		return ScenarioFile{}, fmt.Errorf("config: %w", err)
-	case hash == "":
-		return ScenarioFile{}, fmt.Errorf("config: %s: %w: it exists, so give its hash to replace it", file, ErrScenarioChanged)
-	case hash != hashOf(current):
-		return ScenarioFile{}, fmt.Errorf("config: %s: %w since it was read", file, ErrScenarioChanged)
-	}
-	if err := writeAtomically(f.dir, file, data); err != nil {
-		return ScenarioFile{}, err
-	}
-	return ScenarioFile{Name: name, Path: file, Hash: hashOf(data), Scenario: s}, nil
-}
-
 // read reads the scenario file of name, a valid scenario name.
 func (f *ScenarioFiles) read(name string) ScenarioFile {
 	file := ScenarioFile{Name: name, Path: f.path(name)}
@@ -186,7 +118,6 @@ func (f *ScenarioFiles) read(name string) ScenarioFile {
 		file.Err = fmt.Errorf("config: %w", err)
 		return file
 	}
-	file.Hash = hashOf(data)
 	if err := checkScenarioName(name); err != nil {
 		file.Err = fmt.Errorf("%w %s: %w", ErrInvalidScenarioFile, file.Path, err)
 		return file
@@ -196,7 +127,7 @@ func (f *ScenarioFiles) read(name string) ScenarioFile {
 		file.Err = fmt.Errorf("%w %s: %w", ErrInvalidScenarioFile, file.Path, err)
 		return file
 	}
-	if file.Scenario, err = sf.scenario("scenario "+name, f.users, f.expectedDir); err != nil {
+	if file.Scenario, err = sf.scenario("scenario "+name, f.users); err != nil {
 		file.Err = fmt.Errorf("%w %s: %w", ErrInvalidScenarioFile, file.Path, err)
 	}
 	return file
@@ -220,59 +151,4 @@ func checkScenarioName(name string) error {
 		return fmt.Errorf("%w %q: a scenario name may hold only lowercase letters, digits and -, starting with a letter or digit", ErrScenarioName, name)
 	}
 	return nil
-}
-
-// renderScenario returns s as a scenario file, with its rules in the long
-// form, in the order given.
-func renderScenario(s Scenario) ([]byte, error) {
-	if err := faults.Check(s.Rules); err != nil {
-		return nil, fmt.Errorf("config: %w", err)
-	}
-	b := bytes.NewBufferString(scenarioFileHeader)
-	if err := encodeYAML(b, scenarioFile{SchemaVersion: schemaVersion, scenarioConfig: longScenario(s)}); err != nil {
-		return nil, fmt.Errorf("config: write the scenario: %w", err)
-	}
-	return b.Bytes(), nil
-}
-
-// writeAtomically replaces the file name, in dir, with data, through a
-// temporary file renamed over it, so that a reader sees the old content or
-// the new, never part of it.
-func writeAtomically(dir, name string, data []byte) (err error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(name)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	// A scenario file is shared like any other file in the repository,
-	// rather than kept private as CreateTemp makes it.
-	if err := tmp.Chmod(0o644); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), name); err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-	return nil
-}
-
-func hashOf(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }

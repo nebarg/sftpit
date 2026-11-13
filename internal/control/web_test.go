@@ -31,7 +31,7 @@ func TestTheDashboardIsServedUnderItsPolicy(t *testing.T) {
 			t.Errorf("GET %s has the headers %v", path, h)
 		}
 	}
-	for _, path := range []string{"/ui/test/format.test.js", "/ui/missing.js", "/index.html.bak", "/api/v1/missing"} {
+	for _, path := range []string{"/ui/test/format.test.js", "/ui/missing.js", "/index.html.bak", "/api/missing"} {
 		if resp := get(t, api, path, nil); resp.StatusCode != http.StatusNotFound {
 			t.Errorf("GET %s = %s, want 404", path, resp.Status)
 		}
@@ -108,7 +108,7 @@ func TestServerReportsHowToConnect(t *testing.T) {
 		Workspace:    "/tmp/w",
 	}
 	api := control.Handler(m, control.Options{Server: server})
-	code, body := call(t, api, "GET", "/api/v1/server", "")
+	code, body := call(t, api, "GET", "/api/server", "")
 	want := map[string]any{
 		"sftp_address":  "127.0.0.1:2122",
 		"profile":       "loopback",
@@ -120,7 +120,7 @@ func TestServerReportsHowToConnect(t *testing.T) {
 		"workspace":     "/tmp/w",
 	}
 	if code != http.StatusOK || !equalJSON(body, want) {
-		t.Errorf("GET /api/v1/server = %d %v, want %v", code, body, want)
+		t.Errorf("GET /api/server = %d %v, want %v", code, body, want)
 	}
 }
 

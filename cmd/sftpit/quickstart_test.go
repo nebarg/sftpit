@@ -22,7 +22,7 @@ func TestTheQuickstartExample(t *testing.T) {
 	if err := c.Remove("/outgoing/report.csv"); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("a delete with the fault on = %v, want it refused", err)
 	}
-	if got := requestJSON(t, "GET", api+"/faults/deletes-fail-1", ""); got["happened"] != 1.0 {
+	if got := requestJSON(t, api+"/faults/deletes-fail-1"); got["happened"] != 1.0 {
 		t.Errorf("the fault = %v, want it to have happened once", got)
 	}
 

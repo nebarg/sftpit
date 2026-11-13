@@ -19,28 +19,15 @@ var uploadClients = []struct {
 	failedUpload func(t *testing.T, srv *server, work string) string
 	// transfer is an upload, or a download, that must succeed.
 	transfer func(t testing.TB, srv *server, work string, upload bool)
-	// closedBy holds how a snapshot may say a handle was closed when the
-	// client sees its upload fail and closes it.
-	closedBy []string
 }{
-	{name: "OpenSSH", failedUpload: failedOpenSSHUpload, transfer: transferWithOpenSSH, closedBy: []string{"client"}},
-	{
-		name:         "phpseclib",
-		failedUpload: phpseclib3.failedUpload,
-		transfer:     phpseclib3.transfer,
-		closedBy:     phpseclibClosedBy,
-	},
-	{
-		name:         "phpseclib2",
-		failedUpload: phpseclib2.failedUpload,
-		transfer:     phpseclib2.transfer,
-		closedBy:     phpseclibClosedBy,
-	},
+	{name: "OpenSSH", failedUpload: failedOpenSSHUpload, transfer: transferWithOpenSSH},
+	{name: "phpseclib", failedUpload: phpseclib3.failedUpload, transfer: phpseclib3.transfer},
+	{name: "phpseclib2", failedUpload: phpseclib2.failedUpload, transfer: phpseclib2.transfer},
 }
 
 // TestPartialUploadsKeepTheBytesBelowTheCutoff cuts off each client's
 // pipelined upload, in both reply orders, and checks that exactly the bytes
-// below the cutoff are stored and snapshotted, and what the client reports.
+// below the cutoff are stored, and what the client reports.
 func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 	t.Parallel()
 	// A client that is reset mid-upload reports whichever of its reads and
@@ -112,15 +99,12 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 					writeFile(t, filepath.Join(work, "orders.csv"), data)
 
 					report := c.failedUpload(t, srv, work)
-					// A handle that the session's end closes is snapshotted
-					// once the client has gone.
 					srv.waitForSessions()
 					want := r.reports[c.name]
 					if !slices.ContainsFunc(want, func(w string) bool { return reports(report, w) }) {
 						t.Errorf("%s reported %q, want one of %q", c.name, report, want)
 					}
 					assertHolds(t, srv, "/orders.csv", data[:uploadCutoff])
-					logs.assertSnapshot(t, srv, "/orders.csv", data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
 				})
 			}
 		}
@@ -136,11 +120,10 @@ func reports(report, want string) bool {
 	return strings.Contains(report, want)
 }
 
-// TestRetryLeavesThePartialUploadsSnapshot cuts off each client's first
-// upload and then uploads again, as an application recovering from the
-// failure would. The retry truncates the partial file, but the snapshot
-// still records exactly the bytes below the cutoff.
-func TestRetryLeavesThePartialUploadsSnapshot(t *testing.T) {
+// TestARetryStoresTheWholeFile cuts off each client's first upload and then
+// uploads again, as an application recovering from the failure would, and
+// checks that the retry stores the whole file.
+func TestARetryStoresTheWholeFile(t *testing.T) {
 	t.Parallel()
 	results := []struct {
 		name   string
@@ -164,14 +147,10 @@ func TestRetryLeavesThePartialUploadsSnapshot(t *testing.T) {
 				writeFile(t, filepath.Join(work, "orders.csv"), data)
 
 				c.failedUpload(t, srv, work)
-				// phpseclib does not wait for its CLOSE to be answered, so its
-				// handle can be snapshotted only as its session ends. A retry
-				// on a new connection must not reach the file before then.
 				srv.waitForSessions()
 				c.transfer(t, srv, work, true)
 
 				assertHolds(t, srv, "/orders.csv", data)
-				logs.assertSnapshot(t, srv, "/orders.csv", data[:uploadCutoff], snapshotClosedBy(c.closedBy, r.result)...)
 			})
 		}
 	}
@@ -200,8 +179,7 @@ func onFirstUpload(action sftpproxy.Action) func(sftpproxy.Request) sftpproxy.Fa
 
 // TestCorruptedUploadsAreTheSameForEveryClient uploads a file through each
 // corruption with each client, in both reply orders, and checks that the
-// client reports success while the server stores exactly the corrupted file,
-// and that the snapshot records it.
+// client reports success while the server stores exactly the corrupted file.
 func TestCorruptedUploadsAreTheSameForEveryClient(t *testing.T) {
 	t.Parallel()
 	data := randomBytes(4<<20 + 321)
@@ -226,17 +204,7 @@ func TestCorruptedUploadsAreTheSameForEveryClient(t *testing.T) {
 			want:       flipped,
 		},
 	}
-	clients := []struct {
-		name     string
-		transfer func(t testing.TB, srv *server, work string, upload bool)
-		closedBy []string
-	}{
-		{name: "OpenSSH", transfer: transferWithOpenSSH, closedBy: []string{"client"}},
-		{name: "phpseclib", transfer: phpseclib3.transfer, closedBy: phpseclibClosedBy},
-		{name: "phpseclib2", transfer: phpseclib2.transfer, closedBy: phpseclibClosedBy},
-	}
-
-	for _, c := range clients {
+	for _, c := range uploadClients {
 		for _, order := range []sftpproxy.ReplyOrder{sftpproxy.RequestOrder, sftpproxy.CompletionOrder} {
 			for _, tt := range corruptions {
 				t.Run(c.name+"/"+order.String()+"/"+tt.corruption.Corruption.String(), func(t *testing.T) {
@@ -259,7 +227,6 @@ func TestCorruptedUploadsAreTheSameForEveryClient(t *testing.T) {
 					srv.waitForSessions()
 
 					assertHolds(t, srv, "/orders.csv", tt.want)
-					logs.assertSnapshot(t, srv, "/orders.csv", tt.want, c.closedBy...)
 				})
 			}
 		}

@@ -91,7 +91,7 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var logs capturedLog
-			srv := startScenario(t, []faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, 0, logs.logger())
+			srv := startScenario(t, []faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, logs.logger())
 
 			out, err := openSSH(t, sftpPath, srv, t.TempDir(), "ls\n", tt.options...)
 			if err == nil {
@@ -122,7 +122,7 @@ func TestOpenSSHWaitsForASlowLogin(t *testing.T) {
 		ID:     "slow-login",
 		Match:  faults.Match{Operations: []faults.Operation{faults.Authenticate}},
 		Action: sftpproxy.Delay{Duration: time.Second},
-	}}, 0, logs.logger())
+	}}, logs.logger())
 
 	start := time.Now()
 	out, err := openSSH(t, sftpPath, srv, t.TempDir(), "ls\n")

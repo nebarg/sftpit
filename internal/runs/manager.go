@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -31,22 +30,6 @@ var (
 	// configuration nor a scenario file defines.
 	ErrUnknownScenario = errors.New("unknown scenario")
 
-	// ErrSeedWithoutScenario reports a reset that pins a seed for a run
-	// without a scenario.
-	ErrSeedWithoutScenario = errors.New("a seed needs a scenario, whose random decisions it pins")
-
-	// ErrTwoScenarios reports a reset that both names a scenario and gives
-	// an inline one.
-	ErrTwoScenarios = errors.New("a reset names a scenario or gives one inline, not both")
-
-	// ErrDrained reports a change to a run that a drain has ended, whose
-	// verdict nothing may change.
-	ErrDrained = errors.New("the run has been drained; a reset starts the next")
-
-	// ErrUnavailable reports a drain of a run that a failed reset has left
-	// without admission.
-	ErrUnavailable = errors.New("the run is unavailable after a failed reset; a reset that succeeds starts the next")
-
 	// ErrUnknownRun reports a run that is neither current nor among the
 	// recent runs whose events the Manager keeps.
 	ErrUnknownRun = errors.New("unknown run")
@@ -66,17 +49,8 @@ type Options struct {
 	// "" for none.
 	SeedDir string
 
-	// ExpectedDir is the host directory of the fixtures that assertions
-	// compare files with, or "" for none. A snapshot is taken at the start,
-	// as of the seed, so later changes to it reach no assertion.
-	ExpectedDir string
-
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
-
-	// MaxTraceBytes bounds each run's trace, the file of its events, or is
-	// 0 for no bound.
-	MaxTraceBytes int64
 
 	// ReplyOrder is the order in which each session's replies reach its
 	// client.
@@ -93,10 +67,8 @@ type Options struct {
 	ScenarioFiles *config.ScenarioFiles
 
 	// Scenario names the first run's scenario, or is "" for a run without
-	// faults. Seed, if set, pins its random decisions in place of the
-	// scenario's own seed.
+	// faults.
 	Scenario string
-	Seed     *faults.Seed
 
 	// Logger receives what the runs log. Nil means slog.Default().
 	Logger *slog.Logger
@@ -109,7 +81,6 @@ type Options struct {
 type Manager struct {
 	workspace *Workspace
 	fixtures  *fixtureSnapshot
-	expected  *fixtureSnapshot
 	opts      Options
 	logger    *slog.Logger
 	srv       *sshfront.Server
@@ -133,8 +104,6 @@ type Manager struct {
 	// failed, until another succeeds.
 	inReset bool
 	failed  error
-	// queued is what Queue set for the next reset, or nil.
-	queued *InlineScenario
 }
 
 // recentRun is the events of a run.
@@ -145,32 +114,12 @@ type recentRun struct {
 
 // activeRun is a run that a Manager serves.
 type activeRun struct {
-	run    *Run
-	root   *os.Root
-	rules  *faults.Engine
-	events *events.Recorder
-	// transfers counts the file handles open in the run's sessions, until
-	// their transfers are recorded.
-	transfers *sftpproxy.Transfers
-	handler   sshfront.Handler
-	hooks     sshfront.Hooks
-
-	// startRules and startChaos are the rules and chaos the run started
-	// with, which a reset that repeats an inline scenario starts the next
-	// run with.
-	startRules []faults.Rule
-	startChaos *faults.Chaos
-
-	// assertions are what the run must have done once it is over. No change
-	// of its rules changes them.
-	assertions []config.Assertion
-
-	// draining is set while a drain is under way, and drained and report
-	// once it has ended and once the run's verdict is in. They are guarded
-	// by the Manager's mu.
-	draining bool
-	drained  *Drained
-	report   *Report
+	run     *Run
+	root    *os.Root
+	rules   *faults.Engine
+	events  *events.Recorder
+	handler sshfront.Handler
+	hooks   sshfront.Hooks
 
 	// stops stop the timers armed for the run: those it started with, and
 	// those of each change of its rules. They are guarded by the Manager's
@@ -201,18 +150,14 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	expected, err := w.snapshotExpected(opts.ExpectedDir)
-	if err != nil {
-		return nil, err
-	}
-	m := &Manager{workspace: w, fixtures: fixtures, expected: expected, opts: opts, logger: logger}
+	m := &Manager{workspace: w, fixtures: fixtures, opts: opts, logger: logger}
 	cfg := opts.Server
 	cfg.Handler, cfg.Hooks = m.handle, m.hooks()
 	cfg.Logger = cmp.Or(cfg.Logger, logger)
 	if m.srv, err = sshfront.New(cfg); err != nil {
 		return nil, err
 	}
-	first, err := m.scenario(opts.Scenario, opts.Seed)
+	first, err := m.scenario(opts.Scenario)
 	if err != nil {
 		return nil, err
 	}
@@ -245,31 +190,10 @@ func (m *Manager) Close() error {
 
 // ResetRequest chooses the run that a reset starts.
 type ResetRequest struct {
-	// Run, if set, is the run the reset expects to end. If another run is
-	// current, the reset is refused with ErrStaleRun.
-	Run string
-
 	// Scenario, if set, names the next run's scenario, or is "" for a run
-	// without faults. If neither Scenario nor Inline is set, the next run
-	// starts with what Queue set, or else repeats the current run's
-	// scenario, and its seed if that was pinned.
+	// without faults. If it is not set, the next run repeats the current
+	// run's scenario.
 	Scenario *string
-
-	// Inline, if set, is the next run's scenario, given in place of one the
-	// configuration names.
-	Inline *InlineScenario
-
-	// Seed, if set, pins the next run's random decisions. Otherwise the
-	// scenario's own seed does, or the run draws a fresh seed.
-	Seed *faults.Seed
-}
-
-// InlineScenario is a scenario given at a reset rather than named in the
-// configuration: its rules, its chaos, or nil, and its assertions.
-type InlineScenario struct {
-	Rules      []faults.Rule
-	Chaos      *faults.Chaos
-	Assertions []config.Assertion
 }
 
 // Reset ends the current run and starts the run that req chooses. It first
@@ -292,9 +216,6 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 		return Status{}, fmt.Errorf("runs: reset: %w", sshfront.ErrServerClosed)
 	}
 	current := m.active()
-	if req.Run != "" && req.Run != current.run.ID {
-		return Status{}, staleRun(current, req.Run)
-	}
 	chosen, err := m.next(current, req)
 	if err != nil {
 		return Status{}, err
@@ -309,7 +230,7 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 	if err != nil {
 		m.failed = err
 	} else {
-		m.current, m.failed, m.queued = next, nil, nil
+		m.current, m.failed = next, nil
 		m.keep(next)
 	}
 	m.mu.Unlock()
@@ -343,21 +264,7 @@ func (m *Manager) Rules(run string) (faults.RuleSet, error) {
 	return current.rules.Rules(), nil
 }
 
-// Assertions returns the assertions of run, which must be the current run,
-// or else fails with ErrStaleRun.
-func (m *Manager) Assertions(run string) ([]config.Assertion, error) {
-	current := m.active()
-	if run != current.run.ID {
-		return nil, staleRun(current, run)
-	}
-	return current.assertions, nil
-}
-
-// ExpectedDir returns the host directory of the fixtures that assertions may
-// refer to, or "" if there is none.
-func (m *Manager) ExpectedDir() string { return m.opts.ExpectedDir }
-
-// ChangeRules replaces the rules of run, which must be the current run, with
+// changeRules replaces the rules of run, which must be the current run, with
 // rules, and its chaos with chaos, as faults.Engine.Replace does if revision
 // is still the current revision, and returns the new rules. It fails with
 // ErrStaleRun for another run, with faults.ErrStaleRevision for another
@@ -365,7 +272,7 @@ func (m *Manager) ExpectedDir() string { return m.opts.ExpectedDir }
 // sshfront.ErrServerClosed. The run takes the listener down at the moments
 // of the rules that start afresh, as it does at those of the rules it
 // started with.
-func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
+func (m *Manager) changeRules(run string, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
 	if m.closed {
@@ -379,12 +286,9 @@ func (m *Manager) ChangeRules(run string, revision uint64, rules []faults.Rule, 
 }
 
 // replaceRules replaces the rules and chaos of current, the current run, as
-// ChangeRules does. The caller holds resetting.
+// changeRules does. The caller holds resetting.
 func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
 	run := current.run.ID
-	if m.isDrained(current) {
-		return faults.RuleSet{}, fmt.Errorf("runs: change rules: %w", ErrDrained)
-	}
 	timers, err := current.rules.Replace(revision, rules, chaos)
 	if err != nil {
 		return faults.RuleSet{}, err
@@ -477,12 +381,6 @@ const (
 	// StateUnavailable is a run that a failed reset has left without
 	// admission.
 	StateUnavailable State = "unavailable"
-	// StateDraining is a run that a drain has closed admission to, whose
-	// clients are finishing what they are doing.
-	StateDraining State = "draining"
-	// StateDrained is a run that a drain has ended, which admits no clients
-	// until a reset starts the next.
-	StateDrained State = "drained"
 )
 
 // Status describes the current run.
@@ -503,29 +401,18 @@ type Status struct {
 	// Stalled counts the requests or replies that stalls hold now, and
 	// Frozen the connections that freezes hold.
 	Stalled, Frozen int
-
-	// Queued reports whether Queue has set the next run's rules.
-	Queued bool
-
-	// Trace describes the run's trace, the file of its events.
-	Trace events.TraceStatus
 }
 
 // Status describes the current run.
 func (m *Manager) Status() Status {
 	m.mu.Lock()
-	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision(), Queued: m.queued != nil}
+	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision()}
 	s.Stalled, s.Frozen = m.current.events.Waiting("stall"), m.current.events.Waiting("freeze_connection")
-	s.Trace = m.current.events.Trace()
 	switch {
 	case m.inReset:
 		s.State = StateResetting
 	case m.failed != nil:
 		s.State, s.Err = StateUnavailable, m.failed
-	case m.current.draining:
-		s.State = StateDraining
-	case m.current.drained != nil:
-		s.State = StateDrained
 	}
 	m.mu.Unlock()
 	if s.State == StateUp {
@@ -542,73 +429,27 @@ type choice struct {
 	scenario Scenario
 	rules    []faults.Rule
 	chaos    *faults.Chaos
-
-	assertions []config.Assertion
 }
 
 // next chooses the scenario of the run after current, as req asks.
 func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
-	switch {
-	case req.Scenario != nil && req.Inline != nil:
-		return choice{}, fmt.Errorf("runs: %w", ErrTwoScenarios)
-	case req.Scenario != nil:
-		return m.scenario(*req.Scenario, req.Seed)
-	case req.Inline != nil:
-		return inline(*req.Inline, req.Seed)
+	if req.Scenario != nil {
+		return m.scenario(*req.Scenario)
 	}
-	if queued := m.Queued(); queued != nil {
-		return inline(*queued, req.Seed)
-	}
-	last := current.run.Scenario
-	seed := req.Seed
-	if seed == nil && last.Pinned {
-		seed = &last.Seed
-	}
-	if last.Inline {
-		return inline(InlineScenario{Rules: current.startRules, Chaos: current.startChaos, Assertions: current.assertions}, seed)
-	}
-	return m.scenario(last.Name, seed)
+	return m.scenario(current.run.Scenario.Name)
 }
 
-// scenario chooses a run of the scenario name, whose random decisions seed
-// pins if set, or else the scenario's own seed or a fresh one.
-func (m *Manager) scenario(name string, seed *faults.Seed) (choice, error) {
+// scenario chooses a run of the scenario name, or of none if name is "".
+// Every run draws a fresh seed for its random decisions.
+func (m *Manager) scenario(name string) (choice, error) {
 	if name == "" {
-		if seed != nil {
-			return choice{}, fmt.Errorf("runs: %w", ErrSeedWithoutScenario)
-		}
-		return choice{scenario: withSeed(Scenario{}, nil)}, nil
+		return choice{scenario: Scenario{Seed: faults.RandomSeed()}}, nil
 	}
 	s, err := m.named(name)
 	if err != nil {
 		return choice{}, err
 	}
-	return choice{scenario: withSeed(Scenario{Name: name}, cmp.Or(seed, s.Seed)), rules: s.Rules, chaos: s.Chaos, assertions: s.Assertions}, nil
-}
-
-// inline chooses a run of the inline scenario s, whose random decisions
-// seed pins if set, or else a fresh seed.
-func inline(s InlineScenario, seed *faults.Seed) (choice, error) {
-	if err := faults.Check(s.Rules); err != nil {
-		return choice{}, fmt.Errorf("runs: %w", err)
-	}
-	if s.Chaos != nil {
-		if err := s.Chaos.Check(); err != nil {
-			return choice{}, fmt.Errorf("runs: %w", err)
-		}
-	}
-	return choice{scenario: withSeed(Scenario{Inline: true}, seed), rules: s.Rules, chaos: s.Chaos, assertions: s.Assertions}, nil
-}
-
-// withSeed returns s with its random decisions pinned by seed if set, or
-// else with a fresh seed.
-func withSeed(s Scenario, seed *faults.Seed) Scenario {
-	if seed == nil {
-		s.Seed = faults.RandomSeed()
-	} else {
-		s.Seed, s.Pinned = *seed, true
-	}
-	return s
+	return choice{scenario: Scenario{Name: name, Seed: faults.RandomSeed()}, rules: s.Rules, chaos: s.Chaos}, nil
 }
 
 // begin starts the chosen run in the workspace, with its files restored
@@ -643,23 +484,9 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		}
 	}
 
-	trace, err := m.workspace.createTrace(run.ID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err != nil {
-			trace.Close()
-		}
-	}()
-	limit := m.opts.MaxTraceBytes
-	if limit == 0 {
-		limit = math.MaxInt64
-	}
-
 	// A run without a scenario has an engine too, for rules applied to it
 	// later.
-	rec := events.NewRecorder(run.Started, maxEvents, events.NewTrace(trace, limit))
+	rec := events.NewRecorder(run.Started, maxEvents)
 	rules, err := faults.New(chosen.rules, chosen.chaos, chosen.scenario.Seed, faults.Options{Logger: m.logger, Record: rec.Record})
 	if err != nil {
 		return nil, err
@@ -669,19 +496,14 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		return nil, err
 	}
 	s := chosen.scenario
-	rec.Record(events.Event{Kind: events.RunStarted, Run: &events.Run{ID: run.ID, Scenario: s.Name, Inline: s.Inline, Seed: strconv.FormatUint(uint64(s.Seed), 10), Pinned: s.Pinned}, Rules: started})
-	transfers := new(sftpproxy.Transfers)
+	rec.Record(events.Event{Kind: events.RunStarted, Run: &events.Run{ID: run.ID, Scenario: s.Name, Seed: strconv.FormatUint(uint64(s.Seed), 10)}, Rules: started})
 	return &activeRun{
-		run:        run,
-		root:       root,
-		rules:      rules,
-		events:     rec,
-		transfers:  transfers,
-		handler:    Handler(run, embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger, Record: rec.Record, Transfers: transfers}),
-		hooks:      connectionHooks(rules, m.logger, rec.Record),
-		startRules: chosen.rules,
-		startChaos: chosen.chaos,
-		assertions: chosen.assertions,
+		run:     run,
+		root:    root,
+		rules:   rules,
+		events:  rec,
+		handler: Handler(embedded, rules, m.opts.Policy, sftpproxy.Options{ReplyOrder: m.opts.ReplyOrder, Logger: m.logger, Record: rec.Record}),
+		hooks:   connectionHooks(rules, m.logger, rec.Record),
 	}, nil
 }
 
@@ -714,11 +536,8 @@ func (m *Manager) hooks() sshfront.Hooks {
 
 // scenarioAttrs are the log attributes of a run of scenario.
 func scenarioAttrs(scenario Scenario) []any {
-	switch {
-	case scenario.Inline:
-		return []any{"inline", true, "seed", scenario.Seed, "seed_pinned", scenario.Pinned}
-	case scenario.Name == "":
+	if scenario.Name == "" {
 		return nil
 	}
-	return []any{"scenario", scenario.Name, "seed", scenario.Seed, "seed_pinned", scenario.Pinned}
+	return []any{"scenario", scenario.Name}
 }
