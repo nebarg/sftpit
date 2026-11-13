@@ -42,8 +42,8 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 		// "prematurely", depending on where it was reading.
 		phpseclibClosed = `phpseclib3\Exception\ConnectionClosedException: Connection closed`
 		// phpseclib 2 returns false and raises notices instead, which say
-		// the same as phpseclib's exceptions, except after a reset, when it
-		// gives no reason at all.
+		// the same as phpseclib's exceptions. A write that meets a reset
+		// fails with no notice, so the report then gives no reason at all.
 		phpseclib2ClosedByServer = "Connection closed (by server) prematurely"
 		phpseclib2Closed         = "Connection closed prematurely"
 		noReason                 = ""
@@ -51,12 +51,16 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 	results := []struct {
 		name   string
 		result sftpproxy.Action
+		// logged is how the server's log names the result, which tells a
+		// reset from a normal close when a client's report does not.
+		logged string
 		// reports holds what each client may report.
 		reports map[string][]string
 	}{
 		{
 			name:   "fail",
 			result: sftpproxy.Fail{Status: sftpwire.StatusFailure},
+			logged: "fault=fail",
 			reports: map[string][]string{
 				"OpenSSH":    {`write remote "/orders.csv": Failure`},
 				"phpseclib":  {"NET_SFTP_STATUS_FAILURE: Failure"},
@@ -66,6 +70,7 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 		{
 			name:   "drop",
 			result: sftpproxy.Drop{},
+			logged: "mode=fin",
 			reports: map[string][]string{
 				"OpenSSH":    {normalClose},
 				"phpseclib":  {phpseclibClosed},
@@ -75,10 +80,11 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 		{
 			name:   "reset",
 			result: sftpproxy.Drop{Reset: true},
+			logged: "mode=rst",
 			reports: map[string][]string{
 				"OpenSSH":    {reset, brokenPipe},
 				"phpseclib":  {phpseclibWrite, phpseclibClosed},
-				"phpseclib2": {noReason},
+				"phpseclib2": {noReason, phpseclib2ClosedByServer, phpseclib2Closed},
 			},
 		},
 	}
@@ -103,6 +109,9 @@ func TestPartialUploadsKeepTheBytesBelowTheCutoff(t *testing.T) {
 					want := r.reports[c.name]
 					if !slices.ContainsFunc(want, func(w string) bool { return reports(report, w) }) {
 						t.Errorf("%s reported %q, want one of %q", c.name, report, want)
+					}
+					if !strings.Contains(logs.text(), r.logged) {
+						t.Errorf("logs lack %q:\n%s", r.logged, logs.text())
 					}
 					assertHolds(t, srv, "/orders.csv", data[:uploadCutoff])
 				})
