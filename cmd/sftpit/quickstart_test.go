@@ -1,75 +1,33 @@
 package main
 
 import (
-	"bytes"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-
-	"github.com/pkg/sftp"
-
-	"github.com/nebarg/sftpit/internal/testutil"
 )
 
-// TestTheQuickstartExample takes the README's quickstart steps against
-// examples/quickstart, with pkg/sftp's client in place of OpenSSH's sftp:
-// an upload that tries again passes, and one that publishes the cut-off
-// upload fails on the published file's hash.
+// TestTheQuickstartExample takes the README's quickstart steps, with
+// pkg/sftp's client in place of OpenSSH's sftp: with "Deletes fail" on for
+// /outgoing, deleting the example's report is refused, and once the fault
+// is off, the delete succeeds.
 func TestTheQuickstartExample(t *testing.T) {
 	t.Parallel()
-	orders, err := os.ReadFile(filepath.Join("..", "..", "examples", "quickstart", "orders.csv"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name       string
-		retry      bool
-		code       int
-		hashReport string
-	}{
-		{"uploading again passes", true, exitOK, "  pass  file_hash /incoming/orders.csv"},
-		{"publishing the cut-off upload fails", false, exitAssertionsFailed, "  FAIL  file_hash /incoming/orders.csv"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			ready := filepath.Join(t.TempDir(), "ready.json")
-			s := startServe(t, "--config", filepath.Join("..", "..", "examples", "quickstart", "sftpit.yaml"), "--scenario", "upload-recovery", "--ready-file", ready)
-			c := s.dial(t, "test", "test")
-			if err := c.Mkdir("/incoming"); err != nil {
-				t.Fatalf("Mkdir: %v", err)
-			}
-			if err := put(c, orders); err == nil {
-				t.Fatal("the first upload succeeded, want it cut off")
-			}
-			if tt.retry {
-				if err := put(c, orders); err != nil {
-					t.Fatalf("the second upload: %v", err)
-				}
-			}
-			if err := c.Rename("/incoming/orders.csv.part", "/incoming/orders.csv"); err != nil {
-				t.Fatalf("Rename: %v", err)
-			}
+	s := startServe(t, "--seed-dir", filepath.Join("..", "..", "examples", "quickstart", "seed"))
+	api := "http://" + s.apiAddr + "/api"
+	requestJSONStatus(t, "POST", api+"/faults", `{"preset": "deletes_fail", "folder": "/outgoing"}`, http.StatusCreated)
 
-			var stdout, stderr testutil.SyncBuffer
-			code := run(commandContext(t), []string{"assert", "--ready-file", ready}, &stdout, &stderr)
-			if code != tt.code || !strings.Contains(stdout.String(), tt.hashReport) {
-				t.Errorf("assert: exit %d, want %d and %q:\n%s%s", code, tt.code, tt.hashReport, stdout.String(), stderr.String())
-			}
-		})
+	c := s.dial(t, "test", "test")
+	if err := c.Remove("/outgoing/report.csv"); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("a delete with the fault on = %v, want it refused", err)
 	}
-}
+	if got := requestJSON(t, "GET", api+"/faults/deletes-fail-1", ""); got["happened"] != 1.0 {
+		t.Errorf("the fault = %v, want it to have happened once", got)
+	}
 
-// put uploads data to /incoming/orders.csv.part, as sftp's put does.
-func put(c *sftp.Client, data []byte) error {
-	f, err := c.Create("/incoming/orders.csv.part")
-	if err != nil {
-		return err
+	requestJSONStatus(t, "PATCH", api+"/faults/deletes-fail-1", `{"on": false}`, http.StatusOK)
+	if err := c.Remove("/outgoing/report.csv"); err != nil {
+		t.Errorf("a delete with the fault off = %v, want it to succeed", err)
 	}
-	_, err = f.ReadFrom(bytes.NewReader(data))
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	return err
 }
