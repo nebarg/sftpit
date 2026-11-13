@@ -64,9 +64,9 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"a built-in name", "  unreliable-light: {faults: [{preset: deletes_fail}]}\n", "", "scenarios.unreliable-light: sftpit has a built-in scenario named unreliable-light"},
 		{"no faults", "  s: {faults: []}\n", "", "scenarios.s: a scenario needs at least one fault"},
 		{"a bad fault", "  s: {faults: [{preset: deletes_fail}, {steps: [upload], do: refuse}]}\n", "", `scenarios.s: faults[1]: there is no step "upload"`},
-		{"an unknown user", "  s: {faults: [{preset: deletes_fail, user: nobody}]}\n", "", `scenarios.s: faults[0]: match: user "nobody" is not a configured user`},
+		{"an unknown user", "  s: {faults: [{preset: deletes_fail, user: nobody}]}\n", "", `scenarios.s: faults[0]: user "nobody" is not a configured user`},
 		{"an unknown field", "  s: {faults: [{preset: deletes_fail, percentage: 5}]}\n", "", "field percentage not found"},
-		{"a rule in the long form", "  s: {faults: [{id: r, match: {operation: stat}, action: {type: hide}}]}\n", "", "field id not found"},
+		{"a rule in the engine's old format", "  s: {faults: [{id: r, match: {operation: stat}, action: {type: hide}}]}\n", "", "field id not found"},
 		{"chaos", "  s: {chaos: {preset: light}, faults: [{preset: deletes_fail}]}\n", "", "field chaos not found"},
 	}
 	for _, tt := range tests {
@@ -257,7 +257,7 @@ func TestSaveRefusesWhatItCannotTurnOn(t *testing.T) {
 		{"unreliable-light", valid, ErrFixedScenario, "unreliable-light is built in, so it can't be changed or deleted"},
 		{"configured", valid, ErrFixedScenario, "configured is defined in the configuration file, so it can't be changed or deleted"},
 		{"empty", Scenario{}, ErrInvalidScenario, "a scenario needs at least one fault"},
-		{"stranger", Scenario{Faults: []Fault{{Preset: "deletes_fail", User: "nobody"}}}, ErrInvalidScenario, `faults[0]: match: user "nobody"`},
+		{"stranger", Scenario{Faults: []Fault{{Preset: "deletes_fail", User: "nobody"}}}, ErrInvalidScenario, `faults[0]: user "nobody"`},
 	}
 	for _, tt := range tests {
 		if _, err := scenarios.Save(tt.name, tt.scenario); !errors.Is(err, tt.want) || !strings.Contains(err.Error(), tt.says) {

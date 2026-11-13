@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -354,6 +355,10 @@ type scenarioFile struct {
 	SchemaVersion int `yaml:"schema_version"`
 	Scenario      `yaml:",inline"`
 }
+
+// namePattern constrains scenario names, which name their files and appear
+// in the control API's paths.
+var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // checkScenarioName reports a name that a scenario cannot have, which
 // keeps a scenario's file in the directory.

@@ -536,6 +536,14 @@ func sameFile(a, b string) bool {
 	return errA == nil && errB == nil && os.SameFile(ai, bi)
 }
 
+// checkUser reports a user that users does not have.
+func checkUser(name string, users []sshfront.User) error {
+	if !slices.ContainsFunc(users, func(u sshfront.User) bool { return u.Name == name }) {
+		return fmt.Errorf("user %q is not a configured user", name)
+	}
+	return nil
+}
+
 func validateUsers(users []userConfig) error {
 	seen := make(map[string]int, len(users))
 	for i, u := range users {

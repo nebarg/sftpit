@@ -3,11 +3,14 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/sftpwire"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
@@ -133,15 +136,6 @@ var Presets = []Preset{
 	{"logins_fail", "Logins fail", "The connection closes just after a successful login.", Fault{Steps: []string{"authenticate"}, Do: "drop"}},
 }
 
-// errorStatuses are the errors a refusal can answer with, by their plain
-// names, and the statuses they are.
-var errorStatuses = map[string]string{
-	"permission_denied": "permission_denied",
-	"no_such_file":      "no_such_file",
-	"failure":           "failure",
-	"unsupported":       "op_unsupported",
-}
-
 // Resolve returns f with its preset's steps, action and defaults filled in,
 // and every setting its action needs, or an error saying what is wrong
 // with it.
@@ -179,7 +173,7 @@ func (f Fault) Resolve() (Fault, error) {
 	case "wrong_size":
 		f.SizeOffBy = orPointer(f.SizeOffBy, new(int64(-1024)))
 	}
-	if _, err := f.ruleConfig("check"); err != nil {
+	if _, err := f.compile("check"); err != nil {
 		return f, err
 	}
 	return f, nil
@@ -199,180 +193,25 @@ func orPointer[T any](p, def *T) *T {
 	return p
 }
 
-// Rule returns the engine's rule for f, with id, checked against users as
-// a configured rule is.
+// Rule returns the engine's rule for f, with id. Its user, if it has one,
+// must be one of users.
 func (f Fault) Rule(id string, users []sshfront.User) (faults.Rule, error) {
 	resolved, err := f.Resolve()
 	if err != nil {
 		return faults.Rule{}, err
 	}
-	rc, err := resolved.ruleConfig(id)
-	if err != nil {
-		return faults.Rule{}, err
+	if f.User != "" {
+		if err := checkUser(f.User, users); err != nil {
+			return faults.Rule{}, err
+		}
 	}
-	return rc.rule(users)
-}
-
-// ruleConfig returns f, resolved, as a rule in the long form.
-func (f Fault) ruleConfig(id string) (ruleConfig, error) {
-	rc := ruleConfig{ID: id, Match: matchConfig{User: f.User, PathPrefix: f.Folder, Path: f.File, FilenameGlob: f.Names}}
-	if n := countSet(f.Folder != "", f.File != "", f.Names != ""); n > 1 {
-		return rc, errors.New("choose one of folder, file and names")
-	}
-	events := slices.Contains(f.Steps, "connect") || slices.Contains(f.Steps, "authenticate")
-	if events && len(f.Steps) > 1 {
-		return rc, errors.New("connecting and logging in can't be combined with other steps")
-	}
-	if events && (f.Folder != "" || f.File != "" || f.Names != "") {
-		return rc, errors.New("connecting and logging in have no file, so leave out folder, file and names")
-	}
-	if f.Do == "" {
-		return rc, errors.New("say what to do, or choose a preset")
-	}
-	if len(f.Steps) == 0 && f.Do != "down" {
-		return rc, errors.New("choose at least one step")
-	}
-	ops, err := operations(f.Steps, f.Do)
-	if err != nil {
-		return rc, err
-	}
-	rc.Match.Operation = ops
-
-	when := "before"
-	if f.After {
-		when = "after"
-	}
-	if events {
-		when = ""
-	}
-	if f.After && !slices.Contains([]string{"refuse", "wait", "hold", "drop", "freeze", "down"}, f.Do) {
-		return rc, fmt.Errorf("%s can't act after the server has done what was asked", f.Do)
-	}
-	if events && f.After {
-		return rc, errors.New("connecting and logging in have no before or after")
-	}
-	mode := "fin"
-	if f.Abrupt {
-		mode = "rst"
-	}
-	transfer := f.Do == "stop_partway" || f.Do == "corrupt"
-
-	switch f.Do {
-	case "refuse":
-		if events {
-			return rc, errors.New("connecting and logging in can't be refused with an error; drop the connection instead")
-		}
-		status, ok := errorStatuses[f.Error]
-		if !ok {
-			return rc, fmt.Errorf("error %q is not one of %s", f.Error, strings.Join(sortedKeys(errorStatuses), ", "))
-		}
-		rc.Action = actionConfig{Type: "fail", When: when, Status: status}
-	case "wait":
-		d, err := seconds(f.Seconds)
-		if err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: "delay", When: when, Duration: &valueRange[string]{Min: d, Max: d}}
-	case "hold":
-		if events {
-			return rc, errors.New("connecting and logging in can't be held; wait or freeze instead")
-		}
-		d, err := seconds(f.Seconds)
-		if err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: "stall", When: when, MaxStall: d}
-	case "drop":
-		rc.Action = actionConfig{Type: "close_connection", When: when, Mode: mode}
-	case "freeze":
-		d, err := seconds(f.Seconds)
-		if err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: "freeze_connection", When: when, MaxFreeze: d}
-	case "stop_partway":
-		action, err := transferAction(f.Steps, "partial_upload", "partial_download", "stopping partway")
-		if err != nil {
-			return rc, err
-		}
-		cutoff := *f.KB * 1024
-		rc.Action = actionConfig{Type: action, CutoffOffset: &valueRange[uint64]{Min: cutoff, Max: cutoff}, Result: "close_connection", Mode: mode}
-	case "corrupt":
-		action, err := transferAction(f.Steps, "corrupt_upload", "corrupt_download", "corrupting data")
-		if err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: action, Transform: "flip_bytes", Offset: new(uint64(0)), Length: new(uint64(64))}
-	case "wrong_size":
-		if err := onlySteps(f.Steps, "a wrong size", "stat", "list"); err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: "wrong_size", SizeDelta: f.SizeOffBy}
-	case "hide":
-		if err := onlySteps(f.Steps, "hiding a file", "open_read", "stat", "list", "remove", "rename"); err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: "hide"}
-	case "down":
-		d, err := seconds(f.Seconds)
-		if err != nil {
-			return rc, err
-		}
-		rc.Action = actionConfig{Type: "listener_down", Duration: &valueRange[string]{Min: d, Max: d}, CloseExisting: new(true)}
-		if len(f.Steps) == 0 {
-			if f.After || f.Folder != "" || f.File != "" || f.Names != "" {
-				return rc, errors.New("a server that goes down at once has no files or before and after; choose steps to take it down at one of them")
-			}
-			rc.Trigger = &triggerConfig{At: &valueRange[string]{Min: "0s", Max: "0s"}, Anchor: "run"}
-		} else {
-			rc.Action.When = when
-		}
-	default:
-		return rc, fmt.Errorf("there is nothing to do called %q", f.Do)
-	}
-
-	if n := countSet(f.First != nil, f.Only != nil, f.Percent != nil, f.Minutes != nil); n > 1 {
-		return rc, errors.New("choose one of first, only, percent and minutes")
-	}
-	switch {
-	case f.First != nil:
-		if *f.First == 0 {
-			return rc, errors.New("first must be at least 1")
-		}
-		rc.MaxTriggers = int(*f.First)
-	case f.Only != nil:
-		if *f.Only == 0 {
-			return rc, errors.New("only must be at least 1")
-		}
-		// A transfer is decided as its file opens, so its times count the
-		// opens of each file rather than each piece of data.
-		if transfer {
-			rc.Match.Attempt = &attemptConfig{Per: []string{"path"}, Numbers: []uint64{*f.Only}}
-		} else {
-			rc.Match.Occurrence = []uint64{*f.Only}
-		}
-	case f.Percent != nil:
-		if *f.Percent <= 0 || *f.Percent > 100 {
-			return rc, errors.New("percent must be above 0 and at most 100")
-		}
-		rc.Decision = &decisionConfig{Probability: new(*f.Percent / 100)}
-	case f.Minutes != nil:
-		if *f.Minutes <= 0 {
-			return rc, errors.New("minutes must be above 0")
-		}
-		if rc.Trigger != nil {
-			return rc, errors.New("a server that goes down at once can't also last for some minutes; give its seconds instead")
-		}
-		until := time.Duration(*f.Minutes * float64(time.Minute)).String()
-		rc.Trigger = &triggerConfig{Window: &windowConfig{From: "0s", Until: until}, Anchor: "run"}
-	}
-	return rc, nil
+	return resolved.compile(id)
 }
 
 // operations returns the engine's operations for steps, given what the
 // fault does there, or an error naming a step that is not one of Steps.
-func operations(steps []string, do string) (stringList, error) {
-	var ops stringList
+func operations(steps []string, do string) ([]faults.Operation, error) {
+	var ops []faults.Operation
 	for _, step := range steps {
 		if !slices.ContainsFunc(Steps, func(s Step) bool { return s.ID == step }) {
 			ids := make([]string, len(Steps))
@@ -383,26 +222,14 @@ func operations(steps []string, do string) (stringList, error) {
 		}
 		switch {
 		case step == "stat" && do == "hide":
-			ops = append(ops, "stat", "lstat")
+			ops = append(ops, faults.Stat, faults.LStat)
 		case step == "stat":
-			ops = append(ops, "stat", "lstat", "fstat")
+			ops = append(ops, faults.Stat, faults.LStat, faults.FStat)
 		default:
-			ops = append(ops, step)
+			ops = append(ops, faults.Operation(step))
 		}
 	}
 	return ops, nil
-}
-
-// transferAction returns upload's action for the step write, and
-// download's for read, which must be the only step.
-func transferAction(steps []string, upload, download, what string) (string, error) {
-	switch {
-	case slices.Equal(steps, []string{"write"}):
-		return upload, nil
-	case slices.Equal(steps, []string{"read"}):
-		return download, nil
-	}
-	return "", fmt.Errorf("%s applies to writing file data or reading it; choose one of them", what)
 }
 
 // onlySteps reports a step outside allowed.
@@ -413,14 +240,6 @@ func onlySteps(steps []string, what string, allowed ...string) error {
 		}
 	}
 	return nil
-}
-
-// seconds returns s seconds as a duration the long form reads.
-func seconds(s *float64) (string, error) {
-	if s == nil || *s <= 0 {
-		return "", errors.New("seconds must be above 0")
-	}
-	return time.Duration(*s * float64(time.Second)).String(), nil
 }
 
 func countSet(set ...bool) int {
@@ -434,13 +253,188 @@ func countSet(set ...bool) int {
 }
 
 // ErrorNames returns the errors a refusal can answer with, sorted.
-func ErrorNames() []string { return sortedKeys(errorStatuses) }
+func ErrorNames() []string { return slices.Sorted(maps.Keys(errorCodes)) }
 
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// errorCodes are the statuses of the errors a refusal can answer with, by
+// their plain names.
+var errorCodes = map[string]sftpwire.StatusCode{
+	"permission_denied": sftpwire.StatusPermissionDenied,
+	"no_such_file":      sftpwire.StatusNoSuchFile,
+	"failure":           sftpwire.StatusFailure,
+	"unsupported":       sftpwire.StatusOpUnsupported,
+}
+
+// compile returns f, resolved, as the engine's rule with id, or an error
+// saying what is wrong with it.
+func (f Fault) compile(id string) (faults.Rule, error) {
+	r := faults.Rule{ID: id, Match: faults.Match{User: f.User}}
+	switch n := countSet(f.Folder != "", f.File != "", f.Names != ""); {
+	case n > 1:
+		return r, errors.New("choose one of folder, file and names")
+	case f.Folder != "":
+		r.Match.Path = faults.Location{Kind: faults.Under, Pattern: f.Folder}
+	case f.File != "":
+		r.Match.Path = faults.Location{Kind: faults.Exactly, Pattern: f.File}
+	case f.Names != "":
+		r.Match.Path = faults.Location{Kind: faults.NamedGlob, Pattern: f.Names}
 	}
-	slices.Sort(keys)
-	return keys
+	events := slices.Contains(f.Steps, "connect") || slices.Contains(f.Steps, "authenticate")
+	if events && len(f.Steps) > 1 {
+		return r, errors.New("connecting and logging in can't be combined with other steps")
+	}
+	if events && (f.Folder != "" || f.File != "" || f.Names != "") {
+		return r, errors.New("connecting and logging in have no file, so leave out folder, file and names")
+	}
+	if f.Do == "" {
+		return r, errors.New("say what to do, or choose a preset")
+	}
+	if len(f.Steps) == 0 && f.Do != "down" {
+		return r, errors.New("choose at least one step")
+	}
+	var err error
+	if r.Match.Operations, err = operations(f.Steps, f.Do); err != nil {
+		return r, err
+	}
+	if f.After && !slices.Contains([]string{"refuse", "wait", "hold", "drop", "freeze", "down"}, f.Do) {
+		return r, fmt.Errorf("%s can't act after the server has done what was asked", f.Do)
+	}
+	if events && f.After {
+		return r, errors.New("connecting and logging in have no before or after")
+	}
+	if r.Action, err = f.action(events); err != nil {
+		return r, err
+	}
+	if f.Do == "down" && len(f.Steps) == 0 {
+		if f.After || f.Folder != "" || f.File != "" || f.Names != "" {
+			return r, errors.New("a server that goes down at once has no files or before and after; choose steps to take it down at one of them")
+		}
+		r.Trigger = &faults.Trigger{Anchor: faults.Run, At: &faults.Range[time.Duration]{}}
+	}
+	if err := f.often(&r); err != nil {
+		return r, err
+	}
+	return r, nil
+}
+
+// action returns what f does, at connecting or logging in if events is
+// set, which have no before or after.
+func (f Fault) action(events bool) (sftpproxy.Action, error) {
+	when := sftpproxy.Before
+	if f.After {
+		when = sftpproxy.After
+	}
+	switch f.Do {
+	case "refuse":
+		if events {
+			return nil, errors.New("connecting and logging in can't be refused with an error; drop the connection instead")
+		}
+		code, ok := errorCodes[f.Error]
+		if !ok {
+			return nil, fmt.Errorf("error %q is not one of %s", f.Error, strings.Join(ErrorNames(), ", "))
+		}
+		return sftpproxy.Fail{When: when, Status: code}, nil
+	case "wait":
+		d, err := seconds(f.Seconds)
+		return sftpproxy.Delay{When: when, Duration: d}, err
+	case "hold":
+		if events {
+			return nil, errors.New("connecting and logging in can't be held; wait or freeze instead")
+		}
+		d, err := seconds(f.Seconds)
+		return sftpproxy.Stall{When: when, Limit: d}, err
+	case "drop":
+		return sftpproxy.Drop{When: when, Reset: f.Abrupt}, nil
+	case "freeze":
+		d, err := seconds(f.Seconds)
+		return sftpproxy.Freeze{When: when, Limit: d}, err
+	case "stop_partway":
+		if err := transferStep(f.Steps, "stopping partway"); err != nil {
+			return nil, err
+		}
+		cutoff, result := *f.KB*1024, sftpproxy.Drop{Reset: f.Abrupt}
+		if f.Steps[0] == "write" {
+			return sftpproxy.PartialUpload{Cutoff: cutoff, Result: result}, nil
+		}
+		return sftpproxy.PartialDownload{Cutoff: cutoff, Result: result}, nil
+	case "corrupt":
+		if err := transferStep(f.Steps, "corrupting data"); err != nil {
+			return nil, err
+		}
+		if f.Steps[0] == "write" {
+			return sftpproxy.CorruptUpload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
+		}
+		return sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
+	case "wrong_size":
+		if err := onlySteps(f.Steps, "a wrong size", "stat", "list"); err != nil {
+			return nil, err
+		}
+		if *f.SizeOffBy == 0 {
+			return nil, errors.New("size_off_by can't be 0")
+		}
+		return sftpproxy.WrongSize{Delta: *f.SizeOffBy}, nil
+	case "hide":
+		if err := onlySteps(f.Steps, "hiding a file", "open_read", "stat", "list", "remove", "rename"); err != nil {
+			return nil, err
+		}
+		return sftpproxy.Hide{}, nil
+	case "down":
+		d, err := seconds(f.Seconds)
+		return sftpproxy.ListenerDown{When: when, Duration: d, CloseExisting: true}, err
+	}
+	return nil, fmt.Errorf("there is nothing to do called %q", f.Do)
+}
+
+// often narrows r to how often f happens.
+func (f Fault) often(r *faults.Rule) error {
+	if n := countSet(f.First != nil, f.Only != nil, f.Percent != nil, f.Minutes != nil); n > 1 {
+		return errors.New("choose one of first, only, percent and minutes")
+	}
+	switch {
+	case f.First != nil:
+		if *f.First == 0 {
+			return errors.New("first must be at least 1")
+		}
+		r.MaxTriggers = int(*f.First)
+	case f.Only != nil:
+		if *f.Only == 0 {
+			return errors.New("only must be at least 1")
+		}
+		// A transfer is decided as its file opens, so its times count the
+		// opens of each file rather than each piece of data.
+		if r.IsTransfer() {
+			r.Match.Attempt = &faults.Attempt{PerPath: true, Numbers: []uint64{*f.Only}}
+		} else {
+			r.Match.Occurrence = []uint64{*f.Only}
+		}
+	case f.Percent != nil:
+		if *f.Percent <= 0 || *f.Percent > 100 {
+			return errors.New("percent must be above 0 and at most 100")
+		}
+		r.Probability = new(*f.Percent / 100)
+	case f.Minutes != nil:
+		if *f.Minutes <= 0 {
+			return errors.New("minutes must be above 0")
+		}
+		if r.Trigger != nil {
+			return errors.New("a server that goes down at once can't also last for some minutes; give its seconds instead")
+		}
+		r.Trigger = &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{Until: time.Duration(*f.Minutes * float64(time.Minute))}}
+	}
+	return nil
+}
+
+// transferStep reports steps other than writing or reading file data alone.
+func transferStep(steps []string, what string) error {
+	if slices.Equal(steps, []string{"write"}) || slices.Equal(steps, []string{"read"}) {
+		return nil
+	}
+	return fmt.Errorf("%s applies to writing file data or reading it; choose one of them", what)
+}
+
+// seconds returns s seconds as a duration, which must be above 0.
+func seconds(s *float64) (time.Duration, error) {
+	if s == nil || *s <= 0 || time.Duration(*s*float64(time.Second)) <= 0 {
+		return 0, errors.New("seconds must be above 0")
+	}
+	return time.Duration(*s * float64(time.Second)), nil
 }

@@ -68,7 +68,7 @@ func (rc readOnlyConfig) readOnly(users []sshfront.User) (ReadOnly, error) {
 		return ReadOnly{}, errors.New("users needs at least one user; leave it out for every user")
 	}
 	for _, user := range rc.Users {
-		if err := checkCredentials(user, "", users); err != nil {
+		if err := checkUser(user, users); err != nil {
 			return ReadOnly{}, err
 		}
 	}
