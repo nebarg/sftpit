@@ -3,7 +3,6 @@ package runs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -63,10 +62,10 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 	if conn.User() != "" {
 		attrs = append(attrs, "user", conn.User())
 	}
-	described := sftpproxy.FaultAttrs(action, "")
-	attrs = append(attrs, described...)
+	described := sftpproxy.Describe(action, "")
+	attrs = append(attrs, described.Attrs()...)
 	logger.Info("injected fault", attrs...)
-	injected := events.Event{Kind: events.FaultInjected, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Request: string(event), Rule: fault.Rule, Fault: describe(described)}
+	injected := events.Event{Kind: events.FaultInjected, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Request: string(event), Rule: fault.Rule, Fault: described.Fault()}
 	record(injected)
 	ended := func(reason events.Reason) {
 		if reason == events.Canceled || reason == events.Released {
@@ -100,30 +99,6 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 	}
 }
 
-// describe returns the fault that attrs, from sftpproxy.FaultAttrs,
-// describe, as an event gives it.
-func describe(attrs []any) *events.Fault {
-	f := &events.Fault{}
-	for i := 0; i+1 < len(attrs); i += 2 {
-		key, value := attrs[i].(string), attrs[i+1]
-		switch key {
-		case "fault":
-			f.Type = value.(events.FaultType)
-		case "when":
-			f.When = value.(string)
-		default:
-			if f.Settings == nil {
-				f.Settings = make(map[string]any)
-			}
-			if v, ok := value.(fmt.Stringer); ok {
-				value = v.String()
-			}
-			f.Settings[key] = value
-		}
-	}
-	return f
-}
-
 // armTimers takes srv down at the moments of timers, the ListenerDowns of a
 // run, whatever the run's sessions are doing then, until stop is called. A
 // moment that has already come, such as the start of the run, takes srv
@@ -143,9 +118,9 @@ func armTimers(timers []sftpproxy.Timer, srv *sshfront.Server, logger *slog.Logg
 			if stopped || (t.Reserve != nil && !t.Reserve()) {
 				return
 			}
-			described := sftpproxy.FaultAttrs(down, "timer")
-			logger.Info("injected fault", described...)
-			record(events.Event{Kind: events.FaultInjected, Rule: t.Rule, Fault: describe(described)})
+			described := sftpproxy.Describe(down, "timer")
+			logger.Info("injected fault", described.Attrs()...)
+			record(events.Event{Kind: events.FaultInjected, Rule: t.Rule, Fault: described.Fault()})
 			srv.Down(down.Duration, down.CloseExisting)
 		}
 		if wait := time.Until(t.At); wait > 0 {

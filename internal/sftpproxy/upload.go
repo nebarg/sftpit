@@ -44,7 +44,7 @@ func (s *session) cut(req *request) bool {
 		when = After
 	}
 	req.action, req.cut, req.cutoff = withWhen(u.Result, when), true, u.Cutoff
-	s.injected(req, level, s.faultAttrs(req)...)
+	s.injected(req, level, s.injection(req))
 	return true
 }
 
@@ -109,11 +109,8 @@ func (s *session) corruptStored(req *request) bool {
 			return false
 		}
 	}
-	attrs := []any{"request", operation(w), "path", req.path, "fault", events.CorruptUploadFault, "corruption", st.Corruption, "at", st.Offset}
-	if st.Corruption != Truncate {
-		attrs = append(attrs, "length", st.Length)
-	}
-	s.injected(req, level, append(attrs, "offset", w.Offset)...)
+	fault := corrupted(events.CorruptUploadFault, st.Corruption, st.Offset, st.Length, w.Offset)
+	s.injected(req, level, injection{request: operation(w), path: req.path, fault: fault})
 	s.tracker.fault(req)
 
 	switch st.Corruption {

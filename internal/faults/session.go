@@ -86,8 +86,8 @@ func (s *Session) time(ru *rule, now time.Time) (sftpproxy.Timer, bool) {
 			ru.counts.Selected++
 		}
 		action, drawn := e.drawn(ru, m.key)
-		attrs := append([]any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", m.at.Sub(c.Authenticated)}, drawn...)
-		return sftpproxy.Timer{At: m.at, Action: action, Reserve: e.reserveMoment(ru, attrs, m), Rule: ru.ID}, true
+		f := firing{attrs: append([]any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", m.at.Sub(c.Authenticated)}, drawn...), user: c.User}
+		return sftpproxy.Timer{At: m.at, Action: action, Reserve: e.reserveMoment(ru, f, m), Rule: ru.ID}, true
 	}
 	if !ru.timedBySession() {
 		return sftpproxy.Timer{}, false
@@ -99,8 +99,8 @@ func (s *Session) time(ru *rule, now time.Time) (sftpproxy.Timer, bool) {
 		return sftpproxy.Timer{}, false
 	}
 	ru.counts.Selected++
-	attrs := []any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", after}
-	return sftpproxy.Timer{At: at, Action: ru.released(ru.Action), Reserve: e.reserveMoment(ru, attrs, nil), Rule: ru.ID}, true
+	f := firing{attrs: []any{"rule", ru.ID, "user", c.User, "anchor", t.Anchor, "at", after}, user: c.User}
+	return sftpproxy.Timer{At: at, Action: ru.released(ru.Action), Reserve: e.reserveMoment(ru, f, nil), Rule: ru.ID}, true
 }
 
 // timeAdded times the session for rules, which a change has just applied, as
@@ -199,38 +199,39 @@ func (s *Session) decide(op Operation, r sftpproxy.Request) sftpproxy.Fault {
 	}
 	chosen.counts.Selected++
 	action, drawn := e.action(chosen, key)
-	fired := []any{"rule", chosen.ID, "operation", op}
+	fired := firing{attrs: []any{"rule", chosen.ID, "operation", op}, user: s.client.User}
 	if !op.IsEvent() {
-		fired = append(fired, "path", r.Path)
+		fired.path = r.Path
+		fired.attrs = append(fired.attrs, "path", r.Path)
 	}
 	if s.client.User != "" {
-		fired = append(fired, "user", s.client.User)
+		fired.attrs = append(fired.attrs, "user", s.client.User)
 	}
-	fired = append(append(fired, "ordinal", ordinal), drawn...)
+	fired.attrs = append(append(fired.attrs, "ordinal", ordinal), drawn...)
 	switch a := action.(type) {
 	case sftpproxy.PartialUpload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
-		e.logger.Debug("rule selected", fired...)
+		e.logger.Debug("rule selected", fired.attrs...)
 		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.CorruptDownload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
-		e.logger.Debug("rule selected", fired...)
+		e.logger.Debug("rule selected", fired.attrs...)
 		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.PartialDownload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
-		e.logger.Debug("rule selected", fired...)
+		e.logger.Debug("rule selected", fired.attrs...)
 		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.CorruptUpload:
 		a.Reserve = e.reserveTransfer(chosen, fired)
-		e.logger.Debug("rule selected", fired...)
+		e.logger.Debug("rule selected", fired.attrs...)
 		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	case sftpproxy.Timed:
 		a.Reserve = e.reserveMoment(chosen, fired, nil)
-		e.logger.Debug("rule selected", fired...)
+		e.logger.Debug("rule selected", fired.attrs...)
 		return sftpproxy.Fault{Action: a, Rule: chosen.ID}
 	}
 	chosen.counts.Fired++
-	e.logger.Info("rule fired", fired...)
+	e.logger.Info("rule fired", fired.attrs...)
 	return sftpproxy.Fault{Action: action, Rule: chosen.ID}
 }
 

@@ -248,7 +248,7 @@ func TestEventsRecordHowEachWaitEnds(t *testing.T) {
 
 // faultName names the type of a, as events give it.
 func faultName(a sftpproxy.Action) string {
-	return string(sftpproxy.FaultAttrs(a, "")[1].(events.FaultType))
+	return string(sftpproxy.FaultType(a))
 }
 
 func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {

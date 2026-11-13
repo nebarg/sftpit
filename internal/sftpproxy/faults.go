@@ -248,6 +248,17 @@ func checkCorruption(fault string, c Corruption, offset, length uint64) error {
 	return nil
 }
 
+// corrupted describes the fault named fault, which corrupts the range at at
+// as c says, as it changes the read or write at offset.
+func corrupted(fault events.FaultType, c Corruption, at, length, offset uint64) Description {
+	d := Description{fault: fault, settings: []setting{{"corruption", c}, {"at", at}}}
+	if c != Truncate {
+		d.settings = append(d.settings, setting{"length", length})
+	}
+	d.settings = append(d.settings, setting{"offset", offset})
+	return d
+}
+
 func (c Corruption) String() string {
 	switch c {
 	case Truncate:
@@ -331,39 +342,107 @@ func (a CorruptUpload) when() When   { return Before }
 func (a Timed) when() When           { return Before }
 func (a WrongSize) when() When       { return Before }
 
-// FaultAttrs describes a for a log record: the fault's name, as a
-// configuration gives it, when it acts, unless when is "", and its settings.
-// It describes nothing else.
-func FaultAttrs(a Action, when string) []any {
-	var name events.FaultType
-	var settings []any
+// FaultType names a's type, as a configuration and events give it. A
+// PartialUpload or Timed has none of its own, so it returns "" for them.
+func FaultType(a Action) events.FaultType {
+	switch a.(type) {
+	case Delay:
+		return events.DelayFault
+	case Stall:
+		return events.StallFault
+	case Fail:
+		return events.FailFault
+	case Drop:
+		return events.CloseConnectionFault
+	case Freeze:
+		return events.FreezeConnectionFault
+	case EndSession:
+		return events.CloseSubsystemFault
+	case ListenerDown:
+		return events.ListenerDownFault
+	case Hide:
+		return events.HideFault
+	case WrongSize:
+		return events.WrongSizeFault
+	case PartialDownload:
+		return events.PartialDownloadFault
+	case CorruptDownload:
+		return events.CorruptDownloadFault
+	case CorruptUpload:
+		return events.CorruptUploadFault
+	}
+	return ""
+}
+
+// Description describes a fault as its log record and its event give it:
+// its type, when it acts, unless that is "", and its settings, in the order
+// a log record gives them.
+type Description struct {
+	fault    events.FaultType
+	when     string
+	settings []setting
+}
+
+// setting is one of a fault's settings.
+type setting struct {
+	key   string
+	value any
+}
+
+// Describe describes a, acting when.
+func Describe(a Action, when string) Description {
+	return Description{fault: FaultType(a), when: when, settings: settings(a)}
+}
+
+// settings returns a's settings in the order a log record gives them.
+func settings(a Action) []setting {
 	switch a := a.(type) {
 	case Delay:
-		name, settings = events.DelayFault, []any{"duration", a.Duration}
+		return []setting{{"duration", a.Duration}}
 	case Stall:
-		name, settings = events.StallFault, []any{"limit", a.Limit}
+		return []setting{{"limit", a.Limit}}
 	case Fail:
-		name, settings = events.FailFault, []any{"status", a.Status}
+		return []setting{{"status", a.Status}}
 	case Drop:
 		mode := "fin"
 		if a.Reset {
 			mode = "rst"
 		}
-		name, settings = events.CloseConnectionFault, []any{"mode", mode}
+		return []setting{{"mode", mode}}
 	case Freeze:
-		name, settings = events.FreezeConnectionFault, []any{"limit", a.Limit}
-	case EndSession:
-		name = events.CloseSubsystemFault
+		return []setting{{"limit", a.Limit}}
 	case ListenerDown:
-		name, settings = events.ListenerDownFault, []any{"duration", a.Duration, "close_existing", a.CloseExisting}
-	case Hide:
-		name = events.HideFault
-	default:
-		return nil
+		return []setting{{"duration", a.Duration}, {"close_existing", a.CloseExisting}}
 	}
-	attrs := []any{"fault", name}
-	if when != "" {
-		attrs = append(attrs, "when", when)
+	return nil
+}
+
+// Attrs returns d as the attributes of a log record: the fault's type, when
+// it acts and its settings.
+func (d Description) Attrs() []any {
+	attrs := []any{"fault", d.fault}
+	if d.when != "" {
+		attrs = append(attrs, "when", d.when)
 	}
-	return append(attrs, settings...)
+	for _, s := range d.settings {
+		attrs = append(attrs, s.key, s.value)
+	}
+	return attrs
+}
+
+// Fault returns d as an event gives it, with a duration or a named value,
+// such as a status, as text.
+func (d Description) Fault() *events.Fault {
+	f := &events.Fault{Type: d.fault, When: d.when}
+	for _, s := range d.settings {
+		if f.Settings == nil {
+			f.Settings = make(map[string]any, len(d.settings))
+		}
+		value := s.value
+		if v, ok := value.(fmt.Stringer); ok {
+			value = v.String()
+		}
+		f.Settings[s.key] = value
+	}
+	return f
 }

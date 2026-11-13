@@ -2,7 +2,6 @@ package sftpproxy
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -10,11 +9,33 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-// injected records that a fault acts on req. It logs the fault, which attrs
-// describe as faultAttrs does, at level, and at info level, where a fault
-// takes effect rather than carries on, records it as an event naming req's
-// rule.
-func (s *session) injected(req *request, level slog.Level, attrs ...any) {
+// injection is a fault acting on a request, as the session logs and
+// records it: the request, its paths and the fault.
+type injection struct {
+	request, path, target string
+	fault                 Description
+}
+
+// attrs returns in as the attributes of a log record. A fault for a moment
+// has no request, and a path only if it is a transfer's.
+func (in injection) attrs() []any {
+	var attrs []any
+	if in.request != "" {
+		attrs = append(attrs, "request", in.request)
+	}
+	if in.request != "" || in.path != "" {
+		attrs = append(attrs, "path", in.path)
+	}
+	if in.target != "" {
+		attrs = append(attrs, "target", in.target)
+	}
+	return append(attrs, in.fault.Attrs()...)
+}
+
+// injected records that the fault in describes acts on req. It logs the
+// fault at level, and at info level, where a fault takes effect rather than
+// carries on, records it as an event naming req's rule.
+func (s *session) injected(req *request, level slog.Level, in injection) {
 	req.injected = true
 	// Taken before the fault is announced, so that a release that follows
 	// the announcement ends it.
@@ -24,33 +45,13 @@ func (s *session) injected(req *request, level slog.Level, attrs ...any) {
 			req.released = s.released()
 		}
 	}
-	s.logger.Log(context.Background(), level, "injected fault", attrs...)
+	s.logger.Log(context.Background(), level, "injected fault", in.attrs()...)
 	if level < slog.LevelInfo || s.record == nil {
 		return
 	}
-	e := events.Event{Kind: events.FaultInjected, Rule: req.rule, Fault: &events.Fault{}}
+	e := events.Event{Kind: events.FaultInjected, Request: in.request, Path: in.path, Target: in.target, Rule: req.rule, Fault: in.fault.Fault()}
 	if req.packet != nil {
 		e.RequestID = new(req.clientID)
-	}
-	for i := 0; i+1 < len(attrs); i += 2 {
-		key, value := attrs[i].(string), attrs[i+1]
-		switch key {
-		case "request":
-			e.Request = value.(string)
-		case "path":
-			e.Path = value.(string)
-		case "target":
-			e.Target = value.(string)
-		case "fault":
-			e.Fault.Type = value.(events.FaultType)
-		case "when":
-			e.Fault.When = value.(string)
-		default:
-			if e.Fault.Settings == nil {
-				e.Fault.Settings = make(map[string]any)
-			}
-			e.Fault.Settings[key] = setting(value)
-		}
 	}
 	if waits(req.action) {
 		s.mu.Lock()
@@ -58,15 +59,6 @@ func (s *session) injected(req *request, level slog.Level, attrs ...any) {
 		s.mu.Unlock()
 	}
 	s.record(e)
-}
-
-// setting returns a fault's setting as an event gives it: a duration or a
-// named value, such as a status, as text.
-func setting(v any) any {
-	if v, ok := v.(fmt.Stringer); ok {
-		return v.String()
-	}
-	return v
 }
 
 // waits reports whether a holds a request, a reply or the connection, until
@@ -89,7 +81,7 @@ func (s *session) ended(req *request, reason events.Reason) {
 	if !waiting || s.record == nil {
 		return
 	}
-	e := events.Event{Kind: events.FaultEnded, Rule: req.rule, Path: req.path, Reason: reason, Fault: &events.Fault{Type: faultType(req.action)}}
+	e := events.Event{Kind: events.FaultEnded, Rule: req.rule, Path: req.path, Reason: reason, Fault: &events.Fault{Type: FaultType(req.action)}}
 	if req.packet != nil {
 		e.Request, e.RequestID = operation(req.packet), new(req.clientID)
 	}
@@ -108,14 +100,6 @@ func (s *session) endWaits() {
 	for _, req := range reqs {
 		s.ended(req, events.SessionEnded)
 	}
-}
-
-// faultType names a's type, as FaultAttrs does.
-func faultType(a Action) events.FaultType {
-	if attrs := FaultAttrs(a, ""); len(attrs) > 1 {
-		return attrs[1].(events.FaultType)
-	}
-	return ""
 }
 
 // recordOperation records req as an event as its reply is written.

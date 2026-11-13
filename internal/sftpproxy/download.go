@@ -79,11 +79,8 @@ func (s *session) corrupt(req *request) bool {
 	case FlipBytes:
 		req.flip = true
 	}
-	attrs := []any{"request", operation(r), "path", req.path, "fault", events.CorruptDownloadFault, "corruption", d.Corruption, "at", d.Offset}
-	if d.Corruption != Truncate {
-		attrs = append(attrs, "length", d.Length)
-	}
-	s.injected(req, level, append(attrs, "offset", offset)...)
+	fault := corrupted(events.CorruptDownloadFault, d.Corruption, d.Offset, d.Length, offset)
+	s.injected(req, level, injection{request: operation(r), path: req.path, fault: fault})
 	return true
 }
 
@@ -184,7 +181,8 @@ func (s *session) cutRead(req *request) bool {
 		if !p.shortened {
 			p.shortened, level = true, slog.LevelInfo
 		}
-		s.injected(req, level, "request", operation(r), "path", req.path, "fault", events.PartialDownloadFault, "cutoff", p.Cutoff, "offset", r.Offset, "length", r.Length)
+		fault := Description{fault: events.PartialDownloadFault, settings: []setting{{"cutoff", p.Cutoff}, {"offset", r.Offset}, {"length", r.Length}}}
+		s.injected(req, level, injection{request: operation(r), path: req.path, fault: fault})
 		r.Length = uint32(p.Cutoff - r.Offset)
 		return true
 	}
@@ -193,6 +191,6 @@ func (s *session) cutRead(req *request) bool {
 		p.ended, level = true, slog.LevelInfo
 	}
 	req.action, req.cut, req.cutoff = withWhen(p.Result, Before), true, p.Cutoff
-	s.injected(req, level, s.faultAttrs(req)...)
+	s.injected(req, level, s.injection(req))
 	return true
 }

@@ -28,7 +28,8 @@ func (s *session) resize(req *request, name string, w WrongSize, attrs *sftpwire
 	if longname != nil {
 		*longname = withSize(*longname, actual, attrs.Size)
 	}
-	s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", events.WrongSizeFault, "actual", actual, "reported", attrs.Size)
+	fault := Description{fault: events.WrongSizeFault, settings: []setting{{"actual", actual}, {"reported", attrs.Size}}}
+	s.injected(req, slog.LevelInfo, injection{request: operation(req.packet), path: name, fault: fault})
 }
 
 // withSize returns longname with its size field changed from actual to

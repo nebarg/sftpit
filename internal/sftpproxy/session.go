@@ -692,16 +692,16 @@ func (s *session) hold(req *request) error {
 			return nil
 		}
 		if release != nil || released != nil {
-			s.logger.Info("fault ended at its limit", s.faultAttrs(req)...)
+			s.logger.Info("fault ended at its limit", s.injection(req).attrs()...)
 		}
 		s.ended(req, events.AtLimit)
 		return nil
 	case <-release:
-		s.logger.Info("fault released", s.faultAttrs(req)...)
+		s.logger.Info("fault released", s.injection(req).attrs()...)
 		s.ended(req, events.Canceled)
 		return nil
 	case <-released:
-		s.logger.Info("fault released", s.faultAttrs(req)...)
+		s.logger.Info("fault released", s.injection(req).attrs()...)
 		s.ended(req, events.Released)
 		return nil
 	case <-s.done:
@@ -905,35 +905,28 @@ func (s *session) logFault(req *request) {
 		// cut logged it when it decided the request.
 		return
 	}
-	s.injected(req, slog.LevelInfo, s.faultAttrs(req)...)
+	s.injected(req, slog.LevelInfo, s.injection(req))
 }
 
-// faultAttrs describes req's fault. A fault for a moment has no request, and
-// a path only if it is a transfer's.
-func (s *session) faultAttrs(req *request) []any {
-	var attrs []any
+// injection describes req's fault.
+func (s *session) injection(req *request) injection {
+	in := injection{path: req.path, target: req.target}
 	when := "timer"
 	if req.packet != nil {
-		attrs = append(attrs, "request", operation(req.packet))
+		in.request = operation(req.packet)
 		when = req.action.when().String()
 	}
-	if req.packet != nil || req.path != "" {
-		attrs = append(attrs, "path", req.path)
-	}
-	if req.target != "" {
-		attrs = append(attrs, "target", req.target)
-	}
-	attrs = append(attrs, FaultAttrs(req.action, when)...)
+	in.fault = Describe(req.action, when)
 	if req.cut {
-		attrs = append(attrs, "cutoff", req.cutoff)
+		in.fault.settings = append(in.fault.settings, setting{"cutoff", req.cutoff})
 		switch p := req.packet.(type) {
 		case *sftpwire.Write:
-			attrs = append(attrs, "offset", p.Offset)
+			in.fault.settings = append(in.fault.settings, setting{"offset", p.Offset})
 		case *sftpwire.Read:
-			attrs = append(attrs, "offset", p.Offset)
+			in.fault.settings = append(in.fault.settings, setting{"offset", p.Offset})
 		}
 	}
-	return attrs
+	return in
 }
 
 func (s *session) logRequest(req *request, reply sftpwire.Packet) {

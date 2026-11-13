@@ -673,3 +673,80 @@ func TestUnusableFaultsEndTheSession(t *testing.T) {
 		})
 	}
 }
+
+func TestDescribeGivesTheSameFaultToLogsAndEvents(t *testing.T) {
+	tests := []struct {
+		action sftpproxy.Action
+		when   string
+		attrs  []any
+		fault  events.Fault
+	}{
+		{
+			action: sftpproxy.Delay{Duration: time.Second},
+			when:   "before",
+			attrs:  []any{"fault", events.DelayFault, "when", "before", "duration", time.Second},
+			fault:  events.Fault{Type: events.DelayFault, When: "before", Settings: map[string]any{"duration": "1s"}},
+		},
+		{
+			action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied},
+			when:   "after",
+			attrs:  []any{"fault", events.FailFault, "when", "after", "status", sftpwire.StatusPermissionDenied},
+			fault:  events.Fault{Type: events.FailFault, When: "after", Settings: map[string]any{"status": "SSH_FX_PERMISSION_DENIED"}},
+		},
+		{
+			action: sftpproxy.Drop{Reset: true},
+			attrs:  []any{"fault", events.CloseConnectionFault, "mode", "rst"},
+			fault:  events.Fault{Type: events.CloseConnectionFault, Settings: map[string]any{"mode": "rst"}},
+		},
+		{
+			action: sftpproxy.ListenerDown{Duration: 5 * time.Second, CloseExisting: true},
+			when:   "timer",
+			attrs:  []any{"fault", events.ListenerDownFault, "when", "timer", "duration", 5 * time.Second, "close_existing", true},
+			fault:  events.Fault{Type: events.ListenerDownFault, When: "timer", Settings: map[string]any{"duration": "5s", "close_existing": true}},
+		},
+		{
+			action: sftpproxy.EndSession{},
+			when:   "timer",
+			attrs:  []any{"fault", events.CloseSubsystemFault, "when", "timer"},
+			fault:  events.Fault{Type: events.CloseSubsystemFault, When: "timer"},
+		},
+		{
+			action: sftpproxy.Hide{},
+			attrs:  []any{"fault", events.HideFault},
+			fault:  events.Fault{Type: events.HideFault},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.fault.Type), func(t *testing.T) {
+			d := sftpproxy.Describe(tt.action, tt.when)
+			if got := d.Attrs(); !reflect.DeepEqual(got, tt.attrs) {
+				t.Errorf("Attrs() = %v, want %v", got, tt.attrs)
+			}
+			if got := d.Fault(); !reflect.DeepEqual(*got, tt.fault) {
+				t.Errorf("Fault() = %+v, want %+v", *got, tt.fault)
+			}
+			if got := sftpproxy.FaultType(tt.action); got != tt.fault.Type {
+				t.Errorf("FaultType() = %q, want %q", got, tt.fault.Type)
+			}
+		})
+	}
+}
+
+func TestFaultTypeNamesTheFaultsOfTransfersAndSizes(t *testing.T) {
+	tests := []struct {
+		action sftpproxy.Action
+		want   events.FaultType
+	}{
+		{sftpproxy.WrongSize{}, events.WrongSizeFault},
+		{sftpproxy.PartialDownload{Result: sftpproxy.Fail{}}, events.PartialDownloadFault},
+		{sftpproxy.CorruptDownload{}, events.CorruptDownloadFault},
+		{sftpproxy.CorruptUpload{}, events.CorruptUploadFault},
+		{sftpproxy.PartialUpload{Result: sftpproxy.Fail{}}, ""},
+		{sftpproxy.Timed{Action: sftpproxy.Drop{}}, ""},
+	}
+	for _, tt := range tests {
+		if got := sftpproxy.FaultType(tt.action); got != tt.want {
+			t.Errorf("FaultType(%T) = %q, want %q", tt.action, got, tt.want)
+		}
+	}
+}

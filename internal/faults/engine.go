@@ -191,8 +191,8 @@ func (e *Engine) runTimers(rules []*rule) []sftpproxy.Timer {
 		ru.counts.Selected++
 		after := e.runMoment(ru)
 		action, drawn := e.drawn(ru, Key{Rule: ru.ID, Activation: ru.activation, Ordinal: 1})
-		attrs := append([]any{"rule", ru.ID, "anchor", Run, "at", after}, drawn...)
-		timers = append(timers, sftpproxy.Timer{At: ru.start.Add(after), Action: action, Reserve: e.reserveMoment(ru, attrs, nil), Rule: ru.ID})
+		f := firing{attrs: append([]any{"rule", ru.ID, "anchor", Run, "at", after}, drawn...)}
+		timers = append(timers, sftpproxy.Timer{At: ru.start.Add(after), Action: action, Reserve: e.reserveMoment(ru, f, nil), Rule: ru.ID})
 	}
 	return timers
 }
@@ -476,14 +476,22 @@ func drawFrom[T ~int64 | ~uint64](e *Engine, k Key, choice string, r Range[T]) T
 	return v
 }
 
+// firing is a rule firing as the engine logs and records it: the attributes
+// of its log records, and the user and path, if any, that an event of its
+// suppression names.
+type firing struct {
+	attrs      []any
+	user, path string
+}
+
 // reserveTransfer returns the Reserve of a transfer that r selected, which
 // lets the fault take effect if r has not used up its MaxTriggers by then,
 // even once a change has removed r.
-func (e *Engine) reserveTransfer(r *rule, attrs []any) func() bool {
+func (e *Engine) reserveTransfer(r *rule, f firing) func() bool {
 	return func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return e.fire(r, attrs)
+		return e.fire(r, f)
 	}
 }
 
@@ -492,12 +500,12 @@ func (e *Engine) reserveTransfer(r *rule, attrs []any) func() bool {
 // used up its MaxTriggers by then. Given once, a moment of a connection, the
 // fault takes effect only once, whichever of the connection's sessions it
 // is timed for.
-func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) func() bool {
+func (e *Engine) reserveMoment(r *rule, f firing, once *connectionMoment) func() bool {
 	return func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		if r.isRemoved() {
-			e.suppressed(r, attrs, events.RuleRemoved)
+			e.suppressed(r, f, events.RuleRemoved)
 			return false
 		}
 		if once != nil {
@@ -506,38 +514,28 @@ func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) fun
 			}
 			once.fired = true
 		}
-		return e.fire(r, attrs)
+		return e.fire(r, f)
 	}
 }
 
-// suppressed logs and records that r did not inject the fault that attrs
-// describe when its moment came, for reason.
-func (e *Engine) suppressed(r *rule, attrs []any, reason events.Reason) {
-	e.logger.Info("rule suppressed", append(attrs, "reason", reason)...)
-	if e.record == nil {
-		return
+// suppressed logs and records that r did not inject the fault of f when its
+// moment came, for reason.
+func (e *Engine) suppressed(r *rule, f firing, reason events.Reason) {
+	e.logger.Info("rule suppressed", append(f.attrs, "reason", reason)...)
+	if e.record != nil {
+		e.record(events.Event{Kind: events.Suppressed, Rule: r.ID, User: f.user, Path: f.path, Reason: reason})
 	}
-	ev := events.Event{Kind: events.Suppressed, Rule: r.ID, Reason: reason}
-	for i := 0; i+1 < len(attrs); i += 2 {
-		switch attrs[i] {
-		case "user":
-			ev.User, _ = attrs[i+1].(string)
-		case "path":
-			ev.Path, _ = attrs[i+1].(string)
-		}
-	}
-	e.record(ev)
 }
 
-// fire counts a firing of r and reports true, unless r has used up its
+// fire counts f, a firing of r, and reports true, unless r has used up its
 // MaxTriggers. e.mu must be held.
-func (e *Engine) fire(r *rule, attrs []any) bool {
+func (e *Engine) fire(r *rule, f firing) bool {
 	if r.spent() {
-		e.suppressed(r, attrs, events.MaxTriggers)
+		e.suppressed(r, f, events.MaxTriggers)
 		return false
 	}
 	r.counts.Fired++
-	e.logger.Info("rule fired", attrs...)
+	e.logger.Info("rule fired", f.attrs...)
 	return true
 }
 
