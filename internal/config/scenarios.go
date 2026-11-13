@@ -60,7 +60,7 @@ var (
 
 	// ErrFixedScenario reports a change to a built-in or configured
 	// scenario, which only saved scenarios allow.
-	ErrFixedScenario = errors.New("fixed scenario")
+	ErrFixedScenario = errors.New("can't be changed or deleted")
 )
 
 // The scenarios directory, relative to the configuration file's directory,
@@ -78,14 +78,14 @@ const scenarioFileExt = ".yaml"
 // builtIn are the scenarios that sftpit defines, by name.
 var builtIn = map[string]Scenario{
 	"unreliable-light": {
-		Description: "Unreliable server, light: 5% of commands wait 2 seconds, and 1% fail.",
+		Description: "5% of commands wait 2 seconds, and 1% fail.",
 		Faults: []Fault{
 			{Name: "Slow commands", Steps: commandSteps, Do: "wait", Seconds: new(2.0), Percent: new(5.0)},
 			{Name: "Commands fail", Steps: commandSteps, Do: "refuse", Error: "failure", Percent: new(1.0)},
 		},
 	},
 	"unreliable-moderate": {
-		Description: "Unreliable server, moderate: 10% of commands wait 2 seconds, 3% fail, and 2% of uploads and downloads stop partway.",
+		Description: "10% of commands wait 2 seconds, 3% fail, and 2% of uploads and downloads stop partway.",
 		Faults: []Fault{
 			{Name: "Slow commands", Steps: commandSteps, Do: "wait", Seconds: new(2.0), Percent: new(10.0)},
 			{Name: "Commands fail", Steps: commandSteps, Do: "refuse", Error: "failure", Percent: new(3.0)},
@@ -94,7 +94,7 @@ var builtIn = map[string]Scenario{
 		},
 	},
 	"unreliable-heavy": {
-		Description: "Unreliable server, heavy: 20% of commands wait 2 seconds, 8% fail, 5% of uploads and downloads stop partway, and 0.5% of commands stop responding for 15 seconds.",
+		Description: "20% of commands wait 2 seconds, 8% fail, 5% of uploads and downloads stop partway, and 0.5% of commands stop responding for 15 seconds.",
 		Faults: []Fault{
 			{Name: "Slow commands", Steps: commandSteps, Do: "wait", Seconds: new(2.0), Percent: new(20.0)},
 			{Name: "Commands fail", Steps: commandSteps, Do: "refuse", Error: "failure", Percent: new(8.0)},
@@ -189,7 +189,7 @@ func (s *Scenarios) Save(name string, sc Scenario) (NamedScenario, error) {
 		return NamedScenario{}, err
 	}
 	if err := sc.check(s.users); err != nil {
-		return NamedScenario{}, fmt.Errorf("config: scenario %s: %w: %w", name, ErrInvalidScenario, err)
+		return NamedScenario{}, fmt.Errorf("%w %s: %w", ErrInvalidScenario, name, err)
 	}
 	var b bytes.Buffer
 	if err := encodeYAML(&b, scenarioFile{SchemaVersion: schemaVersion, Scenario: sc}); err != nil {
@@ -239,13 +239,13 @@ func (s *Scenarios) checkFiles() error {
 // checkSavedName reports a name that a saved scenario cannot have.
 func (s *Scenarios) checkSavedName(name string) error {
 	if err := checkScenarioName(name); err != nil {
-		return fmt.Errorf("config: %w: %w", ErrInvalidScenario, err)
+		return fmt.Errorf("%w: %w", ErrInvalidScenario, err)
 	}
 	if _, ok := builtIn[name]; ok {
-		return fmt.Errorf("config: scenario %s: %w: it is built in", name, ErrFixedScenario)
+		return fmt.Errorf("%s is built in, so it %w", name, ErrFixedScenario)
 	}
 	if _, ok := s.configured[name]; ok {
-		return fmt.Errorf("config: scenario %s: %w: it is defined in the configuration file", name, ErrFixedScenario)
+		return fmt.Errorf("%s is defined in the configuration file, so it %w", name, ErrFixedScenario)
 	}
 	return nil
 }
@@ -318,7 +318,7 @@ func (s *Scenarios) unknown(name string) error {
 		names = append(names, files...)
 	}
 	slices.Sort(names)
-	return fmt.Errorf("config: %w %q; the scenarios are %s", ErrUnknownScenario, name, strings.Join(slices.Compact(names), ", "))
+	return fmt.Errorf("%w %q; the scenarios are %s", ErrUnknownScenario, name, strings.Join(slices.Compact(names), ", "))
 }
 
 // check reports a scenario that sftpit cannot turn on: one without faults,

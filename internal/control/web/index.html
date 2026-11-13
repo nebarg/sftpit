@@ -36,7 +36,23 @@
         <p class="lead">Faults apply straight away to every connected client. With every fault off, sftpit is a normal SFTP server.</p>
         <div id="fault-list" class="fault-list"></div>
         <p id="no-faults" class="empty" hidden>No faults. sftpit is behaving as a normal SFTP server.</p>
+        <details id="save-scenario" class="save-scenario" hidden>
+          <summary>Save the faults that are on as a scenario</summary>
+          <form id="save-form" class="save-form">
+            <label class="field">Name
+              <input name="name" placeholder="partner-trouble" autocomplete="off" spellcheck="false" class="mono" />
+            </label>
+            <label class="field"><span>Description <span class="muted">(optional)</span></span>
+              <input name="description" autocomplete="off" />
+            </label>
+            <div class="submit">
+              <button type="submit" class="secondary">Save scenario</button>
+              <span id="save-note" class="note" role="status"></span>
+            </div>
+          </form>
+        </details>
       </section>
+
 
         <form id="add-form" class="card form" aria-labelledby="add-heading">
           <h2 id="add-heading" class="card-title">Add a fault</h2>
@@ -73,6 +89,12 @@
             <span id="add-note" class="note" role="status"></span>
           </div>
         </form>
+
+        <section class="card" aria-labelledby="scenarios-heading">
+          <h2 id="scenarios-heading" class="card-title">Scenarios</h2>
+          <p class="lead">A scenario turns a group of faults on or off together. Starting again turns every scenario off.</p>
+          <div id="scenario-list" class="fault-list"></div>
+        </section>
       </div>
 
       <section class="card activity" aria-labelledby="activity-heading">

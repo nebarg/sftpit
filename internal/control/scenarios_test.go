@@ -112,13 +112,13 @@ func TestAScenarioIsSavedAndDeleted(t *testing.T) {
 		code               int
 		want               string
 	}{
-		{"PUT", "/api/scenarios/unreliable-light", `{"faults": [{"preset": "deletes_fail"}]}`, http.StatusConflict, "it is built in"},
-		{"PUT", "/api/scenarios/own", `{"faults": [{"preset": "deletes_fail"}]}`, http.StatusConflict, "defined in the configuration file"},
+		{"PUT", "/api/scenarios/unreliable-light", `{"faults": [{"preset": "deletes_fail"}]}`, http.StatusConflict, "unreliable-light is built in, so it can't be changed or deleted"},
+		{"PUT", "/api/scenarios/own", `{"faults": [{"preset": "deletes_fail"}]}`, http.StatusConflict, "own is defined in the configuration file, so it can't be changed or deleted"},
 		{"PUT", "/api/scenarios/Bad_Name", `{"faults": [{"preset": "deletes_fail"}]}`, http.StatusBadRequest, "may hold only"},
 		{"PUT", "/api/scenarios/empty", `{"faults": []}`, http.StatusBadRequest, "a scenario needs at least one fault"},
 		{"PUT", "/api/scenarios/bad", `{"faults": [{"steps": ["upload"], "do": "refuse"}]}`, http.StatusBadRequest, `faults[0]: there is no step "upload"`},
 		{"PUT", "/api/scenarios/bad", `{"faults": [], "chaos": {}}`, http.StatusBadRequest, "unknown field"},
-		{"DELETE", "/api/scenarios/unreliable-light", "", http.StatusConflict, "it is built in"},
+		{"DELETE", "/api/scenarios/unreliable-light", "", http.StatusConflict, "unreliable-light is built in, so it can't be changed or deleted"},
 		{"DELETE", "/api/scenarios/missing", "", http.StatusNotFound, `unknown scenario "missing"`},
 	}
 	for _, tt := range refused {

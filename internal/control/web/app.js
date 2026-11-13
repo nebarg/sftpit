@@ -1,6 +1,7 @@
 // The dashboard: the faults of the current run, which can be switched on and
-// off, what clients did, the server's files, and how to do the same from a
-// test. It follows the current run, so after a reset it shows the next.
+// off, the scenarios, which switch groups of faults and can be saved, what
+// clients did, the server's files, and how to do the same from a test. It
+// follows the current run, so after a reset it shows the next.
 
 import { describeLine, describeRequest, isProblem, isRoutine } from "./activity.js";
 import { APIError, get, send } from "./api.js";
@@ -9,6 +10,7 @@ import { el, show } from "./dom.js";
 import { describeFault, faultBody, presetSetting, summarise } from "./faults.js";
 import { formatBytes, formatClock } from "./format.js";
 import { keepNumbers } from "./number.js";
+import { cleanScenarioName, describeScenario, scenarioBody } from "./scenarios.js";
 import { treeRows } from "./tree.js";
 
 // pollInterval is how often the page asks what has changed.
@@ -21,7 +23,10 @@ const state = {
   catalogue: null,
   view: "faults",
   run: null,
+  faults: [],
   faultsKey: "",
+  scenarios: [],
+  scenariosKey: "",
   lastEvent: null,
   lines: [],
   filter: "all",
@@ -89,6 +94,7 @@ async function poll() {
     }
     await loadFaults();
     if (state.view === "faults") {
+      await loadScenarios();
       await loadActivity();
     }
     state.polls++;
@@ -150,7 +156,9 @@ async function loadFaults() {
     return;
   }
   state.faultsKey = key;
+  state.faults = faults;
   $("no-faults").hidden = faults.length > 0;
+  $("save-scenario").hidden = !faults.some((f) => f.on);
   show($("fault-list"), faults.map(faultCard));
 }
 
@@ -173,6 +181,7 @@ function faultCard(f) {
       "div",
       { class: "fault-bottom" },
       el("span", { class: d.active ? "active" : "" }, d.status),
+      f.scenario && el("span", { class: "from" }, `From ${f.scenario}`),
       el("button", { type: "button", class: "link", onclick: () => change("DELETE", f.id) }, "Remove"),
     ),
   );
@@ -185,6 +194,100 @@ async function change(method, id, body) {
   } catch (err) {
     showError(err);
   }
+}
+
+// --- Scenarios ---
+
+async function loadScenarios() {
+  const { scenarios } = await get("/api/scenarios");
+  const key = JSON.stringify(scenarios);
+  if (key === state.scenariosKey) {
+    return;
+  }
+  state.scenariosKey = key;
+  state.scenarios = scenarios;
+  show($("scenario-list"), scenarios.map(scenarioCard));
+}
+
+function scenarioCard(s) {
+  const d = describeScenario(s);
+  const path = `/api/scenarios/${encodeURIComponent(s.name)}`;
+  return el(
+    "article",
+    { class: s.on ? "fault-card on" : "fault-card" },
+    el(
+      "div",
+      { class: "fault-top" },
+      el("div", {}, el("h2", {}, d.name), d.description && el("p", {}, d.description)),
+      !d.error &&
+        el(
+          "button",
+          { type: "button", class: "switch", "aria-pressed": String(s.on), "aria-label": `${s.on ? "Turn off" : "Turn on"} ${d.name}`, onclick: () => changeScenario("PATCH", path, { on: !s.on }) },
+          el("span"),
+        ),
+    ),
+    d.error && el("p", { class: "note error" }, d.error),
+    el(
+      "div",
+      { class: "fault-bottom" },
+      el("span", {}, d.about),
+      d.deletable && el("button", { type: "button", class: "link", onclick: () => deleteScenario(d.name, path) }, "Delete"),
+    ),
+  );
+}
+
+async function changeScenario(method, path, body) {
+  try {
+    await send(method, path, body);
+    await loadFaults();
+    await loadScenarios();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+function deleteScenario(name, path) {
+  if (confirm(`Delete the saved scenario ${name}? Its faults are removed too.`)) {
+    changeScenario("DELETE", path);
+  }
+}
+
+async function saveScenario(event) {
+  event.preventDefault();
+  const form = $("save-form").elements;
+  const name = form.name.value;
+  const note = $("save-note");
+  note.className = "note";
+  show(note);
+  try {
+    if (name === "") {
+      throw new Error("Give the scenario a name.");
+    }
+    const body = scenarioBody(state.faults, form.description.value);
+    if (state.scenarios.some((s) => s.name === name && s.source === "file") && !confirm(`Replace the saved scenario ${name}?`)) {
+      return;
+    }
+    await send("PUT", `/api/scenarios/${encodeURIComponent(name)}`, body);
+    show(note, `Saved as ${name}.`);
+    form.name.value = "";
+    form.description.value = "";
+    await loadScenarios();
+  } catch (err) {
+    note.className = "note error";
+    show(note, err.message);
+  }
+}
+
+// keepScenarioName cleans the scenario name field as it is typed in or
+// pasted into.
+function keepScenarioName(field) {
+  field.addEventListener("input", () => {
+    const { value, caret } = cleanScenarioName(field.value, field.selectionStart ?? field.value.length);
+    if (value !== field.value) {
+      field.value = value;
+      field.setSelectionRange(caret, caret);
+    }
+  });
 }
 
 // --- Adding a preset ---
@@ -577,6 +680,7 @@ async function startAgain() {
   try {
     await send("POST", "/api/reset");
     state.faultsKey = "";
+    state.scenariosKey = "";
     await poll();
     await loadFiles();
   } catch (err) {
@@ -601,6 +705,8 @@ async function start() {
   setUpOptions($("add-form"));
   setUpOptions($("custom-form"));
   $("custom-form").addEventListener("submit", addCustom);
+  $("save-form").addEventListener("submit", saveScenario);
+  keepScenarioName($("save-form").elements.name);
   $("custom-form").addEventListener("input", updateSummary);
   $("filter-all").addEventListener("click", () => setFilter("all"));
   $("filter-problems").addEventListener("click", () => setFilter("problems"));

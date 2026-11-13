@@ -254,8 +254,8 @@ func TestSaveRefusesWhatItCannotTurnOn(t *testing.T) {
 	}{
 		{"Upper", valid, ErrInvalidScenario, `scenario name "Upper" may hold only`},
 		{"../escape", valid, ErrInvalidScenario, "may hold only"},
-		{"unreliable-light", valid, ErrFixedScenario, "it is built in"},
-		{"configured", valid, ErrFixedScenario, "it is defined in the configuration file"},
+		{"unreliable-light", valid, ErrFixedScenario, "unreliable-light is built in, so it can't be changed or deleted"},
+		{"configured", valid, ErrFixedScenario, "configured is defined in the configuration file, so it can't be changed or deleted"},
 		{"empty", Scenario{}, ErrInvalidScenario, "a scenario needs at least one fault"},
 		{"stranger", Scenario{Faults: []Fault{{Preset: "deletes_fail", User: "nobody"}}}, ErrInvalidScenario, `faults[0]: match: user "nobody"`},
 	}
