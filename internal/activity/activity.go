@@ -75,9 +75,9 @@ type Line struct {
 
 // Fault names the fault that caused something.
 type Fault struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type,omitempty"`
+	ID   string           `json:"id"`
+	Name string           `json:"name"`
+	Type events.FaultType `json:"type,omitempty"`
 }
 
 // Repeat points at an earlier line.
@@ -216,7 +216,7 @@ func (b *builder) fault(e events.Event) {
 		b.pending[requestKey{e.Connection, *e.RequestID}] = e
 	case e.Connection == 0:
 		kind := "fault"
-		if e.Fault != nil && e.Fault.Type == "listener_down" {
+		if e.Fault != nil && e.Fault.Type == events.ListenerDownFault {
 			kind = "outage"
 		}
 		l := b.newLine(e, kind)
@@ -398,7 +398,7 @@ func (b *builder) transfer(e events.Event) {
 	if e.Rule != "" && l.Fault == nil {
 		l.Outcome, l.Fault = ByFault, b.faultOf(e)
 	}
-	if t.Closed == "session_ended" && l.Outcome == OK {
+	if t.Closed == events.ClosedBySession && l.Outcome == OK {
 		l.Outcome, l.Reason = Failed, ConnectionClosed
 	}
 	if l.Kind == "download" {

@@ -19,7 +19,7 @@ type Recorder struct {
 	head int
 	next uint64
 	// waiting counts the faults whose waits are in progress, by type.
-	waiting map[string]int
+	waiting map[FaultType]int
 }
 
 // NewRecorder returns a recorder for a run that started at start, which
@@ -29,7 +29,7 @@ func NewRecorder(start time.Time, limit int) *Recorder {
 		start:   start,
 		limit:   limit,
 		next:    1,
-		waiting: make(map[string]int),
+		waiting: make(map[FaultType]int),
 	}
 }
 
@@ -53,17 +53,11 @@ func (r *Recorder) Record(e Event) {
 // count keeps the counts of waits up to date with e. r.mu must be held.
 func (r *Recorder) count(e Event) {
 	switch {
-	case e.Kind == FaultInjected && waits(e.Fault.Type):
+	case e.Kind == FaultInjected && e.Fault.Type.Waits():
 		r.waiting[e.Fault.Type]++
 	case e.Kind == FaultEnded:
 		r.waiting[e.Fault.Type]--
 	}
-}
-
-// waits reports whether a fault of type typ waits, and ends with a
-// FaultEnded event.
-func waits(typ string) bool {
-	return typ == "delay" || typ == "stall" || typ == "freeze_connection"
 }
 
 // Page is the events a Recorder keeps.
@@ -89,9 +83,9 @@ func (r *Recorder) Events() Page {
 	return p
 }
 
-// Waiting returns how many faults of type typ, such as stall or
-// freeze_connection, are waiting now.
-func (r *Recorder) Waiting(typ string) int {
+// Waiting returns how many faults of type typ, such as StallFault, are
+// waiting now.
+func (r *Recorder) Waiting(typ FaultType) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.waiting[typ]

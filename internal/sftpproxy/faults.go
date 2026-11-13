@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -334,29 +335,29 @@ func (a WrongSize) when() When       { return Before }
 // configuration gives it, when it acts, unless when is "", and its settings.
 // It describes nothing else.
 func FaultAttrs(a Action, when string) []any {
-	var name string
+	var name events.FaultType
 	var settings []any
 	switch a := a.(type) {
 	case Delay:
-		name, settings = "delay", []any{"duration", a.Duration}
+		name, settings = events.DelayFault, []any{"duration", a.Duration}
 	case Stall:
-		name, settings = "stall", []any{"limit", a.Limit}
+		name, settings = events.StallFault, []any{"limit", a.Limit}
 	case Fail:
-		name, settings = "fail", []any{"status", a.Status}
+		name, settings = events.FailFault, []any{"status", a.Status}
 	case Drop:
 		mode := "fin"
 		if a.Reset {
 			mode = "rst"
 		}
-		name, settings = "close_connection", []any{"mode", mode}
+		name, settings = events.CloseConnectionFault, []any{"mode", mode}
 	case Freeze:
-		name, settings = "freeze_connection", []any{"limit", a.Limit}
+		name, settings = events.FreezeConnectionFault, []any{"limit", a.Limit}
 	case EndSession:
-		name = "close_subsystem"
+		name = events.CloseSubsystemFault
 	case ListenerDown:
-		name, settings = "listener_down", []any{"duration", a.Duration, "close_existing", a.CloseExisting}
+		name, settings = events.ListenerDownFault, []any{"duration", a.Duration, "close_existing", a.CloseExisting}
 	case Hide:
-		name = "hide"
+		name = events.HideFault
 	default:
 		return nil
 	}

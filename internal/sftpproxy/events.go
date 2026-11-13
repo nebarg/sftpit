@@ -42,7 +42,7 @@ func (s *session) injected(req *request, level slog.Level, attrs ...any) {
 		case "target":
 			e.Target = value.(string)
 		case "fault":
-			e.Fault.Type = value.(string)
+			e.Fault.Type = value.(events.FaultType)
 		case "when":
 			e.Fault.When = value.(string)
 		default:
@@ -81,7 +81,7 @@ func waits(a Action) bool {
 
 // ended records that the wait of req's fault has ended, for reason, unless
 // its end has been recorded already.
-func (s *session) ended(req *request, reason string) {
+func (s *session) ended(req *request, reason events.Reason) {
 	s.mu.Lock()
 	_, waiting := s.waits[req]
 	delete(s.waits, req)
@@ -106,14 +106,14 @@ func (s *session) endWaits() {
 	}
 	s.mu.Unlock()
 	for _, req := range reqs {
-		s.ended(req, "session_ended")
+		s.ended(req, events.SessionEnded)
 	}
 }
 
-// faultType names a's type, as rules do.
-func faultType(a Action) string {
+// faultType names a's type, as FaultAttrs does.
+func faultType(a Action) events.FaultType {
 	if attrs := FaultAttrs(a, ""); len(attrs) > 1 {
-		return attrs[1].(string)
+		return attrs[1].(events.FaultType)
 	}
 	return ""
 }
@@ -194,7 +194,7 @@ func (s *session) count(req *request, reply sftpwire.Packet) {
 
 // recordTransfer records the totals of h, a file handle, closed as closed
 // says.
-func (s *session) recordTransfer(h *handle, closed string) {
+func (s *session) recordTransfer(h *handle, closed events.Closed) {
 	if h == nil || !h.file {
 		return
 	}

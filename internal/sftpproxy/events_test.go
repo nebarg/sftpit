@@ -59,9 +59,9 @@ func summary(e events.Event) string {
 	add("backend", e.BackendReply)
 	add("rule", e.Rule)
 	add("read_only", e.ReadOnly)
-	add("reason", e.Reason)
+	add("reason", string(e.Reason))
 	if f := e.Fault; f != nil {
-		add("fault", f.Type)
+		add("fault", string(f.Type))
 		add("when", f.When)
 		for _, k := range slices.Sorted(func(yield func(string) bool) {
 			for k := range f.Settings {
@@ -248,7 +248,7 @@ func TestEventsRecordHowEachWaitEnds(t *testing.T) {
 
 // faultName names the type of a, as events give it.
 func faultName(a sftpproxy.Action) string {
-	return sftpproxy.FaultAttrs(a, "")[1].(string)
+	return string(sftpproxy.FaultAttrs(a, "")[1].(events.FaultType))
 }
 
 func TestEventsRecordTransferFaultsAndTheirEffects(t *testing.T) {

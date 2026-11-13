@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -78,7 +79,7 @@ func (s *session) corrupt(req *request) bool {
 	case FlipBytes:
 		req.flip = true
 	}
-	attrs := []any{"request", operation(r), "path", req.path, "fault", "corrupt_download", "corruption", d.Corruption, "at", d.Offset}
+	attrs := []any{"request", operation(r), "path", req.path, "fault", events.CorruptDownloadFault, "corruption", d.Corruption, "at", d.Offset}
 	if d.Corruption != Truncate {
 		attrs = append(attrs, "length", d.Length)
 	}
@@ -183,7 +184,7 @@ func (s *session) cutRead(req *request) bool {
 		if !p.shortened {
 			p.shortened, level = true, slog.LevelInfo
 		}
-		s.injected(req, level, "request", operation(r), "path", req.path, "fault", "partial_download", "cutoff", p.Cutoff, "offset", r.Offset, "length", r.Length)
+		s.injected(req, level, "request", operation(r), "path", req.path, "fault", events.PartialDownloadFault, "cutoff", p.Cutoff, "offset", r.Offset, "length", r.Length)
 		r.Length = uint32(p.Cutoff - r.Offset)
 		return true
 	}

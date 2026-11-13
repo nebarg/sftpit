@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -34,7 +35,7 @@ func (s *session) rewriteEntries(req *request, p sftpwire.Packet) (emptied bool,
 		case WrongSize:
 			s.resize(req, name, a, &e.Attrs, &e.Longname)
 		case Hide:
-			s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", "hide")
+			s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", events.HideFault)
 			continue
 		default:
 			return false, fmt.Errorf("sftpproxy: a %T fault cannot apply to a READDIR entry", a)

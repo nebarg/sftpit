@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -108,7 +109,7 @@ func (s *session) corruptStored(req *request) bool {
 			return false
 		}
 	}
-	attrs := []any{"request", operation(w), "path", req.path, "fault", "corrupt_upload", "corruption", st.Corruption, "at", st.Offset}
+	attrs := []any{"request", operation(w), "path", req.path, "fault", events.CorruptUploadFault, "corruption", st.Corruption, "at", st.Offset}
 	if st.Corruption != Truncate {
 		attrs = append(attrs, "length", st.Length)
 	}

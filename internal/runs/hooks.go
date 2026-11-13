@@ -68,8 +68,8 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 	logger.Info("injected fault", attrs...)
 	injected := events.Event{Kind: events.FaultInjected, Connection: conn.ID(), User: conn.User(), KeyFingerprint: conn.KeyFingerprint(), Request: string(event), Rule: fault.Rule, Fault: describe(described)}
 	record(injected)
-	ended := func(reason string) {
-		if reason == "canceled" || reason == "released" {
+	ended := func(reason events.Reason) {
+		if reason == events.Canceled || reason == events.Released {
 			logger.Info("fault released", attrs...)
 		}
 		e := injected
@@ -79,7 +79,7 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 	var err error
 	switch a := action.(type) {
 	case sftpproxy.Delay:
-		ended(wait(ctx, a.Duration, a.Release, nil, "elapsed"))
+		ended(wait(ctx, a.Duration, a.Release, nil, events.Elapsed))
 	case sftpproxy.Drop:
 		if a.Reset {
 			err = conn.Reset()
@@ -88,7 +88,7 @@ func inject(ctx context.Context, logger *slog.Logger, record func(events.Event),
 		}
 	case sftpproxy.Freeze:
 		conn.Freeze()
-		ended(wait(ctx, a.Limit, a.Release, released, "limit"))
+		ended(wait(ctx, a.Limit, a.Release, released, events.AtLimit))
 		err = conn.Close()
 	case sftpproxy.ListenerDown:
 		conn.Server().Down(a.Duration, a.CloseExisting)
@@ -108,7 +108,7 @@ func describe(attrs []any) *events.Fault {
 		key, value := attrs[i].(string), attrs[i+1]
 		switch key {
 		case "fault":
-			f.Type = value.(string)
+			f.Type = value.(events.FaultType)
 		case "when":
 			f.When = value.(string)
 		default:
@@ -165,20 +165,20 @@ func armTimers(timers []sftpproxy.Timer, srv *sshfront.Server, logger *slog.Logg
 }
 
 // wait waits for d, or until ctx is done or release or stalls is closed,
-// and returns why it ended: atLimit once d has passed, "canceled" for
-// release, which closes when a rule is removed, "released" for stalls, or
-// "session_ended" for ctx.
-func wait(ctx context.Context, d time.Duration, release, stalls <-chan struct{}, atLimit string) (reason string) {
+// and returns why it ended: atLimit once d has passed, events.Canceled for
+// release, which closes when a rule is removed, events.Released for stalls,
+// or events.SessionEnded for ctx.
+func wait(ctx context.Context, d time.Duration, release, stalls <-chan struct{}, atLimit events.Reason) events.Reason {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 		return atLimit
 	case <-ctx.Done():
-		return "session_ended"
+		return events.SessionEnded
 	case <-release:
-		return "canceled"
+		return events.Canceled
 	case <-stalls:
-		return "released"
+		return events.Released
 	}
 }

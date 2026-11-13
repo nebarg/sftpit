@@ -31,7 +31,7 @@ func faulted(e events.Event, rule string) events.Event {
 }
 
 func fault(conn uint64, id uint32, request, path, rule, typ string) events.Event {
-	e := events.Event{Kind: events.FaultInjected, Connection: conn, User: "test", Request: request, Path: path, Rule: rule, Fault: &events.Fault{Type: typ}}
+	e := events.Event{Kind: events.FaultInjected, Connection: conn, User: "test", Request: request, Path: path, Rule: rule, Fault: &events.Fault{Type: events.FaultType(typ)}}
 	if id != 0 {
 		e.RequestID = &id
 	}

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -27,7 +28,7 @@ func (s *session) resize(req *request, name string, w WrongSize, attrs *sftpwire
 	if longname != nil {
 		*longname = withSize(*longname, actual, attrs.Size)
 	}
-	s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", "wrong_size", "actual", actual, "reported", attrs.Size)
+	s.injected(req, slog.LevelInfo, "request", operation(req.packet), "path", name, "fault", events.WrongSizeFault, "actual", actual, "reported", attrs.Size)
 }
 
 // withSize returns longname with its size field changed from actual to

@@ -197,7 +197,7 @@ func Serve(ctx context.Context, client, backend io.ReadWriteCloser, opts Options
 	s.wg.Wait()
 	s.endWaits()
 	for _, h := range s.tracker.openFiles() {
-		s.recordTransfer(h, "session_ended")
+		s.recordTransfer(h, events.ClosedBySession)
 	}
 	return s.result()
 }
@@ -688,24 +688,24 @@ func (s *session) hold(req *request) error {
 	select {
 	case <-timer.C:
 		if delay {
-			s.ended(req, "elapsed")
+			s.ended(req, events.Elapsed)
 			return nil
 		}
 		if release != nil || released != nil {
 			s.logger.Info("fault ended at its limit", s.faultAttrs(req)...)
 		}
-		s.ended(req, "limit")
+		s.ended(req, events.AtLimit)
 		return nil
 	case <-release:
 		s.logger.Info("fault released", s.faultAttrs(req)...)
-		s.ended(req, "canceled")
+		s.ended(req, events.Canceled)
 		return nil
 	case <-released:
 		s.logger.Info("fault released", s.faultAttrs(req)...)
-		s.ended(req, "released")
+		s.ended(req, events.Released)
 		return nil
 	case <-s.done:
-		s.ended(req, "session_ended")
+		s.ended(req, events.SessionEnded)
 		return errStopped
 	}
 }
@@ -777,7 +777,7 @@ func (s *session) relayReplies() error {
 				s.readOn(req)
 			} else {
 				if _, closed := req.packet.(*sftpwire.Close); closed {
-					s.recordTransfer(req.handle, "close")
+					s.recordTransfer(req.handle, events.ClosedByClient)
 				}
 				s.deliver(req, p)
 			}

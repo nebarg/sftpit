@@ -43,12 +43,12 @@ const (
 	FaultInjected Kind = "fault"
 
 	// FaultEnded is the end of a fault's wait, a delay, stall or freeze,
-	// with its Reason: "elapsed", "limit", "released", "canceled" or
-	// "session_ended".
+	// with its Reason: Elapsed, AtLimit, Released, Canceled or
+	// SessionEnded.
 	FaultEnded Kind = "fault_ended"
 
 	// Suppressed is a fault that its rule did not inject when its moment
-	// came, with its Reason: "removed" or "max_triggers".
+	// came, with its Reason: RuleRemoved or MaxTriggers.
 	Suppressed Kind = "suppressed"
 
 	// DecisionDrawn is a random decision a rule drew from the run's seed.
@@ -56,6 +56,70 @@ const (
 
 	// RulesChanged is a change of the run's rules, with their revision.
 	RulesChanged Kind = "rules_changed"
+)
+
+// FaultType names a kind of fault, as an event's Fault gives it.
+type FaultType string
+
+// The faults an event can name.
+const (
+	DelayFault            FaultType = "delay"
+	StallFault            FaultType = "stall"
+	FailFault             FaultType = "fail"
+	CloseConnectionFault  FaultType = "close_connection"
+	FreezeConnectionFault FaultType = "freeze_connection"
+	CloseSubsystemFault   FaultType = "close_subsystem"
+	ListenerDownFault     FaultType = "listener_down"
+	HideFault             FaultType = "hide"
+	WrongSizeFault        FaultType = "wrong_size"
+	PartialDownloadFault  FaultType = "partial_download"
+	CorruptDownloadFault  FaultType = "corrupt_download"
+	CorruptUploadFault    FaultType = "corrupt_upload"
+)
+
+// Waits reports whether a fault of type t holds a request, a reply or a
+// connection, and so ends with a FaultEnded event.
+func (t FaultType) Waits() bool {
+	return t == DelayFault || t == StallFault || t == FreezeConnectionFault
+}
+
+// Reason says why a fault's wait ended or a fault was suppressed.
+type Reason string
+
+const (
+	// Elapsed ends a delay that lasted as long as it was set to.
+	Elapsed Reason = "elapsed"
+
+	// AtLimit ends a stall or freeze that nothing released.
+	AtLimit Reason = "limit"
+
+	// Canceled ends a wait whose rule was removed or switched off.
+	Canceled Reason = "canceled"
+
+	// Released ends a stall or freeze that was released by hand.
+	Released Reason = "released"
+
+	// SessionEnded ends a wait whose session or connection ended first.
+	SessionEnded Reason = "session_ended"
+
+	// RuleRemoved suppresses a fault whose rule was removed before its
+	// moment came.
+	RuleRemoved Reason = "removed"
+
+	// MaxTriggers suppresses a fault whose rule had already fired as often
+	// as it may.
+	MaxTriggers Reason = "max_triggers"
+)
+
+// Closed says how a file handle ended.
+type Closed string
+
+const (
+	// ClosedByClient is a handle its client closed.
+	ClosedByClient Closed = "close"
+
+	// ClosedBySession is a handle still open when its session ended.
+	ClosedBySession Closed = "session_ended"
 )
 
 // Event is one thing that happened in a run. Which fields are set depends
@@ -111,7 +175,7 @@ type Event struct {
 	ReadOnly string `json:"read_only,omitempty"`
 
 	// Reason says why a fault's wait ended or a fault was suppressed.
-	Reason string `json:"reason,omitempty"`
+	Reason Reason `json:"reason,omitempty"`
 
 	Transfer *Totals   `json:"transfer,omitempty"`
 	Decision *Decision `json:"decision,omitempty"`
@@ -119,11 +183,10 @@ type Event struct {
 	Rules    *Rules    `json:"rules,omitempty"`
 }
 
-// Fault describes a fault: its Type, as rules name it, such as fail or
-// partial_upload, when it acts, and its settings, such as the status of a
-// fail or the cutoff of a partial upload.
+// Fault describes a fault: its Type, when it acts, and its settings, such as
+// the status of a fail or the cutoff of a partial upload.
 type Fault struct {
-	Type     string         `json:"type"`
+	Type     FaultType      `json:"type"`
 	When     string         `json:"when,omitempty"`
 	Settings map[string]any `json:"settings,omitempty"`
 }
@@ -143,9 +206,7 @@ type Totals struct {
 	// End is the furthest offset a read or write reached.
 	End uint64 `json:"end"`
 
-	// Closed is "close" for a handle the client closed, or
-	// "session_ended" for one still open when its session ended.
-	Closed string `json:"closed"`
+	Closed Closed `json:"closed"`
 
 	// Faulted is set if a fault acted on the handle.
 	Faulted bool `json:"faulted,omitempty"`

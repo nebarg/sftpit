@@ -291,7 +291,7 @@ type Status struct {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	s := Status{Run: *m.current.run, State: StateUp, Revision: m.current.rules.Revision()}
-	s.Stalled, s.Frozen = m.current.events.Waiting("stall"), m.current.events.Waiting("freeze_connection")
+	s.Stalled, s.Frozen = m.current.events.Waiting(events.StallFault), m.current.events.Waiting(events.FreezeConnectionFault)
 	switch {
 	case m.inReset:
 		s.State = StateResetting

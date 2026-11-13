@@ -497,7 +497,7 @@ func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) fun
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		if r.isRemoved() {
-			e.suppressed(r, attrs, "removed")
+			e.suppressed(r, attrs, events.RuleRemoved)
 			return false
 		}
 		if once != nil {
@@ -512,7 +512,7 @@ func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) fun
 
 // suppressed logs and records that r did not inject the fault that attrs
 // describe when its moment came, for reason.
-func (e *Engine) suppressed(r *rule, attrs []any, reason string) {
+func (e *Engine) suppressed(r *rule, attrs []any, reason events.Reason) {
 	e.logger.Info("rule suppressed", append(attrs, "reason", reason)...)
 	if e.record == nil {
 		return
@@ -533,7 +533,7 @@ func (e *Engine) suppressed(r *rule, attrs []any, reason string) {
 // MaxTriggers. e.mu must be held.
 func (e *Engine) fire(r *rule, attrs []any) bool {
 	if r.spent() {
-		e.suppressed(r, attrs, "max_triggers")
+		e.suppressed(r, attrs, events.MaxTriggers)
 		return false
 	}
 	r.counts.Fired++
