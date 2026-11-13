@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -19,16 +18,6 @@ import (
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
-)
-
-var (
-	// ErrStaleRun reports a reset that expects to end a run that is no
-	// longer current.
-	ErrStaleRun = errors.New("stale run")
-
-	// ErrUnknownRun reports a run that is neither current nor among the
-	// recent runs whose events the Manager keeps.
-	ErrUnknownRun = errors.New("unknown run")
 )
 
 // maxEvents bounds the events kept for each run.
@@ -84,24 +73,15 @@ type Manager struct {
 	resetting sync.Mutex
 	closed    bool
 
-	// mu guards current, inReset, failed and recent. current also changes
-	// only while resetting is held, so code holding resetting reads it
-	// without mu.
+	// mu guards current, inReset and failed. current also changes only
+	// while resetting is held, so code holding resetting reads it without
+	// mu.
 	mu      sync.Mutex
 	current *activeRun
-	// recent holds the events of the runs the workspace keeps, the current
-	// run's last.
-	recent []recentRun
 	// inReset is set while a reset is under way, and failed once one has
 	// failed, until another succeeds.
 	inReset bool
 	failed  error
-}
-
-// recentRun is the events of a run.
-type recentRun struct {
-	id     string
-	events *events.Recorder
 }
 
 // activeRun is a run that a Manager serves.
@@ -152,7 +132,6 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if m.current, err = m.begin(); err != nil {
 		return nil, err
 	}
-	m.keep(m.current)
 	if opts.Scenario != "" {
 		if _, err := m.SwitchScenario(opts.Scenario, true); err != nil {
 			return nil, errors.Join(err, m.Close())
@@ -173,7 +152,6 @@ func (m *Manager) Close() error {
 	defer m.resetting.Unlock()
 	m.closed = true
 	m.current.stopTimers()
-	m.current.events.Close()
 	if closeErr := m.current.root.Close(); closeErr != nil {
 		err = errors.Join(err, fmt.Errorf("runs: close the run's files: %w", closeErr))
 	}
@@ -209,7 +187,6 @@ func (m *Manager) Reset(ctx context.Context) (Status, error) {
 		m.failed = err
 	} else {
 		m.current, m.failed = next, nil
-		m.keep(next)
 	}
 	m.mu.Unlock()
 	if err != nil {
@@ -220,7 +197,6 @@ func (m *Manager) Reset(ctx context.Context) (Status, error) {
 		return Status{}, err
 	}
 
-	current.events.Close()
 	if err := current.root.Close(); err != nil {
 		m.logger.Warn("closing the files of the previous run failed", "run", current.run.ID, "err", err)
 	}
@@ -229,39 +205,17 @@ func (m *Manager) Reset(ctx context.Context) (Status, error) {
 	return m.Status(), nil
 }
 
-// Rules returns the rules of run, which must be the current run, or else
-// fails with ErrStaleRun.
-func (m *Manager) Rules(run string) (faults.RuleSet, error) {
-	current := m.active()
-	if run != current.run.ID {
-		return faults.RuleSet{}, staleRun(current, run)
-	}
-	return current.rules.Rules(), nil
+// Rules returns the rules of the current run.
+func (m *Manager) Rules() faults.RuleSet {
+	return m.active().rules.Rules()
 }
 
-// changeRules replaces the rules of run, which must be the current run, with
-// rules, as faults.Engine.Replace does if revision
-// is still the current revision, and returns the new rules. It fails with
-// ErrStaleRun for another run, with faults.ErrStaleRevision for another
-// revision, and once Close has returned, with an error wrapping
-// sshfront.ErrServerClosed. The run takes the listener down at the moments
-// of the rules that start afresh, as it does at those of the rules it
-// started with.
-func (m *Manager) changeRules(run string, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
-	m.resetting.Lock()
-	defer m.resetting.Unlock()
-	if m.closed {
-		return faults.RuleSet{}, fmt.Errorf("runs: change rules: %w", sshfront.ErrServerClosed)
-	}
-	current := m.active()
-	if run != current.run.ID {
-		return faults.RuleSet{}, staleRun(current, run)
-	}
-	return m.replaceRules(current, revision, rules)
-}
-
-// replaceRules replaces the rules of current, the current run, as
-// changeRules does. The caller holds resetting.
+// replaceRules replaces the rules of current, the current run, with rules,
+// as faults.Engine.Replace does if revision is still the current revision,
+// and returns the new rules. It fails with faults.ErrStaleRevision for
+// another revision. The run takes the listener down at the moments of the
+// rules that start afresh, as it does at those of the rules it started
+// with. The caller holds resetting.
 func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
 	timers, err := current.rules.Replace(revision, rules)
 	if err != nil {
@@ -273,49 +227,20 @@ func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faul
 	return set, nil
 }
 
-// ReleaseStalls releases the stalls and freezes in progress in run, which
-// must be the current run, as faults.Engine.ReleaseStalls does, or else
-// fails with ErrStaleRun.
-func (m *Manager) ReleaseStalls(run string) error {
-	current := m.active()
-	if run != current.run.ID {
-		return staleRun(current, run)
-	}
-	current.rules.ReleaseStalls()
-	return nil
+// ReleaseStalls releases the stalls and freezes in progress in the current
+// run, as faults.Engine.ReleaseStalls does.
+func (m *Manager) ReleaseStalls() {
+	m.active().rules.ReleaseStalls()
 }
 
-// Events returns the events of run, the current run or one of the recent
-// runs the workspace keeps, or else fails with ErrUnknownRun. The events of
-// a run that has ended are closed.
-func (m *Manager) Events(run string) (*events.Recorder, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, r := range m.recent {
-		if r.id == run {
-			return r.events, nil
-		}
-	}
-	return nil, fmt.Errorf("runs: %w %s", ErrUnknownRun, run)
-}
-
-// keep adds the events of a, which has become current, to the recent runs,
-// forgetting the oldest beyond those the workspace keeps. m.mu must be
-// held, or m not yet shared.
-func (m *Manager) keep(a *activeRun) {
-	m.recent = append(m.recent, recentRun{id: a.run.ID, events: a.events})
-	if len(m.recent) > keptRuns {
-		m.recent = slices.Delete(m.recent, 0, len(m.recent)-keptRuns)
-	}
+// Events returns the events of the current run.
+func (m *Manager) Events() *events.Recorder {
+	return m.active().events
 }
 
 // Users returns the users that the Manager's server accepts, which rules
 // may refer to.
 func (m *Manager) Users() []sshfront.User { return m.opts.Server.Users }
-
-func staleRun(current *activeRun, run string) error {
-	return fmt.Errorf("runs: %w: the current run is %s, not %s", ErrStaleRun, current.run.ID, run)
-}
 
 // restart ends current's timers and connections, and begins the next run
 // once every session of current has finished.

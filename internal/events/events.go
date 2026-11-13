@@ -2,8 +2,7 @@
 // happens, for the activity the API serves: the run's start, connections
 // and logins, each request and the reply its client got, the faults
 // injected and how their waits ended, random decisions and rule changes. A
-// Recorder keeps a run's latest events in memory, bounded,
-// and lets readers follow it as events arrive.
+// Recorder keeps a run's latest events in memory, bounded.
 package events
 
 import (
@@ -49,7 +48,7 @@ const (
 	FaultEnded Kind = "fault_ended"
 
 	// Suppressed is a fault that its rule did not inject when its moment
-	// came, with its Reason: "removed", "paused" or "max_triggers".
+	// came, with its Reason: "removed" or "max_triggers".
 	Suppressed Kind = "suppressed"
 
 	// DecisionDrawn is a random decision a rule drew from the run's seed.

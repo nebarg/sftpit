@@ -2,12 +2,10 @@ package control
 
 import (
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 
 	"github.com/nebarg/sftpit/internal/activity"
-	"github.com/nebarg/sftpit/internal/events"
 )
 
 const (
@@ -41,17 +39,12 @@ func (a *api) activity(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	rec, err := a.runs.Events(a.runs.Status().Run.ID)
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-	page := rec.Events(0, math.MaxInt, events.Filter{})
+	page := a.runs.Events().Events()
 	names := make(map[string]string)
 	for _, f := range a.runs.Faults() {
 		names[f.ID] = f.Spec.Name
 	}
 	lines := activity.Lines(page.Events, names)
 	lines = lines[max(0, len(lines)-limit):]
-	writeJSON(w, http.StatusOK, Activity{Lines: lines, LastEvent: page.Next, Partial: page.First > 1})
+	writeJSON(w, http.StatusOK, Activity{Lines: lines, LastEvent: page.Last, Partial: page.First > 1})
 }

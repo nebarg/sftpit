@@ -27,9 +27,9 @@ var (
 	// ErrInUse reports a workspace that another process has locked.
 	ErrInUse = errors.New("workspace in use by another sftpit process")
 
-	// ErrSeedOverlapsWorkspace reports a seed or expected directory that
-	// holds the workspace or lies within its fixtures, so that snapshotting
-	// it would copy it into itself or delete it.
+	// ErrSeedOverlapsWorkspace reports a seed directory that holds the
+	// workspace or lies within its fixtures, so that snapshotting it would
+	// copy it into itself or delete it.
 	ErrSeedOverlapsWorkspace = errors.New("the directory overlaps the workspace, so it would be copied into itself or deleted")
 
 	// errLocked reports a lock that another process holds.
@@ -247,22 +247,6 @@ func (w *Workspace) NewRun(seed faults.Seed) (*Run, error) {
 	}
 	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
 	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Seed: seed}, nil
-}
-
-// openRun opens sub, a directory of the run id, which must be one of the
-// runs the workspace keeps, or else fails with ErrUnknownRun.
-func (w *Workspace) openRun(id, sub string) (*os.Root, error) {
-	if !runIDPattern.MatchString(id) {
-		return nil, fmt.Errorf("runs: %w %q", ErrUnknownRun, id)
-	}
-	root, err := w.root.OpenRoot(path.Join(runsDir, id, sub))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("runs: %w %s", ErrUnknownRun, id)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("runs: open run %s: %w", id, err)
-	}
-	return root, nil
 }
 
 // prune deletes the oldest runs beyond the newest keptRuns, never current.

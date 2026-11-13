@@ -65,7 +65,7 @@ func TestOpenSSHOutages(t *testing.T) {
 			if tt.stored != "" {
 				assertHolds(t, srv, tt.stored, data)
 			}
-			if got := srv.counts(t, "outage-1").Fired; got != 1 {
+			if got := srv.counts("outage-1").Fired; got != 1 {
 				t.Errorf("the outage fired %d times, want once", got)
 			}
 			if !strings.Contains(logs.text(), "fault=listener_down") || !strings.Contains(logs.text(), "duration=1.5s close_existing=true") {

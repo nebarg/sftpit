@@ -442,14 +442,6 @@ func (s *Server) Pause(ctx context.Context) error {
 	return nil
 }
 
-// CloseAdmission closes admission as Pause does, until Resume, but leaves the
-// connections open, so that their clients can finish what they are doing.
-func (s *Server) CloseAdmission() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.paused = true
-}
-
 // Resume admits connections again after Pause.
 func (s *Server) Resume() {
 	s.mu.Lock()

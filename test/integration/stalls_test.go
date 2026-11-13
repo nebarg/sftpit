@@ -39,11 +39,11 @@ func TestOpenSSHUntilAStallIsReleased(t *testing.T) {
 			released := make(chan time.Time, 1)
 			go func() {
 				deadline := time.Now().Add(10 * time.Second)
-				for srv.counts(t, "held-1").Fired == 0 && time.Now().Before(deadline) {
+				for srv.counts("held-1").Fired == 0 && time.Now().Before(deadline) {
 					time.Sleep(10 * time.Millisecond)
 				}
 				time.Sleep(tt.hold)
-				srv.releaseStalls(t)
+				srv.releaseStalls()
 				released <- time.Now()
 			}()
 

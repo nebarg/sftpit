@@ -3,7 +3,6 @@ package control
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -37,15 +36,14 @@ func (a *api) files(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	files, live, err := a.runs.Files(r.PathValue("id"), name, hash)
+	files, err := a.runs.Files(name, hash)
 	if err != nil {
 		writeError(w, fileStatus(err), err)
 		return
 	}
 	body := struct {
-		Live  bool   `json:"live"`
 		Files []File `json:"files"`
-	}{Live: live, Files: make([]File, 0, len(files))}
+	}{Files: make([]File, 0, len(files))}
 	for _, f := range files {
 		kind := "file"
 		if f.Dir {
@@ -63,7 +61,7 @@ func (a *api) fileContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	f, _, err := a.runs.OpenFile(r.PathValue("id"), name)
+	f, err := a.runs.OpenFile(name)
 	if err != nil {
 		writeError(w, fileStatus(err), err)
 		return
@@ -83,26 +81,20 @@ func fileStatus(err error) int {
 	return statusFor(err)
 }
 
-// serveFile sends f, the file at name, as a download.
+// serveFile sends f, the file at name, as a download, which a browser
+// neither displays nor runs, answering range requests.
 func serveFile(w http.ResponseWriter, r *http.Request, f *os.File, name string) {
 	info, err := f.Stat()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	serveDownload(w, r, path.Base(name), "application/octet-stream", info.ModTime(), f)
-}
-
-// serveDownload sends content as the download filename, of type
-// contentType, which a browser neither displays nor runs, answering range
-// requests.
-func serveDownload(w http.ResponseWriter, r *http.Request, filename, contentType string, modTime time.Time, content io.ReadSeeker) {
 	h := w.Header()
-	h.Set("Content-Type", contentType)
-	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
 	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	h.Set("Cache-Control", "no-store")
-	http.ServeContent(w, r, "", modTime, content)
+	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
 // queryPath returns the clean absolute path that the query's path gives,

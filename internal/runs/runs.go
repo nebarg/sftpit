@@ -1,12 +1,12 @@
 // Package runs serves the runs of a workspace. A Manager serves them one at
 // a time through its own SSH server, each run starting from a snapshot of
-// the seed, and resets to the next run, adds, switches and removes a run's
-// faults and releases its stalls. Each session passes through the proxy,
+// the seed. It resets to the next run, and adds, switches and removes the
+// current run's faults, turns its scenarios on and off, releases its stalls
+// and gives its events and files. Each session passes through the proxy,
 // which can inject faults, on its way to the embedded backend, and the
 // connection hooks inject faults as clients connect and log in. The
-// workspace is a
-// directory that one process at a time locks, holding the host keys and the
-// files of each run.
+// workspace is a directory that one process at a time locks, holding the
+// host keys and the files of each run.
 package runs
 
 import (

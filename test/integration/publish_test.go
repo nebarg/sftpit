@@ -56,8 +56,8 @@ func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
 			}
 
 			srv.waitForSessions()
-			if set, err := m.Rules(srv.run.ID); err != nil || set.Counts["first-upload-cutoff-1"].Fired != 1 {
-				t.Errorf("the cutoff fired %+v (%v), want once", set.Counts["first-upload-cutoff-1"], err)
+			if got := m.Rules().Counts["first-upload-cutoff-1"]; got.Fired != 1 {
+				t.Errorf("the cutoff fired %+v, want once", got)
 			}
 			published, err := os.ReadFile(srv.path(publishedPath))
 			if err != nil {

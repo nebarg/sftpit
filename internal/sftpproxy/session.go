@@ -851,7 +851,7 @@ func (s *session) writeReplies() error {
 				return s.awaitMoment()
 			}
 			// Recording first means that a client never has a reply whose
-			// event a facts query cannot see yet.
+			// event the run's activity does not show yet.
 			if out.req != nil {
 				s.recordOperation(out.req, out.reply)
 			}

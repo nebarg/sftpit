@@ -74,10 +74,18 @@ func testScenarios(t *testing.T) *config.Scenarios {
 // withRules replaces the current run's rules with rules.
 func withRules(t *testing.T, m *Manager, rules ...faults.Rule) {
 	t.Helper()
-	s := m.Status()
-	if _, err := m.changeRules(s.Run.ID, s.Revision, rules); err != nil {
+	if _, err := changeRules(m, m.Status().Revision, rules); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
+}
+
+// changeRules replaces the current run's rules with rules, as
+// faults.Engine.Replace does if revision is still the current revision, and
+// returns the new rules.
+func changeRules(m *Manager, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
+	m.resetting.Lock()
+	defer m.resetting.Unlock()
+	return m.replaceRules(m.active(), revision, rules)
 }
 
 // startManager starts runs as newManager does, and serves them on a

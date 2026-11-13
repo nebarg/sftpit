@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/nebarg/sftpit/internal/config"
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 )
 
@@ -67,8 +66,8 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("GET /api/activity", a.activity)
 	mux.HandleFunc("GET /api/server", a.server)
 	mux.HandleFunc("GET /api/status", a.status)
-	mux.HandleFunc("GET /api/files", a.current(a.files))
-	mux.HandleFunc("GET /api/files/content", a.current(a.fileContent))
+	mux.HandleFunc("GET /api/files", a.files)
+	mux.HandleFunc("GET /api/files/content", a.fileContent)
 	mux.HandleFunc("POST /api/release", a.releaseStalls)
 	return protect(mux, opts.Hosts)
 }
@@ -82,33 +81,21 @@ func (a *api) status(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
 }
 
-// current returns h for the current run, as a route of the run whose ID is
-// its id would serve it.
-func (a *api) current(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		r.SetPathValue("id", a.runs.Status().Run.ID)
-		h(w, r)
-	}
-}
-
 // statusFor returns the HTTP status that answers err from the runs.
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision), errors.Is(err, config.ErrFixedScenario):
+	case errors.Is(err, config.ErrFixedScenario):
 		return http.StatusConflict
 	case errors.Is(err, config.ErrInvalidScenario):
 		return http.StatusBadRequest
-	case errors.Is(err, runs.ErrUnknownRun), errors.Is(err, runs.ErrUnknownFault), errors.Is(err, config.ErrUnknownScenario):
+	case errors.Is(err, runs.ErrUnknownFault), errors.Is(err, config.ErrUnknownScenario):
 		return http.StatusNotFound
 	}
 	return http.StatusInternalServerError
 }
 
 func (a *api) releaseStalls(w http.ResponseWriter, _ *http.Request) {
-	if err := a.runs.ReleaseStalls(a.runs.Status().Run.ID); err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
+	a.runs.ReleaseStalls()
 	writeJSON(w, http.StatusOK, newStatus(a.runs.Status()))
 }
 

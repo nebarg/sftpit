@@ -92,7 +92,6 @@ type server struct {
 	addr  string
 	port  string
 	files string
-	run   *runs.Run
 
 	// runs serves the server's runs, unless the test wires its sessions by
 	// hand, and wait waits for the sessions it has started to finish.
@@ -112,22 +111,14 @@ func (s *server) path(name string) string {
 func (s *server) waitForSessions() { s.wait() }
 
 // counts returns what the rule id has done in the server's run.
-func (s *server) counts(tb testing.TB, id string) faults.Counts {
-	tb.Helper()
-	set, err := s.runs.Rules(s.run.ID)
-	if err != nil {
-		tb.Errorf("Rules: %v", err)
-	}
-	return set.Counts[id]
+func (s *server) counts(id string) faults.Counts {
+	return s.runs.Rules().Counts[id]
 }
 
 // releaseStalls releases the stalls and freezes in progress in the server's
 // run.
-func (s *server) releaseStalls(tb testing.TB) {
-	tb.Helper()
-	if err := s.runs.ReleaseStalls(s.run.ID); err != nil {
-		tb.Errorf("ReleaseStalls: %v", err)
-	}
+func (s *server) releaseStalls() {
+	s.runs.ReleaseStalls()
 }
 
 // startServer starts a server that routes each session as via says, wired
@@ -177,7 +168,7 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 		handler = runs.Handler(embedded, nil, config.Policy{}, opts)
 	}
 	var sessions sync.WaitGroup
-	s := &server{files: run.Files, run: run, wait: sessions.Wait}
+	s := &server{files: run.Files, wait: sessions.Wait}
 	serveSession := handler
 	handler = func(ctx context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
 		sessions.Add(1)
@@ -248,8 +239,7 @@ func startRuns(tb testing.TB, opts runs.Options) (*runs.Manager, *server) {
 			tb.Errorf("close the runs: %v", err)
 		}
 	})
-	run := m.Status().Run
-	s := &server{addr: serve(tb, m.Server()), files: run.Files, run: &run, runs: m}
+	s := &server{addr: serve(tb, m.Server()), files: m.Status().Run.Files, runs: m}
 	// Pause waits for every connection's sessions to end, and Resume admits
 	// clients again.
 	s.wait = func() {

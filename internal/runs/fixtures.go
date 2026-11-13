@@ -23,17 +23,15 @@ const (
 	seedManifest = "fixtures/seed.json"
 )
 
-// fixtureSnapshot is a snapshot of a directory of fixtures: the seed that
-// each run of a workspace starts from.
+// fixtureSnapshot is a snapshot of the seed that each run of a workspace
+// starts from.
 type fixtureSnapshot struct {
-	// what names the snapshot in errors.
-	what     string
 	dir      string
 	manifest manifest
 }
 
-// manifest is the content of seed.json or expected.json, which records what
-// a snapshot holds.
+// manifest is the content of seed.json, which records what a snapshot
+// holds.
 type manifest struct {
 	// Source is the directory the snapshot was taken from.
 	Source  string         `json:"source"`
@@ -61,50 +59,46 @@ type fixtureEntry struct {
 // that does not exist with an error wrapping fs.ErrNotExist, before anything
 // changes. An empty src removes the snapshot and returns nil.
 func (w *Workspace) snapshotSeed(src string) (*fixtureSnapshot, error) {
-	return w.snapshotFixtures("seed", src, seedDir, seedManifest)
-}
-
-func (w *Workspace) snapshotFixtures(what, src, dir, manifestName string) (*fixtureSnapshot, error) {
 	if src != "" {
 		// A src that does not exist yet could come to exist below, within
 		// the snapshot, unnoticed by the check of the overlap.
 		if _, err := os.Stat(src); err != nil {
-			return nil, fmt.Errorf("runs: snapshot the %s: %w", what, err)
+			return nil, fmt.Errorf("runs: snapshot the seed: %w", err)
 		}
-		if within(w.dir, src) || within(src, filepath.Join(w.dir, filepath.FromSlash(path.Dir(dir)))) {
-			return nil, fmt.Errorf("runs: %s %s: %w", what, src, ErrSeedOverlapsWorkspace)
+		if within(w.dir, src) || within(src, filepath.Join(w.dir, filepath.FromSlash(path.Dir(seedDir)))) {
+			return nil, fmt.Errorf("runs: seed %s: %w", src, ErrSeedOverlapsWorkspace)
 		}
 	}
-	if err := removeAll(w.root, dir); err != nil {
-		return nil, fmt.Errorf("runs: remove the %s snapshot: %w", what, err)
+	if err := removeAll(w.root, seedDir); err != nil {
+		return nil, fmt.Errorf("runs: remove the seed snapshot: %w", err)
 	}
-	if err := w.root.Remove(manifestName); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("runs: remove the %s snapshot: %w", what, err)
+	if err := w.root.Remove(seedManifest); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("runs: remove the seed snapshot: %w", err)
 	}
 	if src == "" {
 		return nil, nil
 	}
-	if err := w.root.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("runs: snapshot the %s: %w", what, err)
+	if err := w.root.MkdirAll(seedDir, 0o700); err != nil {
+		return nil, fmt.Errorf("runs: snapshot the seed: %w", err)
 	}
-	dst, err := w.root.OpenRoot(dir)
+	dst, err := w.root.OpenRoot(seedDir)
 	if err != nil {
-		return nil, fmt.Errorf("runs: snapshot the %s: %w", what, err)
+		return nil, fmt.Errorf("runs: snapshot the seed: %w", err)
 	}
 	defer dst.Close()
 	if err := copyTree(src, dst); err != nil {
-		return nil, fmt.Errorf("runs: snapshot the %s: %w", what, err)
+		return nil, fmt.Errorf("runs: snapshot the seed: %w", err)
 	}
 	entries, err := describeTree(dst)
 	if err != nil {
-		return nil, fmt.Errorf("runs: snapshot the %s: %w", what, err)
+		return nil, fmt.Errorf("runs: snapshot the seed: %w", err)
 	}
 
 	m := manifest{Source: src, Entries: entries}
-	if err := writeJSON(w.root, manifestName, m); err != nil {
-		return nil, fmt.Errorf("runs: record the %s snapshot: %w", what, err)
+	if err := writeJSON(w.root, seedManifest, m); err != nil {
+		return nil, fmt.Errorf("runs: record the seed snapshot: %w", err)
 	}
-	return &fixtureSnapshot{what: what, dir: filepath.Join(w.dir, filepath.FromSlash(dir)), manifest: m}, nil
+	return &fixtureSnapshot{dir: filepath.Join(w.dir, filepath.FromSlash(seedDir)), manifest: m}, nil
 }
 
 // restore copies the snapshot into embedded, once it has checked that the
@@ -114,7 +108,7 @@ func (s *fixtureSnapshot) restore(embedded *backend.Embedded) error {
 		return err
 	}
 	if err := embedded.Seed(s.dir); err != nil {
-		return fmt.Errorf("runs: restore the %s snapshot of %s: %w", s.what, s.manifest.Source, err)
+		return fmt.Errorf("runs: restore the seed snapshot of %s: %w", s.manifest.Source, err)
 	}
 	return nil
 }
@@ -125,28 +119,28 @@ func (s *fixtureSnapshot) restore(embedded *backend.Embedded) error {
 func (s *fixtureSnapshot) check() error {
 	root, err := os.OpenRoot(s.dir)
 	if err != nil {
-		return fmt.Errorf("runs: check the %s snapshot: %w", s.what, err)
+		return fmt.Errorf("runs: check the seed snapshot: %w", err)
 	}
 	defer root.Close()
 	got, err := describeTree(root)
 	if err != nil {
-		return fmt.Errorf("runs: check the %s snapshot: %w", s.what, err)
+		return fmt.Errorf("runs: check the seed snapshot: %w", err)
 	}
 	want := s.manifest.Entries
 	gotByPath, wantByPath := byPath(got), byPath(want)
 	for _, e := range want {
 		if _, ok := gotByPath[e.Path]; !ok {
-			return fmt.Errorf("runs: %s has gone from the %s snapshot in %s", e.Path, s.what, s.dir)
+			return fmt.Errorf("runs: %s has gone from the seed snapshot in %s", e.Path, s.dir)
 		}
 	}
 	for _, e := range got {
 		if _, ok := wantByPath[e.Path]; !ok {
-			return fmt.Errorf("runs: %s has been added to the %s snapshot in %s", e.Path, s.what, s.dir)
+			return fmt.Errorf("runs: %s has been added to the seed snapshot in %s", e.Path, s.dir)
 		}
 	}
 	for _, e := range want {
 		if gotByPath[e.Path] != e {
-			return fmt.Errorf("runs: %s has changed in the %s snapshot in %s", e.Path, s.what, s.dir)
+			return fmt.Errorf("runs: %s has changed in the seed snapshot in %s", e.Path, s.dir)
 		}
 	}
 	return nil

@@ -21,7 +21,6 @@ func TestReleaseStallsLetsAStalledRequestGoOn(t *testing.T) {
 	stuck := faults.Rule{ID: "stuck", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}}
 	m, addr := startManager(t, Options{})
 	withRules(t, m, stuck)
-	run := m.Status().Run.ID
 	c, _ := dialSFTP(t, addr)
 	for stat := 1; stat <= 2; stat++ {
 		done := make(chan error, 1)
@@ -35,15 +34,10 @@ func TestReleaseStallsLetsAStalledRequestGoOn(t *testing.T) {
 			t.Fatalf("stat %d returned %v before the release", stat, err)
 		case <-time.After(100 * time.Millisecond):
 		}
-		if err := m.ReleaseStalls(run); err != nil {
-			t.Fatalf("ReleaseStalls: %v", err)
-		}
+		m.ReleaseStalls()
 		if err := testutil.Receive(t, done); err != nil {
 			t.Errorf("stat %d after the release = %v", stat, err)
 		}
-	}
-	if err := m.ReleaseStalls("20261024-101500.123-3f9a"); !errors.Is(err, ErrStaleRun) {
-		t.Errorf("ReleaseStalls of another run = %v, want ErrStaleRun", err)
 	}
 }
 
@@ -70,9 +64,7 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 			}
 			defer raw.Close()
 			testutil.ReceiveUntil(t, logs, "injected fault")
-			if err := m.ReleaseStalls(m.Status().Run.ID); err != nil {
-				t.Fatalf("ReleaseStalls: %v", err)
-			}
+			m.ReleaseStalls()
 			wait := waitTimeout
 			if !tt.closed {
 				wait = 300 * time.Millisecond
@@ -102,9 +94,7 @@ func TestAReleaseAsAFreezeAtConnectIsAnnouncedEndsIt(t *testing.T) {
 		if msg != "injected fault" {
 			return
 		}
-		if err := m.Load().ReleaseStalls(m.Load().Status().Run.ID); err != nil {
-			t.Errorf("ReleaseStalls: %v", err)
-		}
+		m.Load().ReleaseStalls()
 	})
 	started, addr := startManager(t, Options{Logger: slog.New(release)})
 	withRules(t, started, connectRule(sftpproxy.Freeze{Limit: time.Minute}))
@@ -139,10 +129,7 @@ func awaitFired(t *testing.T, m *Manager, id string, n uint64) {
 	t.Helper()
 	deadline := time.Now().Add(waitTimeout)
 	for {
-		set, err := m.Rules(m.Status().Run.ID)
-		if err != nil {
-			t.Fatalf("Rules: %v", err)
-		}
+		set := m.Rules()
 		if set.Counts[id].Fired >= n {
 			return
 		}

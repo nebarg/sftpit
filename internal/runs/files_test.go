@@ -24,7 +24,6 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 		}
 	}
 	m, addr := startManager(t, Options{SeedDir: seed})
-	run := m.Status().Run.ID
 	c, _ := dialSFTP(t, addr)
 	for name, content := range map[string]string{"/incoming/Orders.csv": "id,total\n", "/new.txt": "new", "/rewritten.txt": "same"} {
 		f, err := c.Create(name)
@@ -37,9 +36,9 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 		f.Close()
 	}
 
-	files, live, err := m.Files(run, "/", false)
-	if err != nil || !live {
-		t.Fatalf("Files = %v, live %v; want the live run's files", err, live)
+	files, err := m.Files("/", false)
+	if err != nil {
+		t.Fatalf("Files: %v", err)
 	}
 	got := map[string]string{}
 	var paths []string
@@ -57,7 +56,7 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 		t.Errorf("seed = %v, want %v", got, want)
 	}
 
-	files, _, err = m.Files(run, "/", true)
+	files, err = m.Files("/", true)
 	if err != nil {
 		t.Fatalf("Files with hashes: %v", err)
 	}
@@ -78,35 +77,22 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 		}
 	}
 
-	f, live, err := m.OpenFile(run, "/incoming/Orders.csv")
-	if err != nil || !live {
-		t.Fatalf("OpenFile = %v, live %v", err, live)
+	f, err := m.OpenFile("/incoming/Orders.csv")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
 	}
 	b, err := io.ReadAll(f)
 	f.Close()
 	if err != nil || string(b) != "id,total\n" {
 		t.Errorf("read %q, %v", b, err)
 	}
-	if _, _, err := m.OpenFile(run, "/incoming"); !errors.Is(err, ErrNotFile) {
+	if _, err := m.OpenFile("/incoming"); !errors.Is(err, ErrNotFile) {
 		t.Errorf("OpenFile of a directory = %v, want ErrNotFile", err)
 	}
-	if _, _, err := m.OpenFile(run, "/missing"); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := m.OpenFile("/missing"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("OpenFile of a missing file = %v, want fs.ErrNotExist", err)
 	}
-	if _, _, err := m.Files(run, "/missing", false); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := m.Files("/missing", false); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Files of a missing path = %v, want fs.ErrNotExist", err)
-	}
-
-	// A run that has ended keeps its files, which can no longer change.
-	if _, err := m.Reset(t.Context()); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	if files, live, err := m.Files(run, "/new.txt", false); err != nil || live || len(files) != 1 {
-		t.Errorf("Files of the ended run = %+v, live %v, %v; want its file, not live", files, live, err)
-	}
-	for _, id := range []string{"20261024-101500.123-3f9a", "../" + run, ""} {
-		if _, _, err := m.Files(id, "/", false); !errors.Is(err, ErrUnknownRun) {
-			t.Errorf("Files of run %q = %v, want ErrUnknownRun", id, err)
-		}
 	}
 }

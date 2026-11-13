@@ -577,10 +577,6 @@ func (r Rule) isConnectionAction() bool {
 	return false
 }
 
-// AtMoment reports whether the rule takes a connection action at a moment,
-// of the run, the connection or a transfer, rather than at a request.
-func (r Rule) AtMoment() bool { return r.timedBySession() || r.timedByTransfer() }
-
 // timedBySession reports whether the rule fires at a moment measured from
 // the run or the connection, rather than at a request.
 func (r Rule) timedBySession() bool {

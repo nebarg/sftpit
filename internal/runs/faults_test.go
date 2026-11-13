@@ -83,8 +83,7 @@ func errOf(_ Fault, err error) error { return err }
 
 func TestFaultsKeepTheRunsOwnRules(t *testing.T) {
 	m, addr := startManager(t, Options{})
-	run := m.Status().Run.ID
-	if _, err := m.changeRules(run, 1, []faults.Rule{denyStats}); err != nil {
+	if _, err := changeRules(m, 1, []faults.Rule{denyStats}); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
 	c, _ := dialSFTP(t, addr)
@@ -95,10 +94,7 @@ func TestFaultsKeepTheRunsOwnRules(t *testing.T) {
 	if _, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); err != nil {
 		t.Fatalf("AddFault: %v", err)
 	}
-	set, err := m.Rules(run)
-	if err != nil {
-		t.Fatal(err)
-	}
+	set := m.Rules()
 	if ids := ruleIDs(set.Rules); !slices.Equal(ids, []string{"deny-stats", "deletes-fail-1"}) {
 		t.Errorf("the run's rules are %v, want its own, then the fault's", ids)
 	}
@@ -109,7 +105,7 @@ func TestFaultsKeepTheRunsOwnRules(t *testing.T) {
 	if err := m.RemoveFaults(); err != nil {
 		t.Fatalf("RemoveFaults: %v", err)
 	}
-	if set, _ := m.Rules(run); !slices.Equal(ruleIDs(set.Rules), []string{"deny-stats"}) {
+	if set := m.Rules(); !slices.Equal(ruleIDs(set.Rules), []string{"deny-stats"}) {
 		t.Errorf("after RemoveFaults, the rules are %v, want only the run's own", ruleIDs(set.Rules))
 	}
 }

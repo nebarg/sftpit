@@ -26,8 +26,8 @@ func TestFilesListARunsFiles(t *testing.T) {
 	path := "/api/files"
 
 	code, body := call(t, api, "GET", path, "")
-	if code != http.StatusOK || body["live"] != true {
-		t.Fatalf("GET %s = %d %v, want the live run's files", path, code, body)
+	if code != http.StatusOK || body["files"] == nil {
+		t.Fatalf("GET %s = %d %v, want the run's files", path, code, body)
 	}
 	files := body["files"].([]any)
 	var paths []string

@@ -30,28 +30,26 @@ type File struct {
 }
 
 // Files describes the file or directory name, a clean absolute path, of
-// run, one of the runs the workspace keeps, and everything beneath a
-// directory, sorted by path, with each file's SHA-256 if hash is set. It
-// reports whether run is the current run, whose files can change while
-// they are read. A run the workspace does not keep fails with
-// ErrUnknownRun, and a name the run does not hold with an error wrapping
-// fs.ErrNotExist.
-func (m *Manager) Files(run, name string, hash bool) (files []File, live bool, err error) {
-	root, err := m.workspace.openRun(run, "fs")
+// the current run, and everything beneath a directory, sorted by path, with
+// each file's SHA-256 if hash is set. A name the run does not hold fails
+// with an error wrapping fs.ErrNotExist.
+func (m *Manager) Files(name string, hash bool) ([]File, error) {
+	root, err := m.openFiles()
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer root.Close()
 	listed, err := backend.List(root, name)
 	if err != nil {
-		return nil, false, fmt.Errorf("runs: %w", err)
+		return nil, fmt.Errorf("runs: %w", err)
 	}
+	var files []File
 	seeded := m.seeded()
 	for _, f := range listed {
 		file := File{File: f}
 		if hash && !f.Dir {
 			if file.SHA256, err = hashOf(root, f.Path); err != nil {
-				return nil, false, err
+				return nil, err
 			}
 		}
 		if e, ok := seeded[f.Path]; ok && !f.Dir {
@@ -62,23 +60,33 @@ func (m *Manager) Files(run, name string, hash bool) (files []File, live bool, e
 		}
 		files = append(files, file)
 	}
-	return files, m.isCurrent(run), nil
+	return files, nil
 }
 
-// OpenFile opens the regular file name, a clean absolute path, of run for
-// reading, and reports whether run is the current run, as Files does. A
-// name that the run holds but that is not a regular file fails with
-// ErrNotFile.
-func (m *Manager) OpenFile(run, name string) (f *os.File, live bool, err error) {
-	root, err := m.workspace.openRun(run, "fs")
+// OpenFile opens the regular file name, a clean absolute path, of the
+// current run for reading. A name that the run holds but that is not a
+// regular file fails with ErrNotFile.
+func (m *Manager) OpenFile(name string) (*os.File, error) {
+	root, err := m.openFiles()
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer root.Close()
-	if f, err = backend.Open(root, name); err != nil {
-		return nil, false, fmt.Errorf("runs: %w", err)
+	f, err := backend.Open(root, name)
+	if err != nil {
+		return nil, fmt.Errorf("runs: %w", err)
 	}
-	return f, m.isCurrent(run), nil
+	return f, nil
+}
+
+// openFiles opens the directory of the current run's files. It opens its
+// own root, rather than sharing the run's, which a reset closes.
+func (m *Manager) openFiles() (*os.Root, error) {
+	root, err := os.OpenRoot(m.active().run.Files)
+	if err != nil {
+		return nil, fmt.Errorf("runs: open run files: %w", err)
+	}
+	return root, nil
 }
 
 // seeded returns the files of the seed snapshot by path, or nil if the runs
@@ -94,10 +102,6 @@ func (m *Manager) seeded() map[string]fixtureEntry {
 		}
 	}
 	return files
-}
-
-func (m *Manager) isCurrent(run string) bool {
-	return m.active().run.ID == run
 }
 
 // hashOf returns the SHA-256 of the file name, a clean absolute path, among

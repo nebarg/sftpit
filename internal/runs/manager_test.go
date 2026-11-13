@@ -77,7 +77,7 @@ func TestResetStartsARunWithoutFaultsAndAFreshSeed(t *testing.T) {
 		t.Fatalf("AddFault: %v", err)
 	}
 	set := m.Status()
-	if _, err := m.changeRules(set.Run.ID, set.Revision, append(m.current.rules.Rules().Rules, deny)); err != nil {
+	if _, err := changeRules(m, set.Revision, append(m.current.rules.Rules().Rules, deny)); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
 	first := m.Status().Run
@@ -96,8 +96,8 @@ func TestResetStartsARunWithoutFaultsAndAFreshSeed(t *testing.T) {
 	if got := m.Faults(); len(got) != 0 {
 		t.Errorf("after a reset, Faults = %+v, want none", got)
 	}
-	if set, err := m.Rules(next.Run.ID); err != nil || len(set.Rules) != 0 {
-		t.Errorf("after a reset, the rules are %+v, %v, want none", set, err)
+	if set := m.Rules(); len(set.Rules) != 0 {
+		t.Errorf("after a reset, the rules are %+v, want none", set)
 	}
 	scenarios, err := m.Scenarios()
 	if err != nil {
@@ -402,7 +402,7 @@ func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
 	if runs, err := os.ReadDir(filepath.Join(m.workspace.Dir(), runsDir)); err != nil || len(runs) != 1 {
 		t.Errorf("the workspace holds runs %v (%v), want only the first", runs, err)
 	}
-	if _, err := m.changeRules(m.Status().Run.ID, 1, nil); !errors.Is(err, sshfront.ErrServerClosed) {
-		t.Errorf("changeRules after Close = %v, want ErrServerClosed", err)
+	if _, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); !errors.Is(err, sshfront.ErrServerClosed) {
+		t.Errorf("AddFault after Close = %v, want ErrServerClosed", err)
 	}
 }

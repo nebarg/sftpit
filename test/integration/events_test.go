@@ -88,7 +88,7 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 			if !slices.ContainsFunc(tt.output, func(o string) bool { return strings.Contains(string(out), o) }) {
 				t.Errorf("sftp output contains none of %q:\n%s", tt.output, out)
 			}
-			if got := srv.counts(t, "event-1"); got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
+			if got := srv.counts("event-1"); got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
 				t.Errorf("counts = %+v, want the one connection's event selected and fired", got)
 			}
 			if want := `msg="injected fault" conn=1 operation=` + tt.fault.Steps[0] + " " + tt.log; !strings.Contains(logs.text(), want) {

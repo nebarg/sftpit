@@ -28,8 +28,8 @@ func TestFaultsThroughTheAPI(t *testing.T) {
 	if code, body := call(t, api, "GET", "/api/faults", ""); code != http.StatusOK || !equalJSON(body, map[string]any{"faults": []any{want}}) {
 		t.Errorf("GET /api/faults = %d %v, want the fault", code, body)
 	}
-	if set, err := m.Rules(m.Status().Run.ID); err != nil || len(set.Rules) != 1 || set.Rules[0].ID != "deletes-fail-1" {
-		t.Errorf("the run's rules are %+v, %v; want the fault's", set.Rules, err)
+	if set := m.Rules(); len(set.Rules) != 1 || set.Rules[0].ID != "deletes-fail-1" {
+		t.Errorf("the run's rules are %+v; want the fault's", set.Rules)
 	}
 
 	code, body = call(t, api, "PATCH", "/api/faults/deletes-fail-1", `{"on": false}`)
@@ -37,7 +37,7 @@ func TestFaultsThroughTheAPI(t *testing.T) {
 	if code != http.StatusOK || !equalJSON(body, want) {
 		t.Errorf("PATCH off = %d %v, want %v", code, body, want)
 	}
-	if set, _ := m.Rules(m.Status().Run.ID); len(set.Rules) != 0 {
+	if set := m.Rules(); len(set.Rules) != 0 {
 		t.Errorf("with the fault off, the run has rules %+v, want none", set.Rules)
 	}
 
@@ -59,7 +59,7 @@ func TestFaultsAreRemovedAllAtOnceAndByAReset(t *testing.T) {
 	if code, _ := send(t, api, "DELETE", "/api/faults", ""); code != http.StatusNoContent || len(m.Faults()) != 0 {
 		t.Errorf("DELETE /api/faults = %d, leaving %+v; want 204 and none, the scenario's included", code, m.Faults())
 	}
-	if set, _ := m.Rules(m.Status().Run.ID); len(set.Rules) != 0 {
+	if set := m.Rules(); len(set.Rules) != 0 {
 		t.Errorf("after removing the faults, the rules are %+v, want none", set.Rules)
 	}
 
@@ -153,7 +153,7 @@ func TestTheCurrentRunsRoutesNeedNoRunID(t *testing.T) {
 	if code, body := call(t, api, "GET", "/api/server", ""); code != http.StatusOK || body["sftp_address"] == nil {
 		t.Errorf("GET /api/server = %d %v, want how to connect", code, body)
 	}
-	if code, body := call(t, api, "GET", "/api/files", ""); code != http.StatusOK || body["live"] != true {
+	if code, body := call(t, api, "GET", "/api/files", ""); code != http.StatusOK || body["files"] == nil {
 		t.Errorf("GET /api/files = %d %v, want the current run's files", code, body)
 	}
 	if code, body := send(t, api, "GET", "/api/files/content?path=/missing", ""); code != http.StatusNotFound {
