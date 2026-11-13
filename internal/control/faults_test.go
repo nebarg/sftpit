@@ -147,3 +147,22 @@ func TestActivityRefusesABadLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestTheCurrentRunsRoutesNeedNoRunID(t *testing.T) {
+	m, api := start(t, runs.Options{})
+	if code, body := call(t, api, "GET", "/api/status", ""); code != http.StatusOK || body["run"].(map[string]any)["id"] != m.Status().Run.ID {
+		t.Errorf("GET /api/status = %d %v, want the current run", code, body)
+	}
+	if code, body := call(t, api, "GET", "/api/server", ""); code != http.StatusOK || body["sftp_address"] == nil {
+		t.Errorf("GET /api/server = %d %v, want how to connect", code, body)
+	}
+	if code, body := call(t, api, "GET", "/api/files", ""); code != http.StatusOK || body["live"] != true {
+		t.Errorf("GET /api/files = %d %v, want the current run's files", code, body)
+	}
+	if code, body := send(t, api, "GET", "/api/files/content?path=/missing", ""); code != http.StatusNotFound {
+		t.Errorf("GET /api/files/content of a missing file = %d %s, want 404", code, body)
+	}
+	if code, body := call(t, api, "POST", "/api/release", ""); code != http.StatusOK || body["run"].(map[string]any)["id"] != m.Status().Run.ID {
+		t.Errorf("POST /api/release = %d %v, want the status", code, body)
+	}
+}

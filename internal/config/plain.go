@@ -94,15 +94,15 @@ type Action struct {
 // Actions are what a fault can do, in the order the dashboard offers them.
 var Actions = []Action{
 	{"refuse", "Refuse with an error"},
-	{"wait", "Wait"},
-	{"hold", "Hold until released"},
-	{"drop", "Drop the connection"},
-	{"freeze", "Freeze the connection"},
-	{"stop_partway", "Stop the transfer partway"},
-	{"corrupt", "Corrupt the data"},
-	{"wrong_size", "Report the wrong size"},
-	{"hide", "Pretend the file isn't there"},
-	{"down", "Take the server down"},
+	{"wait", "Delay the reply"},
+	{"hold", "Hold the request until released"},
+	{"drop", "Close the connection"},
+	{"freeze", "Stop responding, keeping the connection open"},
+	{"stop_partway", "Close the connection partway through a transfer"},
+	{"corrupt", "Change the data"},
+	{"wrong_size", "Report the wrong file size"},
+	{"hide", "Answer “no such file”"},
+	{"down", "Take the server offline"},
 }
 
 // Preset is a ready-made fault.
@@ -121,16 +121,16 @@ var commandSteps = []string{"list", "stat", "open_read", "open_write", "close", 
 // Presets are the ready-made faults, in the order the dashboard offers
 // them.
 var Presets = []Preset{
-	{"deletes_fail", "Deletes fail", "The server refuses to delete", Fault{Steps: []string{"remove"}, Do: "refuse", Error: "permission_denied"}},
-	{"renames_fail", "Renames fail", "Moving or publishing a file is refused", Fault{Steps: []string{"rename"}, Do: "refuse", Error: "permission_denied"}},
-	{"upload_stops_partway", "Upload stops partway", "The connection drops mid-upload", Fault{Steps: []string{"write"}, Do: "stop_partway", KB: new(uint64(32))}},
-	{"download_stops_partway", "Download stops partway", "The connection drops mid-download", Fault{Steps: []string{"read"}, Do: "stop_partway", KB: new(uint64(32))}},
-	{"download_corrupted", "Download is corrupted", "Bytes change, and nobody says so", Fault{Steps: []string{"read"}, Do: "corrupt"}},
-	{"file_goes_missing", "File goes missing", "Listed, but can't be fetched", Fault{Steps: []string{"open_read", "stat"}, Do: "hide"}},
-	{"slow_responses", "Slow responses", "Each command takes longer", Fault{Steps: commandSteps, Do: "wait", Seconds: new(3.0)}},
-	{"connection_drops", "Connection drops", "Mid-command, without warning", Fault{Steps: commandSteps, Do: "drop"}},
-	{"server_goes_down", "Server goes down", "Refuses connections for a while", Fault{Do: "down", Seconds: new(30.0)}},
-	{"logins_fail", "Logins fail", "The connection closes as the login succeeds", Fault{Steps: []string{"authenticate"}, Do: "drop"}},
+	{"deletes_fail", "Deletes fail", "Delete requests are refused with “permission denied”.", Fault{Steps: []string{"remove"}, Do: "refuse", Error: "permission_denied"}},
+	{"renames_fail", "Renames fail", "Rename requests are refused with “permission denied”.", Fault{Steps: []string{"rename"}, Do: "refuse", Error: "permission_denied"}},
+	{"upload_stops_partway", "Uploads stop partway", "The connection closes once an upload reaches 32 KB.", Fault{Steps: []string{"write"}, Do: "stop_partway", KB: new(uint64(32))}},
+	{"download_stops_partway", "Downloads stop partway", "The connection closes once a download reaches 32 KB.", Fault{Steps: []string{"read"}, Do: "stop_partway", KB: new(uint64(32))}},
+	{"download_corrupted", "Downloads are corrupted", "The first 64 bytes of each download are changed. The client gets no error.", Fault{Steps: []string{"read"}, Do: "corrupt"}},
+	{"file_goes_missing", "Files can't be opened", "Files still appear in listings, but opening one returns “no such file”.", Fault{Steps: []string{"open_read", "stat"}, Do: "hide"}},
+	{"slow_responses", "Slow responses", "Every request except reading and writing data waits 3 seconds.", Fault{Steps: commandSteps, Do: "wait", Seconds: new(3.0)}},
+	{"connection_drops", "Connections close", "The connection closes when a request arrives.", Fault{Steps: commandSteps, Do: "drop"}},
+	{"server_goes_down", "Server goes down", "Open connections close, and new ones are refused for 30 seconds.", Fault{Do: "down", Seconds: new(30.0)}},
+	{"logins_fail", "Logins fail", "The connection closes just after a successful login.", Fault{Steps: []string{"authenticate"}, Do: "drop"}},
 }
 
 //go:fix inline

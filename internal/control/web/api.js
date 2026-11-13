@@ -33,7 +33,3 @@ async function reply(resp) {
   return body;
 }
 
-// runPath returns the path of a run's route.
-export function runPath(run, route) {
-  return `/api/v1/runs/${encodeURIComponent(run)}/${route}`;
-}

@@ -88,7 +88,7 @@ func TestEveryFileTheDashboardLoadsIsServed(t *testing.T) {
 			}
 		}
 	}
-	for _, module := range []string{"/ui/app.js", "/ui/api.js", "/ui/format.js", "/ui/timeline.js", "/ui/preview.js", "/ui/tree.js", "/ui/rules.js", "/ui/connection.js", "/ui/dom.js", "/ui/edit.js", "/ui/builder.js", "/ui/chaos.js", "/ui/result.js", "/ui/resultview.js"} {
+	for _, module := range []string{"/ui/app.js", "/ui/api.js", "/ui/activity.js", "/ui/faults.js", "/ui/format.js", "/ui/tree.js", "/ui/connection.js", "/ui/dom.js", "/ui/number.js"} {
 		if !seen[module] {
 			t.Errorf("the page does not load %s", module)
 		}

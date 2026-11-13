@@ -63,6 +63,11 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("DELETE /api/faults/{id}", a.removeFault)
 	mux.HandleFunc("POST /api/reset", a.startAgain)
 	mux.HandleFunc("GET /api/activity", a.activity)
+	mux.HandleFunc("GET /api/server", a.server)
+	mux.HandleFunc("GET /api/status", a.status)
+	mux.HandleFunc("GET /api/files", a.current(a.files))
+	mux.HandleFunc("GET /api/files/content", a.current(a.fileContent))
+	mux.HandleFunc("POST /api/release", a.current(a.releaseStalls))
 	mux.HandleFunc("GET /api/v1/health", a.health)
 	mux.HandleFunc("GET /api/v1/server", a.server)
 	mux.HandleFunc("GET /api/v1/ready", a.ready)
@@ -136,6 +141,15 @@ func (a *api) reset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, newStatus(status))
+}
+
+// current returns h for the current run, as a route of the run whose ID is
+// its id would serve it.
+func (a *api) current(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("id", a.runs.Status().Run.ID)
+		h(w, r)
+	}
 }
 
 // statusFor returns the HTTP status that answers err from the runs.
