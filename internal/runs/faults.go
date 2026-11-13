@@ -29,10 +29,12 @@ type Fault struct {
 	Scenario string
 }
 
-// plainFault is a fault of a run, as the run keeps it.
+// plainFault is a fault of a run, as the run keeps it, with the rule it
+// was compiled to once, as it was added.
 type plainFault struct {
 	id       string
 	spec     config.Fault
+	rule     faults.Rule
 	on       bool
 	scenario string
 }
@@ -63,20 +65,22 @@ func (m *Manager) Fault(id string) (Fault, error) {
 
 // AddFault adds spec to the current run, switched on, as a rule tried after
 // the run's own rules, and returns it. Its ID comes from its name. It fails
-// with spec's error if spec is not a fault the run can inject, and once
-// Close has returned.
+// with spec's error, which is config.ErrInvalidFault, if spec is not a
+// fault the run can inject, and once Close has returned.
 func (m *Manager) AddFault(spec config.Fault) (Fault, error) {
+	// A fault that can never work is the caller's mistake, whatever the
+	// run is doing.
+	resolved, rule, err := spec.Compile(m.opts.Server.Users)
+	if err != nil {
+		return Fault{}, err
+	}
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
 	if m.closed {
 		return Fault{}, fmt.Errorf("runs: add a fault: %w", sshfront.ErrServerClosed)
 	}
-	resolved, err := spec.Resolve()
-	if err != nil {
-		return Fault{}, err
-	}
 	current := m.active()
-	f := plainFault{id: m.faultID(current, resolved.Name), spec: resolved, on: true}
+	f := newPlainFault(m.faultID(current, resolved.Name), resolved, rule, "")
 	current.faults = append(current.faults, f)
 	set, err := m.applyFaults(current)
 	if err != nil {
@@ -156,16 +160,18 @@ func (m *Manager) replaceFaults(current *activeRun, previous []plainFault) (faul
 		return slices.ContainsFunc(previous, func(f plainFault) bool { return f.id == r.ID })
 	})
 	for _, f := range current.faults {
-		if !f.on {
-			continue
+		if f.on {
+			rules = append(rules, f.rule)
 		}
-		r, err := f.spec.Rule(f.id, m.opts.Server.Users)
-		if err != nil {
-			return faults.RuleSet{}, err
-		}
-		rules = append(rules, r)
 	}
 	return m.replaceRules(current, set.Revision, rules)
+}
+
+// newPlainFault returns spec, resolved and compiled to rule, as the fault
+// id, switched on, that the scenario added, if any.
+func newPlainFault(id string, spec config.Fault, rule faults.Rule, scenario string) plainFault {
+	rule.ID = id
+	return plainFault{id: id, spec: spec, rule: rule, on: true, scenario: scenario}
 }
 
 var notID = regexp.MustCompile(`[^a-z0-9]+`)

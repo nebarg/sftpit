@@ -103,6 +103,23 @@ func TestTheAPIRefusesFaultsThatCannotWork(t *testing.T) {
 	}
 }
 
+func TestAnInvalidFaultIsRefusedWithWhatIsWrong(t *testing.T) {
+	m, api := start(t, runs.Options{})
+	for body, want := range map[string]string{
+		`{"preset": "oops"}`:                                      `there is no preset "oops"`,
+		`{"steps": ["remove"], "do": "explode"}`:                  `there is nothing to do called "explode"`,
+		`{"steps": ["remove"], "do": "refuse", "user": "nobody"}`: `user "nobody" is not a configured user`,
+	} {
+		code, got := call(t, api, "POST", "/api/faults", body)
+		if code != http.StatusBadRequest || !equalJSON(got, map[string]any{"error": want}) {
+			t.Errorf("POST /api/faults %s = %d %v, want 400 and only %q", body, code, got, want)
+		}
+	}
+	if s := m.Status(); s.Revision != 1 || len(m.Faults()) != 0 {
+		t.Errorf("after refused faults, revision %d and faults %+v, want nothing changed", s.Revision, m.Faults())
+	}
+}
+
 func TestPresetsListWhatAFaultCanBe(t *testing.T) {
 	_, api := start(t, runs.Options{})
 	code, body := call(t, api, "GET", "/api/presets", "")

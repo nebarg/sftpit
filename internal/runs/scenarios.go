@@ -102,12 +102,12 @@ func (m *Manager) setScenarioFaults(current *activeRun, name string, specs []con
 	was := current.faults
 	current.faults = slices.DeleteFunc(slices.Clone(was), func(f plainFault) bool { return f.scenario == name })
 	for i, spec := range specs {
-		resolved, err := spec.Resolve()
+		resolved, rule, err := spec.Compile(m.opts.Server.Users)
 		if err != nil {
 			current.faults = was
 			return fmt.Errorf("runs: scenario %s: faults[%d]: %w", name, i, err)
 		}
-		current.faults = append(current.faults, plainFault{id: m.faultID(current, resolved.Name), spec: resolved, on: true, scenario: name})
+		current.faults = append(current.faults, newPlainFault(m.faultID(current, resolved.Name), resolved, rule, name))
 	}
 	if _, err := m.replaceFaults(current, was); err != nil {
 		current.faults = was

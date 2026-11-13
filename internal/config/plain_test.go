@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -163,9 +165,60 @@ func TestFaultsRejectWhatTheyCannotDo(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Rule error = %v, want it to contain %q", err, tt.want)
 			}
+			if !errors.Is(err, ErrInvalidFault) {
+				t.Errorf("Rule error = %v, want ErrInvalidFault", err)
+			}
 		})
 	}
-	if _, err := (Fault{Preset: "deletes_fail", User: "nobody"}).Rule("r", []sshfront.User{{Name: "test", Password: "x"}}); err == nil || !strings.Contains(err.Error(), `user "nobody" is not a configured user`) {
+	_, err := (Fault{Preset: "deletes_fail", User: "nobody"}).Rule("r", []sshfront.User{{Name: "test", Password: "x"}})
+	if err == nil || !strings.Contains(err.Error(), `user "nobody" is not a configured user`) {
 		t.Errorf("Rule error = %v, want an unknown user refused", err)
+	}
+	if !errors.Is(err, ErrInvalidFault) {
+		t.Errorf("Rule error = %v, want ErrInvalidFault", err)
+	}
+}
+
+func TestAnInvalidFaultSaysOnlyWhatIsWrong(t *testing.T) {
+	for _, f := range []Fault{{Preset: "oops"}, {Steps: []string{"remove"}, Do: "explode"}, {Preset: "deletes_fail", User: "nobody"}} {
+		_, _, err := f.Compile(testUsers)
+		if !errors.Is(err, ErrInvalidFault) || strings.Contains(err.Error(), ErrInvalidFault.Error()) {
+			t.Errorf("Compile(%+v) error = %q, want ErrInvalidFault without its text", f, err)
+		}
+	}
+	if _, err := (Fault{Do: "refuse"}).Resolve(); !errors.Is(err, ErrInvalidFault) || err.Error() != "choose at least one step" {
+		t.Errorf("Resolve error = %v, want ErrInvalidFault saying to choose a step", err)
+	}
+}
+
+func TestCompileResolvesAndCompilesTheFault(t *testing.T) {
+	f := Fault{Preset: "slow_responses", Folder: "/in", User: "test"}
+	resolved, rule, err := f.Compile(testUsers)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if want, err := f.Resolve(); err != nil || !reflect.DeepEqual(resolved, want) {
+		t.Errorf("Compile resolves to %+v, want %+v as Resolve gives it", resolved, want)
+	}
+	want, err := f.Rule("r", testUsers)
+	if err != nil {
+		t.Fatalf("Rule: %v", err)
+	}
+	if want.ID = ""; !reflect.DeepEqual(rule, want) {
+		t.Errorf("Compile gives the rule\n%+v\nwant Rule's, without an ID\n%+v", rule, want)
+	}
+}
+
+func TestActionsListWhatAFaultCanDo(t *testing.T) {
+	want := []string{"refuse", "wait", "hold", "drop", "freeze", "stop_partway", "corrupt", "truncate", "wrong_size", "hide", "down"}
+	ids := make([]string, len(Actions))
+	for i, a := range Actions {
+		ids[i] = a.ID
+		if a.Name == "" {
+			t.Errorf("action %s has no name", a.ID)
+		}
+	}
+	if !slices.Equal(ids, want) {
+		t.Errorf("Actions are %v, want %v", ids, want)
 	}
 }

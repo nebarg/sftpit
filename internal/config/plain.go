@@ -96,18 +96,65 @@ type Action struct {
 }
 
 // Actions are what a fault can do, in the order the dashboard offers them.
-var Actions = []Action{
-	{"refuse", "Refuse with an error"},
-	{"wait", "Delay the reply"},
-	{"hold", "Hold the request until released"},
-	{"drop", "Close the connection"},
-	{"freeze", "Stop responding, keeping the connection open"},
-	{"stop_partway", "Stop a transfer partway"},
-	{"corrupt", "Change the data"},
-	{"truncate", "Cut the file short, without an error"},
-	{"wrong_size", "Report the wrong file size"},
-	{"hide", "Answer “no such file”"},
-	{"down", "Take the server offline"},
+var Actions = actionList()
+
+// actionDef is one of Actions with what a fault that does it needs: the
+// settings filled in when it leaves them out, what it can act on, and how
+// it becomes the engine's action.
+type actionDef struct {
+	Action
+
+	// defaults are the settings a fault that does it is given when it
+	// leaves them out.
+	defaults Fault
+
+	// after is set if it can act after the server has done what was asked.
+	after bool
+
+	// atOnce is set if it may have no steps, and then happens at once.
+	atOnce bool
+
+	// stat, if set, are the operations that the step stat stands for, in
+	// place of every way of checking a file.
+	stat []faults.Operation
+
+	// build returns the engine's action for f, which happens at when, at
+	// connecting or logging in if events is set.
+	build func(f Fault, events bool, when sftpproxy.When) (sftpproxy.Action, error)
+}
+
+// actions are the definitions of Actions, in the same order.
+var actions = []actionDef{
+	{Action: Action{"refuse", "Refuse with an error"}, defaults: Fault{Error: "failure"}, after: true, build: Fault.refuse},
+	{Action: Action{"wait", "Delay the reply"}, defaults: Fault{Seconds: new(3.0)}, after: true, build: Fault.wait},
+	{Action: Action{"hold", "Hold the request until released"}, defaults: Fault{Seconds: new(600.0)}, after: true, build: Fault.hold},
+	{Action: Action{"drop", "Close the connection"}, after: true, build: Fault.drop},
+	{Action: Action{"freeze", "Stop responding, keeping the connection open"}, defaults: Fault{Seconds: new(60.0)}, after: true, build: Fault.freeze},
+	{Action: Action{"stop_partway", "Stop a transfer partway"}, defaults: Fault{KB: new(uint64(32))}, build: Fault.stopPartway},
+	{Action: Action{"corrupt", "Change the data"}, build: Fault.corrupt},
+	{Action: Action{"truncate", "Cut the file short, without an error"}, defaults: Fault{KB: new(uint64(32))}, build: Fault.truncate},
+	{Action: Action{"wrong_size", "Report the wrong file size"}, defaults: Fault{SizeOffBy: new(int64(-1024))}, build: Fault.wrongSize},
+	// The proxy hides no file from FSTAT, which checks a file already open.
+	{Action: Action{"hide", "Answer “no such file”"}, stat: []faults.Operation{faults.Stat, faults.LStat}, build: Fault.hide},
+	{Action: Action{"down", "Take the server offline"}, defaults: Fault{Seconds: new(30.0)}, after: true, atOnce: true, build: Fault.down},
+}
+
+func actionList() []Action {
+	list := make([]Action, len(actions))
+	for i, a := range actions {
+		list[i] = a.Action
+	}
+	return list
+}
+
+// actionFor returns the definition of the action do, and whether there is
+// one.
+func actionFor(do string) (actionDef, bool) {
+	i := slices.IndexFunc(actions, func(a actionDef) bool { return a.ID == do })
+	if i < 0 {
+		return actionDef{}, false
+	}
+	return actions[i], true
 }
 
 // Preset is a ready-made fault.
@@ -138,10 +185,65 @@ var Presets = []Preset{
 	{"logins_fail", "Logins fail", "The connection closes just after a successful login.", Fault{Steps: []string{"authenticate"}, Do: "drop"}},
 }
 
+// ErrInvalidFault reports a fault that sftpit cannot inject.
+var ErrInvalidFault = errors.New("invalid fault")
+
+// invalidFaultError says what is wrong with a fault. It is ErrInvalidFault
+// without that sentinel's text, which the dashboard would show.
+type invalidFaultError struct{ error }
+
+func (invalidFaultError) Is(target error) bool { return target == ErrInvalidFault }
+
 // Resolve returns f with its preset's steps, action and defaults filled in,
-// and every setting its action needs, or an error saying what is wrong
-// with it.
+// and every setting its action needs, or an error, which is
+// ErrInvalidFault, saying what is wrong with it.
 func (f Fault) Resolve() (Fault, error) {
+	resolved, _, err := f.resolve()
+	return resolved, err
+}
+
+// Compile returns f resolved, as Resolve gives it, and the engine's rule
+// for it, without an ID. Its user, if it has one, must be one of users. An
+// error, which is ErrInvalidFault, says what is wrong with f.
+func (f Fault) Compile(users []sshfront.User) (Fault, faults.Rule, error) {
+	resolved, r, err := f.resolve()
+	if err != nil {
+		return Fault{}, faults.Rule{}, err
+	}
+	if f.User != "" {
+		if err := checkUser(f.User, users); err != nil {
+			return Fault{}, faults.Rule{}, invalidFaultError{err}
+		}
+	}
+	return resolved, r, nil
+}
+
+// Rule returns the engine's rule for f, with id, as Compile does.
+func (f Fault) Rule(id string, users []sshfront.User) (faults.Rule, error) {
+	_, r, err := f.Compile(users)
+	if err != nil {
+		return faults.Rule{}, err
+	}
+	r.ID = id
+	return r, nil
+}
+
+// resolve returns f resolved and the engine's rule for it, without an ID.
+func (f Fault) resolve() (Fault, faults.Rule, error) {
+	resolved, err := f.fillIn()
+	if err != nil {
+		return Fault{}, faults.Rule{}, invalidFaultError{err}
+	}
+	r, err := resolved.compile()
+	if err != nil {
+		return Fault{}, faults.Rule{}, invalidFaultError{err}
+	}
+	return resolved, r, nil
+}
+
+// fillIn returns f with its preset's steps, action and defaults, and its
+// action's defaults, filled in.
+func (f Fault) fillIn() (Fault, error) {
 	if f.Preset != "" {
 		i := slices.IndexFunc(Presets, func(p Preset) bool { return p.ID == f.Preset })
 		if i < 0 {
@@ -154,31 +256,20 @@ func (f Fault) Resolve() (Fault, error) {
 		}
 		f.Steps, f.Do = p.Fault.Steps, p.Fault.Do
 		f.Name = orDefault(f.Name, p.Name)
-		f.Error = orDefault(f.Error, p.Fault.Error)
-		f.Seconds = orPointer(f.Seconds, p.Fault.Seconds)
-		f.KB = orPointer(f.KB, p.Fault.KB)
+		f = f.withDefaults(p.Fault)
 	}
 	f.Name = orDefault(f.Name, "Custom fault")
-	switch f.Do {
-	case "refuse":
-		f.Error = orDefault(f.Error, "failure")
-	case "wait":
-		f.Seconds = orPointer(f.Seconds, new(3.0))
-	case "freeze":
-		f.Seconds = orPointer(f.Seconds, new(60.0))
-	case "hold":
-		f.Seconds = orPointer(f.Seconds, new(600.0))
-	case "down":
-		f.Seconds = orPointer(f.Seconds, new(30.0))
-	case "stop_partway", "truncate":
-		f.KB = orPointer(f.KB, new(uint64(32)))
-	case "wrong_size":
-		f.SizeOffBy = orPointer(f.SizeOffBy, new(int64(-1024)))
-	}
-	if _, err := f.compile("check"); err != nil {
-		return f, err
-	}
-	return f, nil
+	def, _ := actionFor(f.Do)
+	return f.withDefaults(def.defaults), nil
+}
+
+// withDefaults returns f with the settings it leaves out taken from d.
+func (f Fault) withDefaults(d Fault) Fault {
+	f.Error = orDefault(f.Error, d.Error)
+	f.Seconds = orPointer(f.Seconds, d.Seconds)
+	f.KB = orPointer(f.KB, d.KB)
+	f.SizeOffBy = orPointer(f.SizeOffBy, d.SizeOffBy)
+	return f
 }
 
 func orDefault(s, def string) string {
@@ -195,24 +286,10 @@ func orPointer[T any](p, def *T) *T {
 	return p
 }
 
-// Rule returns the engine's rule for f, with id. Its user, if it has one,
-// must be one of users.
-func (f Fault) Rule(id string, users []sshfront.User) (faults.Rule, error) {
-	resolved, err := f.Resolve()
-	if err != nil {
-		return faults.Rule{}, err
-	}
-	if f.User != "" {
-		if err := checkUser(f.User, users); err != nil {
-			return faults.Rule{}, err
-		}
-	}
-	return resolved.compile(id)
-}
-
-// operations returns the engine's operations for steps, given what the
-// fault does there, or an error naming a step that is not one of Steps.
-func operations(steps []string, do string) ([]faults.Operation, error) {
+// operations returns the engine's operations for steps, with stat standing
+// for the operations stat, if set, or an error naming a step that is not
+// one of Steps.
+func operations(steps []string, stat []faults.Operation) ([]faults.Operation, error) {
 	var ops []faults.Operation
 	for _, step := range steps {
 		if !slices.ContainsFunc(Steps, func(s Step) bool { return s.ID == step }) {
@@ -223,8 +300,8 @@ func operations(steps []string, do string) ([]faults.Operation, error) {
 			return nil, fmt.Errorf("there is no step %q; the steps are %s", step, strings.Join(ids, ", "))
 		}
 		switch {
-		case step == "stat" && do == "hide":
-			ops = append(ops, faults.Stat, faults.LStat)
+		case step == "stat" && stat != nil:
+			ops = append(ops, stat...)
 		case step == "stat":
 			ops = append(ops, faults.Stat, faults.LStat, faults.FStat)
 		default:
@@ -266,10 +343,10 @@ var errorCodes = map[string]sftpwire.StatusCode{
 	"unsupported":       sftpwire.StatusOpUnsupported,
 }
 
-// compile returns f, resolved, as the engine's rule with id, or an error
-// saying what is wrong with it.
-func (f Fault) compile(id string) (faults.Rule, error) {
-	r := faults.Rule{ID: id, Match: faults.Match{User: f.User}}
+// compile returns f, resolved, as the engine's rule, without an ID, or an
+// error saying what is wrong with it.
+func (f Fault) compile() (faults.Rule, error) {
+	r := faults.Rule{Match: faults.Match{User: f.User}}
 	switch n := countSet(f.Folder != "", f.File != "", f.Names != ""); {
 	case n > 1:
 		return r, errors.New("choose one of folder, file and names")
@@ -290,23 +367,31 @@ func (f Fault) compile(id string) (faults.Rule, error) {
 	if f.Do == "" {
 		return r, errors.New("say what to do, or choose a preset")
 	}
-	if len(f.Steps) == 0 && f.Do != "down" {
+	def, known := actionFor(f.Do)
+	if len(f.Steps) == 0 && !def.atOnce {
 		return r, errors.New("choose at least one step")
 	}
 	var err error
-	if r.Match.Operations, err = operations(f.Steps, f.Do); err != nil {
+	if r.Match.Operations, err = operations(f.Steps, def.stat); err != nil {
 		return r, err
 	}
-	if f.After && !slices.Contains([]string{"refuse", "wait", "hold", "drop", "freeze", "down"}, f.Do) {
+	if f.After && !def.after {
 		return r, fmt.Errorf("%s can't act after the server has done what was asked", f.Do)
 	}
 	if events && f.After {
 		return r, errors.New("connecting and logging in have no before or after")
 	}
-	if r.Action, err = f.action(events); err != nil {
+	if !known {
+		return r, fmt.Errorf("there is nothing to do called %q", f.Do)
+	}
+	when := sftpproxy.Before
+	if f.After {
+		when = sftpproxy.After
+	}
+	if r.Action, err = def.build(f, events, when); err != nil {
 		return r, err
 	}
-	if f.Do == "down" && len(f.Steps) == 0 {
+	if def.atOnce && len(f.Steps) == 0 {
 		if f.After || f.Folder != "" || f.File != "" || f.Names != "" {
 			return r, errors.New("a server that goes down at once has no files or before and after; choose steps to take it down at one of them")
 		}
@@ -318,88 +403,98 @@ func (f Fault) compile(id string) (faults.Rule, error) {
 	return r, nil
 }
 
-// action returns what f does, at connecting or logging in if events is
-// set, which have no before or after.
-func (f Fault) action(events bool) (sftpproxy.Action, error) {
-	when := sftpproxy.Before
-	if f.After {
-		when = sftpproxy.After
+func (f Fault) refuse(events bool, when sftpproxy.When) (sftpproxy.Action, error) {
+	if events {
+		return nil, errors.New("connecting and logging in can't be refused with an error; drop the connection instead")
 	}
-	switch f.Do {
-	case "refuse":
-		if events {
-			return nil, errors.New("connecting and logging in can't be refused with an error; drop the connection instead")
+	code, err := errorCode(f.Error)
+	return sftpproxy.Fail{When: when, Status: code}, err
+}
+
+func (f Fault) wait(_ bool, when sftpproxy.When) (sftpproxy.Action, error) {
+	d, err := seconds(f.Seconds)
+	return sftpproxy.Delay{When: when, Duration: d}, err
+}
+
+func (f Fault) hold(events bool, when sftpproxy.When) (sftpproxy.Action, error) {
+	if events {
+		return nil, errors.New("connecting and logging in can't be held; wait or freeze instead")
+	}
+	d, err := seconds(f.Seconds)
+	return sftpproxy.Stall{When: when, Limit: d}, err
+}
+
+func (f Fault) drop(_ bool, when sftpproxy.When) (sftpproxy.Action, error) {
+	return sftpproxy.Drop{When: when, Reset: f.Abrupt}, nil
+}
+
+func (f Fault) freeze(_ bool, when sftpproxy.When) (sftpproxy.Action, error) {
+	d, err := seconds(f.Seconds)
+	return sftpproxy.Freeze{When: when, Limit: d}, err
+}
+
+func (f Fault) stopPartway(bool, sftpproxy.When) (sftpproxy.Action, error) {
+	if err := transferStep(f.Steps, "stopping partway"); err != nil {
+		return nil, err
+	}
+	cutoff := *f.KB * 1024
+	var result sftpproxy.Action = sftpproxy.Drop{Reset: f.Abrupt}
+	if f.Error != "" {
+		if f.Abrupt {
+			return nil, errors.New("a transfer stopped partway either answers with an error or closes the connection abruptly, not both")
 		}
 		code, err := errorCode(f.Error)
-		return sftpproxy.Fail{When: when, Status: code}, err
-	case "wait":
-		d, err := seconds(f.Seconds)
-		return sftpproxy.Delay{When: when, Duration: d}, err
-	case "hold":
-		if events {
-			return nil, errors.New("connecting and logging in can't be held; wait or freeze instead")
-		}
-		d, err := seconds(f.Seconds)
-		return sftpproxy.Stall{When: when, Limit: d}, err
-	case "drop":
-		return sftpproxy.Drop{When: when, Reset: f.Abrupt}, nil
-	case "freeze":
-		d, err := seconds(f.Seconds)
-		return sftpproxy.Freeze{When: when, Limit: d}, err
-	case "stop_partway":
-		if err := transferStep(f.Steps, "stopping partway"); err != nil {
+		if err != nil {
 			return nil, err
 		}
-		cutoff := *f.KB * 1024
-		var result sftpproxy.Action = sftpproxy.Drop{Reset: f.Abrupt}
-		if f.Error != "" {
-			if f.Abrupt {
-				return nil, errors.New("a transfer stopped partway either answers with an error or closes the connection abruptly, not both")
-			}
-			code, err := errorCode(f.Error)
-			if err != nil {
-				return nil, err
-			}
-			result = sftpproxy.Fail{Status: code}
-		}
-		if f.Steps[0] == "write" {
-			return sftpproxy.PartialUpload{Cutoff: cutoff, Result: result}, nil
-		}
-		return sftpproxy.PartialDownload{Cutoff: cutoff, Result: result}, nil
-	case "corrupt":
-		if err := transferStep(f.Steps, "corrupting data"); err != nil {
-			return nil, err
-		}
-		if f.Steps[0] == "write" {
-			return sftpproxy.CorruptUpload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
-		}
-		return sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
-	case "truncate":
-		if err := transferStep(f.Steps, "cutting a file short"); err != nil {
-			return nil, err
-		}
-		if f.Steps[0] == "write" {
-			return sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
-		}
-		return sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
-	case "wrong_size":
-		if err := onlySteps(f.Steps, "a wrong size", "stat", "list"); err != nil {
-			return nil, err
-		}
-		if *f.SizeOffBy == 0 {
-			return nil, errors.New("size_off_by can't be 0")
-		}
-		return sftpproxy.WrongSize{Delta: *f.SizeOffBy}, nil
-	case "hide":
-		if err := onlySteps(f.Steps, "hiding a file", "open_read", "stat", "list", "remove", "rename"); err != nil {
-			return nil, err
-		}
-		return sftpproxy.Hide{}, nil
-	case "down":
-		d, err := seconds(f.Seconds)
-		return sftpproxy.ListenerDown{When: when, Duration: d, CloseExisting: true}, err
+		result = sftpproxy.Fail{Status: code}
 	}
-	return nil, fmt.Errorf("there is nothing to do called %q", f.Do)
+	if f.Steps[0] == "write" {
+		return sftpproxy.PartialUpload{Cutoff: cutoff, Result: result}, nil
+	}
+	return sftpproxy.PartialDownload{Cutoff: cutoff, Result: result}, nil
+}
+
+func (f Fault) corrupt(bool, sftpproxy.When) (sftpproxy.Action, error) {
+	if err := transferStep(f.Steps, "corrupting data"); err != nil {
+		return nil, err
+	}
+	if f.Steps[0] == "write" {
+		return sftpproxy.CorruptUpload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
+	}
+	return sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Length: 64}, nil
+}
+
+func (f Fault) truncate(bool, sftpproxy.When) (sftpproxy.Action, error) {
+	if err := transferStep(f.Steps, "cutting a file short"); err != nil {
+		return nil, err
+	}
+	if f.Steps[0] == "write" {
+		return sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
+	}
+	return sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
+}
+
+func (f Fault) wrongSize(bool, sftpproxy.When) (sftpproxy.Action, error) {
+	if err := onlySteps(f.Steps, "a wrong size", "stat", "list"); err != nil {
+		return nil, err
+	}
+	if *f.SizeOffBy == 0 {
+		return nil, errors.New("size_off_by can't be 0")
+	}
+	return sftpproxy.WrongSize{Delta: *f.SizeOffBy}, nil
+}
+
+func (f Fault) hide(bool, sftpproxy.When) (sftpproxy.Action, error) {
+	if err := onlySteps(f.Steps, "hiding a file", "open_read", "stat", "list", "remove", "rename"); err != nil {
+		return nil, err
+	}
+	return sftpproxy.Hide{}, nil
+}
+
+func (f Fault) down(_ bool, when sftpproxy.When) (sftpproxy.Action, error) {
+	d, err := seconds(f.Seconds)
+	return sftpproxy.ListenerDown{When: when, Duration: d, CloseExisting: true}, err
 }
 
 // often narrows r to how often f happens.

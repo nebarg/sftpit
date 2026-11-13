@@ -59,12 +59,6 @@ func (a *api) addFault(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &spec) {
 		return
 	}
-	// A fault that can never work is the caller's mistake, whatever the
-	// run is doing.
-	if _, err := spec.Rule("check", a.runs.Users()); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
 	f, err := a.runs.AddFault(spec)
 	if err != nil {
 		writeError(w, statusFor(err), err)

@@ -114,9 +114,14 @@ func TestAFaultThatCannotWorkChangesNothing(t *testing.T) {
 	m, _ := startManager(t, Options{})
 	if _, err := m.AddFault(config.Fault{Preset: "deletes_fail", User: "nobody"}); err == nil {
 		t.Fatal("AddFault succeeded for an unknown user")
+	} else if !errors.Is(err, config.ErrInvalidFault) {
+		t.Errorf("AddFault for an unknown user = %v, want ErrInvalidFault", err)
 	}
 	if s := m.Status(); s.Revision != 1 || len(m.Faults()) != 0 {
 		t.Errorf("after a refused fault, revision %d and faults %+v, want nothing changed", s.Revision, m.Faults())
+	}
+	if f, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); err != nil || f.ID != "deletes-fail-1" {
+		t.Errorf("AddFault after a refused fault = %q, %v; want deletes-fail-1, its number not taken", f.ID, err)
 	}
 }
 

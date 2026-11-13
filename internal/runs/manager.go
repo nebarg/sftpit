@@ -238,10 +238,6 @@ func (m *Manager) Events() *events.Recorder {
 	return m.active().events
 }
 
-// Users returns the users that the Manager's server accepts, which rules
-// may refer to.
-func (m *Manager) Users() []sshfront.User { return m.opts.Server.Users }
-
 // restart ends current's timers and connections, and begins the next run
 // once every session of current has finished.
 func (m *Manager) restart(ctx context.Context, current *activeRun) (*activeRun, error) {

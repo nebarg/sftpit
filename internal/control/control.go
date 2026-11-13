@@ -86,7 +86,7 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, config.ErrFixedScenario):
 		return http.StatusConflict
-	case errors.Is(err, config.ErrInvalidScenario):
+	case errors.Is(err, config.ErrInvalidScenario), errors.Is(err, config.ErrInvalidFault):
 		return http.StatusBadRequest
 	case errors.Is(err, runs.ErrUnknownFault), errors.Is(err, config.ErrUnknownScenario):
 		return http.StatusNotFound
