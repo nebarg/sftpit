@@ -10,7 +10,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
@@ -28,11 +27,8 @@ func TestFaultsAtConnectEndWithTheHandshake(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, addr := startManager(t, Options{
-				Server:    sshfront.Config{HandshakeTimeout: 300 * time.Millisecond},
-				Scenarios: map[string]config.Scenario{"connect": {Rules: []faults.Rule{connectRule(tt.action)}}},
-				Scenario:  "connect",
-			})
+			m, addr := startManager(t, Options{Server: sshfront.Config{HandshakeTimeout: 300 * time.Millisecond}})
+			withRules(t, m, connectRule(tt.action))
 			raw, err := net.Dial("tcp", addr)
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
@@ -50,11 +46,8 @@ func TestFaultsAtConnectEndWithTheHandshake(t *testing.T) {
 
 func TestShutdownDuringAFreezeIsNoFailure(t *testing.T) {
 	logs := make(messages, 64)
-	m, addr := startManager(t, Options{
-		Scenarios: map[string]config.Scenario{"connect": {Rules: []faults.Rule{connectRule(sftpproxy.Freeze{Limit: time.Minute})}}},
-		Scenario:  "connect",
-		Logger:    slog.New(logs),
-	})
+	m, addr := startManager(t, Options{Logger: slog.New(logs)})
+	withRules(t, m, connectRule(sftpproxy.Freeze{Limit: time.Minute}))
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -91,7 +84,7 @@ func TestArmTimersStartsNoOutageOnceStopped(t *testing.T) {
 	moment := &faults.Range[time.Duration]{Min: time.Millisecond, Max: time.Millisecond}
 	outage := faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: moment}, Action: sftpproxy.ListenerDown{Duration: time.Minute}}
 	for attempt := range 300 {
-		rules, err := faults.New([]faults.Rule{outage}, nil, 0, faults.Options{Logger: logger})
+		rules, err := faults.New([]faults.Rule{outage}, 0, faults.Options{Logger: logger})
 		if err != nil {
 			t.Fatalf("faults.New: %v", err)
 		}

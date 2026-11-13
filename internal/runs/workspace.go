@@ -210,35 +210,24 @@ type Run struct {
 	// Started is when the run started.
 	Started time.Time
 
-	Scenario Scenario
-}
-
-// Scenario is the scenario whose faults a run starts with.
-type Scenario struct {
-	// Name names the scenario, or is "" for a run that starts without
-	// faults.
-	Name string
-
-	// Seed fixes the run's random decisions, those of rules applied during
-	// the run included. Each run draws its own.
+	// Seed fixes the run's random decisions. Each run draws its own.
 	Seed faults.Seed
 }
 
 // runRecord is the content of a run's run.json.
 type runRecord struct {
-	ID       string      `json:"id"`
-	Started  time.Time   `json:"started"`
-	Scenario string      `json:"scenario,omitempty"`
-	Seed     faults.Seed `json:"seed"`
+	ID      string      `json:"id"`
+	Started time.Time   `json:"started"`
+	Seed    faults.Seed `json:"seed"`
 }
 
 // runIDPattern matches the IDs NewRun gives. They sort in the order the
 // runs started.
 var runIDPattern = regexp.MustCompile(`^\d{8}-\d{6}\.\d{3}-[0-9a-f]{4}$`)
 
-// NewRun starts a run of scenario with no files, and deletes the oldest runs
-// so that the workspace keeps the newest five.
-func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
+// NewRun starts a run with no files, whose random decisions seed fixes, and
+// deletes the oldest runs so that the workspace keeps the newest five.
+func (w *Workspace) NewRun(seed faults.Seed) (*Run, error) {
 	started := time.Now().UTC()
 	suffix := make([]byte, 2)
 	rand.Read(suffix)
@@ -249,7 +238,7 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 	if err := w.root.MkdirAll(path.Join(rel, "fs"), 0o700); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
-	record := runRecord{ID: id, Started: started, Scenario: scenario.Name, Seed: scenario.Seed}
+	record := runRecord{ID: id, Started: started, Seed: seed}
 	if err := writeJSON(w.root, path.Join(rel, "run.json"), record); err != nil {
 		return nil, fmt.Errorf("runs: create run: %w", err)
 	}
@@ -257,7 +246,7 @@ func (w *Workspace) NewRun(scenario Scenario) (*Run, error) {
 		return nil, err
 	}
 	dir := filepath.Join(w.dir, filepath.FromSlash(rel))
-	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Scenario: scenario}, nil
+	return &Run{ID: id, Dir: dir, Files: filepath.Join(dir, "fs"), Started: started, Seed: seed}, nil
 }
 
 // openRun opens sub, a directory of the run id, which must be one of the

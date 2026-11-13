@@ -26,10 +26,6 @@ var (
 	// longer current.
 	ErrStaleRun = errors.New("stale run")
 
-	// ErrUnknownScenario reports a reset to a scenario that neither the
-	// configuration nor a scenario file defines.
-	ErrUnknownScenario = errors.New("unknown scenario")
-
 	// ErrUnknownRun reports a run that is neither current nor among the
 	// recent runs whose events the Manager keeps.
 	ErrUnknownRun = errors.New("unknown run")
@@ -59,15 +55,11 @@ type Options struct {
 	// Policy is what clients may do, whatever faults a run injects.
 	Policy config.Policy
 
-	// Scenarios are the scenarios whose faults a run can inject, by name.
-	Scenarios map[string]config.Scenario
+	// Scenarios are the scenarios that can be turned on in a run.
+	Scenarios *config.Scenarios
 
-	// ScenarioFiles, if set, are more scenarios a run can inject the faults
-	// of, each read from its file when a run starts.
-	ScenarioFiles *config.ScenarioFiles
-
-	// Scenario names the first run's scenario, or is "" for a run without
-	// faults.
+	// Scenario names the scenario turned on in the first run, or is "" for
+	// none.
 	Scenario string
 
 	// Logger receives what the runs log. Nil means slog.Default().
@@ -157,15 +149,15 @@ func Start(w *Workspace, opts Options) (*Manager, error) {
 	if m.srv, err = sshfront.New(cfg); err != nil {
 		return nil, err
 	}
-	first, err := m.scenario(opts.Scenario)
-	if err != nil {
-		return nil, err
-	}
-	if m.current, err = m.begin(first); err != nil {
+	if m.current, err = m.begin(); err != nil {
 		return nil, err
 	}
 	m.keep(m.current)
-	m.current.stops = append(m.current.stops, armTimers(m.current.rules.Timers(), m.srv, logger, m.current.events.Record))
+	if opts.Scenario != "" {
+		if _, err := m.SwitchScenario(opts.Scenario, true); err != nil {
+			return nil, errors.Join(err, m.Close())
+		}
+	}
 	return m, nil
 }
 
@@ -188,43 +180,29 @@ func (m *Manager) Close() error {
 	return err
 }
 
-// ResetRequest chooses the run that a reset starts.
-type ResetRequest struct {
-	// Scenario, if set, names the next run's scenario, or is "" for a run
-	// without faults. If it is not set, the next run repeats the current
-	// run's scenario.
-	Scenario *string
-}
-
-// Reset ends the current run and starts the run that req chooses. It first
+// Reset ends the current run and starts the next, with no faults. It first
 // closes admission and ends every connection, as sshfront.Server.Pause
 // does, along with the run's timers, and waits until every session has
 // finished, so that no client of the run can still change its files, or
 // until ctx is done. The next run's files are restored from the seed
-// snapshot, its counters start from zero and its timers count from its
-// start, so an outage at its start begins before it admits a client. Reset
-// returns the status of the run it started, as Status gives it, before
+// snapshot. Reset returns the status of the run it started, as Status gives it, before
 // another reset can start. If anything fails once admission is closed,
 // admission stays closed and Status reports the run unavailable until a
 // reset succeeds. A reset that begins after Close has been called, or that
 // is still waiting for sessions when it is called, fails with an error
 // wrapping sshfront.ErrServerClosed.
-func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
+func (m *Manager) Reset(ctx context.Context) (Status, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
 	if m.closed {
 		return Status{}, fmt.Errorf("runs: reset: %w", sshfront.ErrServerClosed)
 	}
 	current := m.active()
-	chosen, err := m.next(current, req)
-	if err != nil {
-		return Status{}, err
-	}
 
 	m.mu.Lock()
 	m.inReset = true
 	m.mu.Unlock()
-	next, err := m.restart(ctx, current, chosen)
+	next, err := m.restart(ctx, current)
 	m.mu.Lock()
 	m.inReset = false
 	if err != nil {
@@ -246,11 +224,8 @@ func (m *Manager) Reset(ctx context.Context, req ResetRequest) (Status, error) {
 	if err := current.root.Close(); err != nil {
 		m.logger.Warn("closing the files of the previous run failed", "run", current.run.ID, "err", err)
 	}
-	// An outage at the start of the run begins before any client is
-	// admitted.
-	next.stops = append(next.stops, armTimers(next.rules.Timers(), m.srv, m.logger, next.events.Record))
 	m.srv.Resume()
-	m.logger.Info("reset", append([]any{"run", next.run.ID}, scenarioAttrs(chosen.scenario)...)...)
+	m.logger.Info("reset", "run", next.run.ID)
 	return m.Status(), nil
 }
 
@@ -265,14 +240,14 @@ func (m *Manager) Rules(run string) (faults.RuleSet, error) {
 }
 
 // changeRules replaces the rules of run, which must be the current run, with
-// rules, and its chaos with chaos, as faults.Engine.Replace does if revision
+// rules, as faults.Engine.Replace does if revision
 // is still the current revision, and returns the new rules. It fails with
 // ErrStaleRun for another run, with faults.ErrStaleRevision for another
 // revision, and once Close has returned, with an error wrapping
 // sshfront.ErrServerClosed. The run takes the listener down at the moments
 // of the rules that start afresh, as it does at those of the rules it
 // started with.
-func (m *Manager) changeRules(run string, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
+func (m *Manager) changeRules(run string, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
 	if m.closed {
@@ -282,24 +257,19 @@ func (m *Manager) changeRules(run string, revision uint64, rules []faults.Rule, 
 	if run != current.run.ID {
 		return faults.RuleSet{}, staleRun(current, run)
 	}
-	return m.replaceRules(current, revision, rules, chaos)
+	return m.replaceRules(current, revision, rules)
 }
 
-// replaceRules replaces the rules and chaos of current, the current run, as
+// replaceRules replaces the rules of current, the current run, as
 // changeRules does. The caller holds resetting.
-func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule, chaos *faults.Chaos) (faults.RuleSet, error) {
-	run := current.run.ID
-	timers, err := current.rules.Replace(revision, rules, chaos)
+func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
+	timers, err := current.rules.Replace(revision, rules)
 	if err != nil {
 		return faults.RuleSet{}, err
 	}
 	current.stops = append(current.stops, armTimers(timers, m.srv, m.logger, current.events.Record))
 	set := current.rules.Rules()
-	if changed, err := rulesOf(set, revision); err != nil {
-		m.logger.Warn("recording the change of rules failed", "run", run, "err", err)
-	} else {
-		current.events.Record(events.Event{Kind: events.RulesChanged, Rules: changed})
-	}
+	current.events.Record(events.Event{Kind: events.RulesChanged, Rules: &events.Rules{Revision: set.Revision, Previous: revision}})
 	return set, nil
 }
 
@@ -339,17 +309,6 @@ func (m *Manager) keep(a *activeRun) {
 	}
 }
 
-// rulesOf describes set, the rules of a run, which replaced the revision
-// previous, if any, for an event.
-func rulesOf(set faults.RuleSet, previous uint64) (*events.Rules, error) {
-	r := &events.Rules{Revision: set.Revision, Previous: previous}
-	var err error
-	if r.Faults, err = config.RulesJSON(set.Rules); err == nil && set.Chaos != nil {
-		r.Chaos, err = config.ChaosJSON(set.Chaos)
-	}
-	return r, err
-}
-
 // Users returns the users that the Manager's server accepts, which rules
 // may refer to.
 func (m *Manager) Users() []sshfront.User { return m.opts.Server.Users }
@@ -358,14 +317,14 @@ func staleRun(current *activeRun, run string) error {
 	return fmt.Errorf("runs: %w: the current run is %s, not %s", ErrStaleRun, current.run.ID, run)
 }
 
-// restart ends current's timers and connections, and begins the chosen run
+// restart ends current's timers and connections, and begins the next run
 // once every session of current has finished.
-func (m *Manager) restart(ctx context.Context, current *activeRun, chosen choice) (*activeRun, error) {
+func (m *Manager) restart(ctx context.Context, current *activeRun) (*activeRun, error) {
 	current.stopTimers()
 	if err := m.srv.Pause(ctx); err != nil {
 		return nil, fmt.Errorf("runs: wait for the run's sessions to finish: %w", err)
 	}
-	return m.begin(chosen)
+	return m.begin()
 }
 
 // State says whether clients can reach the current run.
@@ -423,40 +382,11 @@ func (m *Manager) Status() Status {
 	return s
 }
 
-// choice is the scenario chosen for a run, with the rules and chaos it
-// starts with.
-type choice struct {
-	scenario Scenario
-	rules    []faults.Rule
-	chaos    *faults.Chaos
-}
-
-// next chooses the scenario of the run after current, as req asks.
-func (m *Manager) next(current *activeRun, req ResetRequest) (choice, error) {
-	if req.Scenario != nil {
-		return m.scenario(*req.Scenario)
-	}
-	return m.scenario(current.run.Scenario.Name)
-}
-
-// scenario chooses a run of the scenario name, or of none if name is "".
-// Every run draws a fresh seed for its random decisions.
-func (m *Manager) scenario(name string) (choice, error) {
-	if name == "" {
-		return choice{scenario: Scenario{Seed: faults.RandomSeed()}}, nil
-	}
-	s, err := m.named(name)
-	if err != nil {
-		return choice{}, err
-	}
-	return choice{scenario: Scenario{Name: name, Seed: faults.RandomSeed()}, rules: s.Rules, chaos: s.Chaos}, nil
-}
-
-// begin starts the chosen run in the workspace, with its files restored
-// from the seed snapshot and a home directory for each user. Its timers are
-// not armed yet.
-func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
-	run, err := m.workspace.NewRun(chosen.scenario)
+// begin starts a run in the workspace, with no faults, its files restored
+// from the seed snapshot and a home directory for each user. Each run draws
+// a fresh seed for its random decisions.
+func (m *Manager) begin() (_ *activeRun, err error) {
+	run, err := m.workspace.NewRun(faults.RandomSeed())
 	if err != nil {
 		return nil, err
 	}
@@ -484,19 +414,12 @@ func (m *Manager) begin(chosen choice) (_ *activeRun, err error) {
 		}
 	}
 
-	// A run without a scenario has an engine too, for rules applied to it
-	// later.
 	rec := events.NewRecorder(run.Started, maxEvents)
-	rules, err := faults.New(chosen.rules, chosen.chaos, chosen.scenario.Seed, faults.Options{Logger: m.logger, Record: rec.Record})
+	rules, err := faults.New(nil, run.Seed, faults.Options{Logger: m.logger, Record: rec.Record})
 	if err != nil {
 		return nil, err
 	}
-	started, err := rulesOf(rules.Rules(), 0)
-	if err != nil {
-		return nil, err
-	}
-	s := chosen.scenario
-	rec.Record(events.Event{Kind: events.RunStarted, Run: &events.Run{ID: run.ID, Scenario: s.Name, Seed: strconv.FormatUint(uint64(s.Seed), 10)}, Rules: started})
+	rec.Record(events.Event{Kind: events.RunStarted, Run: &events.Run{ID: run.ID, Seed: strconv.FormatUint(uint64(run.Seed), 10)}, Rules: &events.Rules{Revision: rules.Revision()}})
 	return &activeRun{
 		run:     run,
 		root:    root,
@@ -532,12 +455,4 @@ func (m *Manager) hooks() sshfront.Hooks {
 			m.active().hooks.Disconnect(conn)
 		},
 	}
-}
-
-// scenarioAttrs are the log attributes of a run of scenario.
-func scenarioAttrs(scenario Scenario) []any {
-	if scenario.Name == "" {
-		return nil
-	}
-	return []any{"scenario", scenario.Name}
 }

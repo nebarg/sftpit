@@ -1,329 +1,293 @@
 package config
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
-	"golang.org/x/crypto/ssh"
-
-	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
-	"github.com/nebarg/sftpit/internal/sftpwire"
 	"github.com/nebarg/sftpit/internal/testutil"
 )
 
-func TestLoadReadsTheSelectedScenariosRules(t *testing.T) {
-	dir := t.TempDir()
-	key := writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	cfg, err := loadScenarios(t, dir, `  upload-recovery:
-    faults:
-      - id: first-upload-cutoff
-        priority: 10
-        match:
-          user: test
-          operation: write
-          path: /incoming/orders.csv.part
-          attempt:
-            per: [user, path]
-            numbers: [1]
-        action:
-          type: partial_upload
-          cutoff_offset: 1048576
-          result: status
-          status: failure
-      - id: lost-publish-reply
-        max_triggers: 1
-        match:
-          operation: rename
-          source: /incoming/orders.csv.part
-          target_glob: /incoming/*.csv
-        action: {type: close_connection, when: after, mode: rst}
-      - id: partner-b-orders
-        match:
-          key_fingerprint: `+ssh.FingerprintSHA256(key)+`
-          operation: read
-          filename: orders.csv
-        action: {type: corrupt_download, transform: flip_bytes, offset: 0, length: 64}
-      - id: slow-listing
-        match: {operation: [stat, list], path_prefix: /outgoing, occurrence: [2, 3]}
-        action: {type: delay, when: before, duration: 1500ms}
-      - id: short-size
-        match: {operation: list, filename_glob: "*.csv"}
-        action: {type: wrong_size, size_delta: -1024}
-      - id: dead-reply
-        match: {operation: any, path_glob: /dead/*}
-        action: {type: freeze_connection, when: before, max_freeze: 2m}
-      - id: cut-and-close
-        match: {operation: write, path: /in/b.csv}
-        action: {type: partial_upload, cutoff_offset: 0, result: close_connection, mode: rst}
-      - id: cut-and-freeze
-        match: {operation: write, path: /in/c.csv, attempt: {numbers: [2]}}
-        action: {type: partial_upload, cutoff_offset: 10, result: freeze_connection, max_freeze: 30s}
-      - id: slow-stat
-        match: {operation: stat}
-        decision: {probability: 0.05}
-        action: {type: delay, when: before, duration: {min: 200ms, max: 3s}}
-      - id: flaky-upload
-        match: {operation: write, path_prefix: /in}
-        decision: {scope: transfer, probability: 0.25}
-        action: {type: partial_upload, cutoff_offset: {min: 65536, max: 1048576}, result: close_connection, mode: rst}
-      - id: failed-opens
-        match: {operation: [open_read, open_write]}
-        decision: {scope: transfer, probability: 1}
-        action: {type: fail, when: before, status: failure}
-      - id: never
-        match: {operation: remove}
-        decision: {scope: operation, probability: 0}
-        action: {type: fail, when: after, status: failure}
-      - id: stuck-open
-        match: {operation: open_read}
-        action: {type: stall, when: before, max_stall: 30s}
-      - id: stuck-reply
-        match: {operation: rename}
-        action: {type: stall, when: after, max_stall: 1m}
-  other:
-    faults:
-      - id: deny
-        match: {operation: remove}
-        action: {type: fail, when: before, status: permission_denied}
-`, "upload-recovery")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	want := []faults.Rule{
-		{
-			ID:       "first-upload-cutoff",
-			Priority: 10,
-			Match: faults.Match{
-				User:       "test",
-				Operations: []faults.Operation{faults.Write},
-				Path:       faults.Location{Kind: faults.Exactly, Pattern: "/incoming/orders.csv.part"},
-				Attempt:    &faults.Attempt{PerUser: true, PerPath: true, Numbers: []uint64{1}},
-			},
-			Action: sftpproxy.PartialUpload{Cutoff: 1 << 20, Result: sftpproxy.Fail{Status: sftpwire.StatusFailure}},
-		},
-		{
-			ID:          "lost-publish-reply",
-			MaxTriggers: 1,
-			Match: faults.Match{
-				Operations: []faults.Operation{faults.Rename},
-				Path:       faults.Location{Kind: faults.Exactly, Pattern: "/incoming/orders.csv.part"},
-				Target:     faults.Location{Kind: faults.Glob, Pattern: "/incoming/*.csv"},
-			},
-			Action: sftpproxy.Drop{When: sftpproxy.After, Reset: true},
-		},
-		{
-			ID: "partner-b-orders",
-			Match: faults.Match{
-				KeyFingerprint: ssh.FingerprintSHA256(key),
-				Operations:     []faults.Operation{faults.Read},
-				Path:           faults.Location{Kind: faults.Named, Pattern: "orders.csv"},
-			},
-			Action: sftpproxy.CorruptDownload{Corruption: sftpproxy.FlipBytes, Offset: 0, Length: 64},
-		},
-		{
-			ID: "slow-listing",
-			Match: faults.Match{
-				Operations: []faults.Operation{faults.Stat, faults.List},
-				Path:       faults.Location{Kind: faults.Under, Pattern: "/outgoing"},
-				Occurrence: []uint64{2, 3},
-			},
-			Action: sftpproxy.Delay{When: sftpproxy.Before, Duration: 1500 * time.Millisecond},
-		},
-		{
-			ID:     "short-size",
-			Match:  faults.Match{Operations: []faults.Operation{faults.List}, Path: faults.Location{Kind: faults.NamedGlob, Pattern: "*.csv"}},
-			Action: sftpproxy.WrongSize{Delta: -1024},
-		},
-		{
-			ID:     "dead-reply",
-			Match:  faults.Match{Operations: []faults.Operation{faults.Any}, Path: faults.Location{Kind: faults.Glob, Pattern: "/dead/*"}},
-			Action: sftpproxy.Freeze{When: sftpproxy.Before, Limit: 2 * time.Minute},
-		},
-		{
-			ID:     "cut-and-close",
-			Match:  faults.Match{Operations: []faults.Operation{faults.Write}, Path: faults.Location{Kind: faults.Exactly, Pattern: "/in/b.csv"}},
-			Action: sftpproxy.PartialUpload{Cutoff: 0, Result: sftpproxy.Drop{Reset: true}},
-		},
-		{
-			ID: "cut-and-freeze",
-			Match: faults.Match{
-				Operations: []faults.Operation{faults.Write},
-				Path:       faults.Location{Kind: faults.Exactly, Pattern: "/in/c.csv"},
-				// Attempts count per user and path unless per says otherwise.
-				Attempt: &faults.Attempt{PerUser: true, PerPath: true, Numbers: []uint64{2}},
-			},
-			Action: sftpproxy.PartialUpload{Cutoff: 10, Result: sftpproxy.Freeze{Limit: 30 * time.Second}},
-		},
-		{
-			ID:          "slow-stat",
-			Match:       faults.Match{Operations: []faults.Operation{faults.Stat}},
-			Probability: new(0.05),
-			Duration:    &faults.Range[time.Duration]{Min: 200 * time.Millisecond, Max: 3 * time.Second},
-			Action:      sftpproxy.Delay{When: sftpproxy.Before},
-		},
-		{
-			ID:          "flaky-upload",
-			Match:       faults.Match{Operations: []faults.Operation{faults.Write}, Path: faults.Location{Kind: faults.Under, Pattern: "/in"}},
-			Probability: new(0.25),
-			Cutoff:      &faults.Range[uint64]{Min: 65536, Max: 1048576},
-			Action:      sftpproxy.PartialUpload{Result: sftpproxy.Drop{Reset: true}},
-		},
-		{
-			ID:          "failed-opens",
-			Match:       faults.Match{Operations: []faults.Operation{faults.OpenRead, faults.OpenWrite}},
-			Probability: new(1.0),
-			Action:      sftpproxy.Fail{When: sftpproxy.Before, Status: sftpwire.StatusFailure},
-		},
-		{
-			ID:          "never",
-			Match:       faults.Match{Operations: []faults.Operation{faults.Remove}},
-			Probability: new(0.0),
-			Action:      sftpproxy.Fail{When: sftpproxy.After, Status: sftpwire.StatusFailure},
-		},
-		{
-			ID:     "stuck-open",
-			Match:  faults.Match{Operations: []faults.Operation{faults.OpenRead}},
-			Action: sftpproxy.Stall{When: sftpproxy.Before, Limit: 30 * time.Second},
-		},
-		{
-			ID:     "stuck-reply",
-			Match:  faults.Match{Operations: []faults.Operation{faults.Rename}},
-			Action: sftpproxy.Stall{When: sftpproxy.After, Limit: time.Minute},
-		},
-	}
-	if cfg.Scenario != "upload-recovery" || !reflect.DeepEqual(cfg.Chosen().Rules, want) {
-		t.Errorf("scenario %q has rules\n%+v\nwant\n%+v", cfg.Scenario, cfg.Chosen().Rules, want)
+// deletesFail is a scenario file's content with one fault.
+const deletesFail = "schema_version: 1\nfaults:\n  - preset: deletes_fail\n"
+
+func TestEveryBuiltInScenarioCanBeTurnedOn(t *testing.T) {
+	for name, sc := range builtIn {
+		if err := checkScenarioName(name); err != nil {
+			t.Errorf("built-in scenario %s: %v", name, err)
+		}
+		if err := sc.check(testUsers); err != nil {
+			t.Errorf("built-in scenario %s: %v", name, err)
+		}
 	}
 }
 
-func TestLoadChecksEveryScenarioButInjectsOnlyTheSelectedOne(t *testing.T) {
+func TestLoadReadsScenariosOfPlainFaults(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	valid := `  valid:
+	cfg, err := loadScenarios(t, dir, `  partner-trouble:
+    description: Deletes fail for partner-b, and uploads stop partway.
     faults:
-      - id: deny
-        match: {operation: remove}
-        action: {type: fail, when: before, status: permission_denied}
-`
-	cfg, err := loadScenarios(t, dir, valid, "")
+      - {preset: deletes_fail, user: partner-b}
+      - {name: Slow listings, steps: [list], do: wait, seconds: 1.5, folder: /outgoing, first: 2}
+`, "partner-trouble")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Scenario != "" || len(cfg.Chosen().Rules) != 0 {
-		t.Errorf("Load chose scenario %q with %d rules, want none without --scenario", cfg.Scenario, len(cfg.Chosen().Rules))
+	got, err := cfg.Scenarios.Get("partner-trouble")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
 	}
-
-	broken := testutil.WriteFile(t, filepath.Join(dir, "broken.yaml"), withScenarios+valid+`  broken:
-    faults:
-      - id: deny
-        match: {operation: upload}
-        action: {type: fail, when: before, status: failure}
-`)
-	if _, err := Load(Options{ConfigFile: broken, Scenario: "valid", LookupEnv: fakeEnv{"P": "password"}.lookup}); err == nil || !strings.Contains(err.Error(), `scenarios.broken: faults: rule "deny": unknown operation "upload"`) {
-		t.Errorf("Load = %v, want the broken scenario reported although another is selected", err)
+	want := NamedScenario{Name: "partner-trouble", Source: Configured, Scenario: Scenario{
+		Description: "Deletes fail for partner-b, and uploads stop partway.",
+		Faults: []Fault{
+			{Preset: "deletes_fail", User: "partner-b"},
+			{Name: "Slow listings", Steps: []string{"list"}, Do: "wait", Seconds: new(1.5), Folder: "/outgoing", First: new(uint64(2))},
+		},
+	}}
+	if !reflect.DeepEqual(got, want) || cfg.Scenario != "partner-trouble" {
+		t.Errorf("Get = %+v, and the startup scenario %q, want %+v", got, cfg.Scenario, want)
 	}
 }
 
 func TestLoadRejectsInvalidScenarios(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	rule := func(match, action string) string {
-		return "  s:\n    faults:\n      - id: r\n        match: " + match + "\n        action: " + action + "\n"
-	}
-	decided := func(decision, match, action string) string {
-		return "  s:\n    faults:\n      - id: r\n        match: " + match + "\n        decision: " + decision + "\n        action: " + action + "\n"
-	}
-	deny := "{type: fail, when: before, status: failure}"
 	tests := []struct {
-		name      string
-		scenarios string
-		selected  string
-		want      string
+		name, scenarios, selected, want string
 	}{
-		{"an undefined scenario", rule("{operation: stat}", deny), "missing", `scenario "missing" is not defined; the configuration defines s`},
-		{"a bad scenario name", "  Bad_Name:\n    faults: []\n", "", "scenarios.Bad_Name: a scenario name may hold only"},
-		{"a bad rule ID", "  s:\n    faults:\n      - id: First Rule\n        match: {operation: stat}\n        action: " + deny + "\n", "", `scenarios.s.faults[0]: id "First Rule" must hold only`},
-		{"no rule ID", "  s:\n    faults:\n      - match: {operation: stat}\n        action: " + deny + "\n", "", "scenarios.s.faults[0]: id is required"},
-		{"a repeated rule ID", "  s:\n    faults:\n      - {id: r, match: {operation: stat}, action: " + deny + "}\n      - {id: r, match: {operation: stat}, action: " + deny + "}\n", "", `scenarios.s: faults: rule ID "r" is used twice`},
-		{"an operation that is not a name", rule("{operation: {a: b}}", deny), "", "expected a string or a list of strings"},
-		{"an unknown field", rule("{operation: stat, paths: /a}", deny), "", "field paths not found"},
-		{"no operation", rule("{path: /a}", deny), "", "scenarios.s.faults[0] (r): match: operation is required"},
-		{"two path fields", rule("{operation: stat, path: /a, path_prefix: /b}", deny), "", "path and path_prefix cannot both be set"},
-		{"a source off a rename", rule("{operation: remove, source: /a}", deny), "", "the source fields need operation rename"},
-		{"a source and a path", rule("{operation: rename, source: /a, path: /b}", deny), "", "set the source fields or the path fields, not both"},
-		{"two target fields", rule("{operation: rename, target: /a, target_glob: /b*}", deny), "", "target and target_glob cannot both be set"},
-		{"attempts per nothing", rule("{operation: open_write, attempt: {per: [], numbers: [1]}}", deny), "", "attempt per needs user, path or both"},
-		{"attempts per host", rule("{operation: open_write, attempt: {per: [host], numbers: [1]}}", deny), "", `attempt per "host" is not user or path`},
-		{"an unknown user", rule("{operation: stat, user: nobody}", deny), "", `user "nobody" is not a configured user`},
-		{"an unknown key", rule("{operation: stat, key_fingerprint: \"SHA256:abc\"}", deny), "", `key_fingerprint "SHA256:abc" is not one of the configured users' authorized keys`},
-		{"another user's key", rule("{operation: stat, user: test, key_fingerprint: \"SHA256:abc\"}", deny), "", "is not one of test's authorized keys"},
-		{"an unknown action", rule("{operation: stat}", "{type: explode}"), "", `action: type "explode" is not one of close_connection, close_subsystem, corrupt_download, corrupt_upload, delay, fail, freeze_connection, hide, listener_down, partial_download, partial_upload, stall, wrong_size`},
-		{"a field of another action", rule("{operation: stat}", "{type: fail, when: before, status: failure, duration: 1s}"), "", "action: duration does not apply to a fail"},
-		{"no when", rule("{operation: stat}", "{type: fail, status: failure}"), "", "when is required: before the server acts, or after"},
-		{"a bad when", rule("{operation: stat}", "{type: fail, when: during, status: failure}"), "", `when "during" is not before or after`},
-		{"no duration", rule("{operation: stat}", "{type: delay, when: after}"), "", "duration is required"},
-		{"a bare number duration", rule("{operation: stat}", "{type: delay, when: after, duration: 5}"), "", `duration "5" is not a positive duration`},
-		{"a negative duration", rule("{operation: stat}", "{type: delay, when: after, duration: -1s}"), "", `duration "-1s" is not a positive duration`},
-		{"no status", rule("{operation: stat}", "{type: fail, when: before}"), "", "status is required"},
-		{"a status a server cannot send", rule("{operation: stat}", "{type: fail, when: before, status: connection_lost}"), "", `status "connection_lost" is not one of bad_message, eof, failure, no_such_file, op_unsupported, permission_denied`},
-		{"a bad mode", rule("{operation: stat}", "{type: close_connection, when: before, mode: hangup}"), "", `mode "hangup" is not fin or rst`},
-		{"a freeze without a bound", rule("{operation: stat}", "{type: freeze_connection, when: before}"), "", "max_freeze is required"},
-		{"a stall without a bound", rule("{operation: stat}", "{type: stall, when: before}"), "", "max_stall is required"},
-		{"a stall without when", rule("{operation: stat}", "{type: stall, max_stall: 1s}"), "", "when is required: before the server acts, or after"},
-		{"a duration on a stall", rule("{operation: stat}", "{type: stall, when: before, max_stall: 1s, duration: 1s}"), "", "duration does not apply to a stall"},
-		{"a stall's bound on a freeze", rule("{operation: stat}", "{type: freeze_connection, when: before, max_freeze: 1s, max_stall: 1s}"), "", "max_stall does not apply to a freeze_connection"},
-		{"a bound on a close", rule("{operation: stat}", "{type: close_connection, when: before, max_freeze: 1s}"), "", "max_freeze does not apply to a close_connection"},
-		{"a mode on a freeze", rule("{operation: stat}", "{type: freeze_connection, when: before, mode: rst, max_freeze: 1s}"), "", "mode does not apply to a freeze_connection"},
-		{"a connection action without when", rule("{operation: stat}", "{type: close_subsystem}"), "", "when is required: before the server acts, or after"},
-		{"no cutoff", rule("{operation: write}", "{type: partial_upload, result: status, status: failure}"), "", "cutoff_offset is required"},
-		{"no result", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1}"), "", "result is required"},
-		{"a bad result", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: retry}"), "", `result "retry" is not status`},
-		{"a status that closes", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: close_connection, status: failure}"), "", "status applies only to result status"},
-		{"a mode that answers", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: status, status: failure, mode: rst}"), "", "mode and max_freeze apply only to result close_connection or freeze_connection"},
-		{"a close that freezes", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: close_connection, mode: freeze}"), "", `mode "freeze" is not fin or rst`},
-		{"a freeze with a mode", rule("{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: freeze_connection, mode: rst, max_freeze: 1s}"), "", "mode applies only to result close_connection"},
-		{"a cutoff of a read", rule("{operation: read}", "{type: partial_upload, cutoff_offset: 1, result: status, status: failure}"), "", "a partial upload needs the rule to match the write operation only"},
-		{"an unknown transform", rule("{operation: read}", "{type: corrupt_download, transform: shuffle, offset: 0}"), "", `transform "shuffle" is not one of flip_bytes, omit_range, truncate`},
-		{"no offset", rule("{operation: read}", "{type: corrupt_download, transform: truncate}"), "", "offset is required"},
-		{"a truncate with a length", rule("{operation: read}", "{type: corrupt_download, transform: truncate, offset: 0, length: 1}"), "", "length does not apply to truncate"},
-		{"an omission without a length", rule("{operation: read}", "{type: corrupt_download, transform: omit_range, offset: 0}"), "", "omit_range needs a length of at least 1"},
-		{"no size", rule("{operation: stat}", "{type: wrong_size}"), "", "size or a size_delta other than 0 is required"},
-		{"a size delta of 0", rule("{operation: stat}", "{type: wrong_size, size_delta: 0}"), "", "size or a size_delta other than 0 is required"},
-		{"two sizes", rule("{operation: stat}", "{type: wrong_size, size: 1, size_delta: 1}"), "", "set size or size_delta, not both"},
-		{"a seed, which sftpit no longer takes", "  s:\n    seed: 7\n    faults: []\n", "", "field seed not found"},
-		{"a decision without a probability", decided("{scope: operation}", "{operation: stat}", deny), "", "scenarios.s.faults[0] (r): decision: probability is required"},
-		{"a probability above 1", decided("{probability: 1.5}", "{operation: stat}", deny), "", "probability 1.5 is not from 0 to 1"},
-		{"an unknown decision field", decided("{probability: 0.5, chance: 0.5}", "{operation: stat}", deny), "", "field chance not found"},
-		{"an unknown scope", decided("{scope: chunk, probability: 0.5}", "{operation: stat}", deny), "", `decision: scope "chunk" is not operation or transfer`},
-		{"a transfer decided per operation", decided("{scope: operation, probability: 0.5}", "{operation: write}", "{type: partial_upload, cutoff_offset: 1, result: status, status: failure}"), "", "a partial_upload is decided once for each transfer, at its open, so its scope is transfer"},
-		{"a corrupt download decided per operation", decided("{scope: operation, probability: 0.5}", "{operation: read}", "{type: corrupt_download, transform: truncate, offset: 0}"), "", "a corrupt_download is decided once for each transfer"},
-		{"a delay of every read of a transfer", decided("{scope: transfer, probability: 0.5}", "{operation: [open_read, read]}", "{type: delay, when: before, duration: 1s}"), "", "scope transfer needs a partial_upload, partial_download, corrupt_upload or corrupt_download, or the open_read and open_write operations; a delay on every request of a chosen transfer is not supported"},
-		{"an empty duration range", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 3s, max: 200ms}}"), "", "the duration range's min 3s is above its max 200ms"},
-		{"an empty cutoff range", rule("{operation: write}", "{type: partial_upload, cutoff_offset: {min: 2, max: 1}, result: status, status: failure}"), "", "the cutoff_offset range's min 2 is above its max 1"},
-		{"a range without a max", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s}}"), "", "a range needs both min and max"},
-		{"a range with another bound", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s, mid: 2s, max: 3s}}"), "", "a range has min and max, not mid"},
-		{"a range with two minimums", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s, min: 2s, max: 3s}}"), "", "a range's min is set twice"},
-		{"a range of bad durations", rule("{operation: stat}", "{type: delay, when: before, duration: {min: 1s, max: soon}}"), "", `duration "soon" is not a positive duration`},
-		{"a range of bad offsets", rule("{operation: write}", "{type: partial_upload, cutoff_offset: {min: 0, max: 1MiB}, result: status, status: failure}"), "", "cannot unmarshal !!str `1MiB` into uint64"},
-		{"a list for a range", rule("{operation: stat}", "{type: delay, when: before, duration: [1s, 2s]}"), "", "cannot unmarshal !!seq into string"},
+		{"an unknown scenario at startup", "  s: {faults: [{preset: deletes_fail}]}\n", "missing", `unknown scenario "missing"; the scenarios are s, unreliable-heavy, unreliable-light, unreliable-moderate`},
+		{"a bad name", "  Bad_Name: {faults: [{preset: deletes_fail}]}\n", "", `scenarios.Bad_Name: scenario name "Bad_Name" may hold only`},
+		{"a built-in name", "  unreliable-light: {faults: [{preset: deletes_fail}]}\n", "", "scenarios.unreliable-light: sftpit has a built-in scenario named unreliable-light"},
+		{"no faults", "  s: {faults: []}\n", "", "scenarios.s: a scenario needs at least one fault"},
+		{"a bad fault", "  s: {faults: [{preset: deletes_fail}, {steps: [upload], do: refuse}]}\n", "", `scenarios.s: faults[1]: there is no step "upload"`},
+		{"an unknown user", "  s: {faults: [{preset: deletes_fail, user: nobody}]}\n", "", `scenarios.s: faults[0]: match: user "nobody" is not a configured user`},
+		{"an unknown field", "  s: {faults: [{preset: deletes_fail, percentage: 5}]}\n", "", "field percentage not found"},
+		{"a rule in the long form", "  s: {faults: [{id: r, match: {operation: stat}, action: {type: hide}}]}\n", "", "field id not found"},
+		{"chaos", "  s: {chaos: {preset: light}, faults: [{preset: deletes_fail}]}\n", "", "field chaos not found"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := loadScenarios(t, dir, tt.scenarios, tt.selected)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %v, want %q", err, tt.want)
+				t.Errorf("Load = %v, want %q", err, tt.want)
 			}
 		})
 	}
 }
 
-func TestLoadNamesTheMissingScenarioWithoutAConfigFile(t *testing.T) {
-	_, err := Load(Options{Scenario: "upload-recovery", LookupEnv: noEnv})
-	if err == nil || !strings.Contains(err.Error(), `scenario "upload-recovery" is not defined; the configuration defines no scenarios`) {
-		t.Errorf("Load = %v, want the scenario reported as undefined", err)
+func TestListGivesEachScenarioWithItsSource(t *testing.T) {
+	dir := t.TempDir()
+	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
+	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "saved.yaml"), deletesFail)
+	cfg, err := loadScenarios(t, dir, "  configured: {faults: [{preset: renames_fail}]}\n", "saved")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Scenarios.Dir(); got != filepath.Join(dir, "scenarios") {
+		t.Errorf("Dir = %s, want scenarios beside the configuration", got)
+	}
+	listed, err := cfg.Scenarios.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var got []string
+	for _, s := range listed {
+		got = append(got, string(s.Source)+":"+s.Name)
+	}
+	want := []string{"built_in:unreliable-heavy", "built_in:unreliable-light", "built_in:unreliable-moderate", "config:configured", "file:saved"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("List = %v, want %v", got, want)
+	}
+	if saved := listed[len(listed)-1]; saved.Path != filepath.Join(dir, "scenarios", "saved.yaml") || len(saved.Scenario.Faults) != 1 {
+		t.Errorf("the saved scenario is %+v, want its path and fault", saved)
+	}
+}
+
+func TestListSkipsWhatIsNotAScenarioFile(t *testing.T) {
+	dir := t.TempDir()
+	missing, err := NewScenarios(filepath.Join(dir, "missing"), nil, testUsers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names, err := missing.fileNames(); err != nil || len(names) != 0 {
+		t.Errorf("the files of a directory that does not exist = %v, %v, want none", names, err)
+	}
+	testutil.WriteFile(t, filepath.Join(dir, "kept.yaml"), deletesFail)
+	testutil.WriteFile(t, filepath.Join(dir, ".kept.yaml.tmp-123"), "half a file")
+	testutil.WriteFile(t, filepath.Join(dir, ".hidden.yaml"), "half a file")
+	testutil.WriteFile(t, filepath.Join(dir, "notes.yml"), "not a scenario")
+	testutil.WriteFile(t, filepath.Join(dir, "README.md"), "not a scenario")
+	if err := os.Mkdir(filepath.Join(dir, "dir.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := NewScenarios(dir, nil, testUsers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names, err := scenarios.fileNames(); err != nil || !reflect.DeepEqual(names, []string{"kept"}) {
+		t.Errorf("the files = %v, %v, want only kept", names, err)
+	}
+}
+
+func TestGetNamesTheScenariosThereAre(t *testing.T) {
+	dir := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(dir, "saved.yaml"), deletesFail)
+	scenarios, err := NewScenarios(dir, map[string]Scenario{"configured": {Faults: []Fault{{Preset: "renames_fail"}}}}, testUsers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"missing", "", "../escape", "a/b", "Upper", "saved.yaml"} {
+		_, err := scenarios.Get(name)
+		if !errors.Is(err, ErrUnknownScenario) || !strings.Contains(err.Error(), "the scenarios are configured, saved, unreliable-heavy") {
+			t.Errorf("Get(%q) = %v, want ErrUnknownScenario naming the scenarios", name, err)
+		}
+	}
+	for name, source := range map[string]Source{"unreliable-light": BuiltIn, "configured": Configured, "saved": Saved} {
+		if got, err := scenarios.Get(name); err != nil || got.Source != source {
+			t.Errorf("Get(%s) = %+v, %v, want it from %s", name, got, err, source)
+		}
+	}
+}
+
+func TestLoadFindsScenarioFilesInTheWorkingDirectoryWithoutAConfigFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	testutil.WriteFile(t, "sftpit-scenarios/quiet.yaml", deletesFail)
+	cfg, err := Load(Options{Scenario: "quiet", LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scenarios.Dir() != filepath.Join(wd, "sftpit-scenarios") {
+		t.Errorf("the scenarios directory is %s, want sftpit-scenarios in %s", cfg.Scenarios.Dir(), wd)
+	}
+}
+
+func TestLoadRejectsInvalidScenarioFiles(t *testing.T) {
+	tests := []struct {
+		name, file, content, want string
+	}{
+		{"unknown field", "s.yaml", deletesFail + "notes: x\n", "field notes not found"},
+		{"no schema version", "s.yaml", "faults: [{preset: deletes_fail}]\n", "schema_version is required"},
+		{"empty", "s.yaml", "", "the file is empty"},
+		{"two documents", "s.yaml", deletesFail + "---\nschema_version: 1\n", "expected a single YAML document"},
+		{"no faults", "s.yaml", "schema_version: 1\nfaults: []\n", "a scenario needs at least one fault"},
+		{"bad fault", "s.yaml", "schema_version: 1\nfaults:\n  - {steps: [list], do: explode}\n", `faults[0]: there is nothing to do called "explode"`},
+		{"unknown user", "s.yaml", "schema_version: 1\nfaults:\n  - {preset: deletes_fail, user: nobody}\n", "nobody"},
+		{"bad name", "Upper.yaml", deletesFail, `scenario name "Upper" may hold only`},
+		{"built-in name", "unreliable-heavy.yaml", deletesFail, "sftpit has a built-in scenario named unreliable-heavy"},
+		{"configured name", "configured.yaml", deletesFail, "the configuration file defines a scenario configured too"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
+			path := testutil.WriteFile(t, filepath.Join(dir, "saved", tt.file), tt.content)
+			config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), "scenarios_dir: saved\n"+withScenarios+"  configured: {faults: [{preset: deletes_fail}]}\n")
+			_, err := Load(Options{ConfigFile: config, LookupEnv: fakeEnv{"P": "password"}.lookup})
+			if !errors.Is(err, ErrInvalidScenario) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Load = %v, want ErrInvalidScenario naming %s and saying %q", err, path, tt.want)
+			}
+		})
+	}
+}
+
+func TestSaveWritesAFileThatGetReads(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "made-on-save")
+	scenarios, err := NewScenarios(dir, nil, testUsers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := Scenario{Description: "Uploads stop partway, now and then.", Faults: []Fault{{Preset: "upload_stops_partway", KB: new(uint64(8)), Percent: new(25.0)}}}
+	saved, err := scenarios.Save("flaky-uploads", sc)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	want := NamedScenario{Name: "flaky-uploads", Source: Saved, Scenario: sc, Path: filepath.Join(dir, "flaky-uploads.yaml")}
+	if !reflect.DeepEqual(saved, want) {
+		t.Errorf("Save = %+v, want %+v", saved, want)
+	}
+	if got, err := scenarios.Get("flaky-uploads"); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("Get = %+v, %v, want %+v", got, err, want)
+	}
+	content, err := os.ReadFile(want.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContent := `schema_version: 1
+description: Uploads stop partway, now and then.
+faults:
+  - preset: upload_stops_partway
+    kb: 8
+    percent: 25
+`
+	if string(content) != wantContent {
+		t.Errorf("the file holds\n%s\nwant\n%s", content, wantContent)
+	}
+
+	replacement := Scenario{Faults: []Fault{{Preset: "deletes_fail"}}}
+	if _, err := scenarios.Save("flaky-uploads", replacement); err != nil {
+		t.Fatalf("Save over the file: %v", err)
+	}
+	if got, err := scenarios.Get("flaky-uploads"); err != nil || !reflect.DeepEqual(got.Scenario, replacement) {
+		t.Errorf("Get after a second save = %+v, %v, want %+v", got, err, replacement)
+	}
+}
+
+func TestSaveRefusesWhatItCannotTurnOn(t *testing.T) {
+	scenarios, err := NewScenarios(t.TempDir(), map[string]Scenario{"configured": {Faults: []Fault{{Preset: "renames_fail"}}}}, testUsers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := Scenario{Faults: []Fault{{Preset: "deletes_fail"}}}
+	tests := []struct {
+		name     string
+		scenario Scenario
+		want     error
+		says     string
+	}{
+		{"Upper", valid, ErrInvalidScenario, `scenario name "Upper" may hold only`},
+		{"../escape", valid, ErrInvalidScenario, "may hold only"},
+		{"unreliable-light", valid, ErrFixedScenario, "it is built in"},
+		{"configured", valid, ErrFixedScenario, "it is defined in the configuration file"},
+		{"empty", Scenario{}, ErrInvalidScenario, "a scenario needs at least one fault"},
+		{"stranger", Scenario{Faults: []Fault{{Preset: "deletes_fail", User: "nobody"}}}, ErrInvalidScenario, `faults[0]: match: user "nobody"`},
+	}
+	for _, tt := range tests {
+		if _, err := scenarios.Save(tt.name, tt.scenario); !errors.Is(err, tt.want) || !strings.Contains(err.Error(), tt.says) {
+			t.Errorf("Save(%q) = %v, want %v saying %q", tt.name, err, tt.want, tt.says)
+		}
+	}
+	if names, err := scenarios.fileNames(); err != nil || len(names) != 0 {
+		t.Errorf("the files after refused saves = %v, %v, want none", names, err)
+	}
+}
+
+func TestDeleteRemovesOnlySavedScenarios(t *testing.T) {
+	dir := t.TempDir()
+	path := testutil.WriteFile(t, filepath.Join(dir, "saved.yaml"), deletesFail)
+	scenarios, err := NewScenarios(dir, map[string]Scenario{"configured": {Faults: []Fault{{Preset: "renames_fail"}}}}, testUsers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]error{"unreliable-light": ErrFixedScenario, "configured": ErrFixedScenario, "missing": ErrUnknownScenario, "Upper": ErrInvalidScenario} {
+		if err := scenarios.Delete(name); !errors.Is(err, want) {
+			t.Errorf("Delete(%q) = %v, want %v", name, err, want)
+		}
+	}
+	if err := scenarios.Delete("saved"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the file after Delete: %v, want it gone", err)
+	}
+	if _, err := scenarios.Get("saved"); !errors.Is(err, ErrUnknownScenario) {
+		t.Errorf("Get after Delete = %v, want ErrUnknownScenario", err)
 	}
 }

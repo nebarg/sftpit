@@ -15,27 +15,19 @@ import (
 	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/control"
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 var testUsers = []sshfront.User{{Name: "test", Password: "test", Home: "/"}}
 
-// testScenarios are the scenarios that start configures: chaos, with no
-// rules, and own, whose rule denyStats refuses the test user's stats.
-var testScenarios = map[string]config.Scenario{"chaos": {}, "own": {Rules: mustParseRules("[" + denyStats + "]")}}
+// configured are the configuration's scenarios that start gives: own,
+// whose fault refuses the test user's stats.
+var configured = map[string]config.Scenario{"own": {Description: "Stats fail.", Faults: []config.Fault{{Name: "Stats fail", Steps: []string{"stat"}, Do: "refuse", Error: "permission_denied", User: "test"}}}}
 
-func mustParseRules(rules string) []faults.Rule {
-	parsed, err := config.ParseRules([]byte(rules), testUsers)
-	if err != nil {
-		panic(err)
-	}
-	return parsed
-}
-
-// start starts runs with opts, whose scenarios are testScenarios, and
-// returns them with their control API.
+// start starts runs with opts, whose scenarios are the built-in ones,
+// configured, and those saved in a new directory, and returns them with
+// their control API.
 func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	t.Helper()
 	w, err := runs.TempWorkspace()
@@ -53,7 +45,9 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	}
 	opts.Server = sshfront.Config{HostKeys: []ssh.Signer{hostKey}, Users: testUsers}
 	opts.Limits = backend.Limits{MaxFileBytes: 1 << 20, MaxTotalBytes: 1 << 20, MaxFiles: 100, MaxOpenFiles: 10}
-	opts.Scenarios = testScenarios
+	if opts.Scenarios, err = config.NewScenarios(t.TempDir(), configured, testUsers); err != nil {
+		t.Fatal(err)
+	}
 	opts.Logger = slog.New(slog.DiscardHandler)
 	m, err := runs.Start(w, opts)
 	if err != nil {
@@ -62,8 +56,6 @@ func start(t *testing.T, opts runs.Options) (*runs.Manager, http.Handler) {
 	t.Cleanup(func() { m.Close() })
 	return m, control.Handler(m, control.Options{})
 }
-
-const denyStats = `{"id": "deny-stats", "match": {"operation": "stat", "user": "test"}, "action": {"type": "fail", "when": "before", "status": "permission_denied"}}`
 
 const host = "127.0.0.1:8122"
 

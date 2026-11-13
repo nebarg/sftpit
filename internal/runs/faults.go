@@ -1,6 +1,7 @@
 package runs
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,20 +19,22 @@ var ErrUnknownFault = errors.New("unknown fault")
 
 // Fault is a fault added to the current run in plain terms: its ID, which
 // its rule has too, the fault with its preset and defaults filled in,
-// whether it is on, and how many times it has happened since it was last
-// switched on.
+// whether it is on, how many times it has happened since it was last
+// switched on, and the scenario that added it, if any.
 type Fault struct {
 	ID       string
 	Spec     config.Fault
 	On       bool
 	Happened uint64
+	Scenario string
 }
 
 // plainFault is a fault of a run, as the run keeps it.
 type plainFault struct {
-	id   string
-	spec config.Fault
-	on   bool
+	id       string
+	spec     config.Fault
+	on       bool
+	scenario string
 }
 
 // Faults returns the faults added to the current run, in the order they
@@ -162,7 +165,7 @@ func (m *Manager) replaceFaults(current *activeRun, previous []plainFault) (faul
 		}
 		rules = append(rules, r)
 	}
-	return m.replaceRules(current, set.Revision, rules, set.Chaos)
+	return m.replaceRules(current, set.Revision, rules)
 }
 
 var notID = regexp.MustCompile(`[^a-z0-9]+`)
@@ -171,12 +174,7 @@ var notID = regexp.MustCompile(`[^a-z0-9]+`)
 // in lowercase letters, digits and -, numbered so that no rule of the run
 // has it.
 func (m *Manager) faultID(current *activeRun, name string) string {
-	base := strings.Trim(notID.ReplaceAllString(strings.ToLower(name), "-"), "-")
-	// IDs that start with chaos- are kept for chaos's own rules.
-	if base == "" || base == "chaos" || strings.HasPrefix(base, "chaos-") {
-		base = "fault-" + base
-		base = strings.TrimSuffix(base, "-")
-	}
+	base := cmp.Or(strings.Trim(notID.ReplaceAllString(strings.ToLower(name), "-"), "-"), "fault")
 	taken := current.rules.Rules().Counts
 	for {
 		current.lastFault++
@@ -189,7 +187,7 @@ func (m *Manager) faultID(current *activeRun, name string) string {
 }
 
 func describeFault(f plainFault, counts map[string]faults.Counts) Fault {
-	d := Fault{ID: f.id, Spec: f.spec, On: f.on}
+	d := Fault{ID: f.id, Spec: f.spec, On: f.on, Scenario: f.scenario}
 	if f.on {
 		d.Happened = counts[f.id].Fired
 	}

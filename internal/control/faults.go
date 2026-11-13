@@ -10,17 +10,19 @@ import (
 )
 
 // Fault is a fault of the current run as the API gives it: its ID, whether
-// it is on, how many times it has happened since it was switched on, and
-// the fault in plain terms, with its preset and defaults filled in.
+// it is on, how many times it has happened since it was switched on, the
+// scenario that added it, if any, and the fault in plain terms, with its
+// preset and defaults filled in.
 type Fault struct {
 	ID       string `json:"id"`
 	On       bool   `json:"on"`
 	Happened uint64 `json:"happened"`
+	Scenario string `json:"scenario,omitempty"`
 	config.Fault
 }
 
 func newFault(f runs.Fault) Fault {
-	return Fault{ID: f.ID, On: f.On, Happened: f.Happened, Fault: f.Spec}
+	return Fault{ID: f.ID, On: f.On, Happened: f.Happened, Scenario: f.Scenario, Fault: f.Spec}
 }
 
 // presets answers with what a fault can be made of: the presets, the steps
@@ -106,19 +108,18 @@ func (a *api) removeFaults(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// startAgain switches every fault off, the scenario's included, and puts
-// the starting files back, by starting a run without a scenario.
+// startAgain removes every fault, those of scenarios included, and puts
+// the starting files back, by starting a new run.
 func (a *api) startAgain(w http.ResponseWriter, r *http.Request) {
 	// It takes no fields, but an empty body or {} will do.
 	if !decodeBody(w, r, &struct{}{}) {
 		return
 	}
-	none := ""
 	// A reset runs to its end even if the client goes away, as stopping
 	// part way would leave admission closed.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resetTimeout)
 	defer cancel()
-	if _, err := a.runs.Reset(ctx, runs.ResetRequest{Scenario: &none}); err != nil {
+	if _, err := a.runs.Reset(ctx); err != nil {
 		writeError(w, statusFor(err), err)
 		return
 	}

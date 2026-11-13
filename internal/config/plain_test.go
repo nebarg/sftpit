@@ -93,12 +93,12 @@ func TestFaultsCompileToTheirLongForm(t *testing.T) {
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := loadScenarios(t, dir, oneRule(tt.long), "")
+			rules, err := compileLongForm(t, dir, oneRule(tt.long))
 			if err != nil {
-				t.Fatalf("Load: %v", err)
+				t.Fatalf("compileLongForm: %v", err)
 			}
-			want := cfg.Scenarios["s"].Rules[0]
-			got, err := tt.fault.Rule("r", cfg.Users)
+			want := rules["s"][0]
+			got, err := tt.fault.Rule("r", loadUsers(t, dir).Users)
 			if err != nil {
 				t.Fatalf("Rule: %v", err)
 			}

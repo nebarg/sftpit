@@ -369,9 +369,7 @@ server:
 scenarios:
   deny-ack:
     faults:
-      - id: deny-remove
-        match: {user: test, operation: remove, path_glob: "/outgoing/*.csv"}
-        action: {type: fail, when: before, status: permission_denied}
+      - {preset: deletes_fail, user: test, names: "*.csv"}
 `)
 	for _, scenario := range []string{"deny-ack", ""} {
 		args := []string{"--config", config}
@@ -397,7 +395,7 @@ scenarios:
 			if err != nil || statErr == nil {
 				t.Errorf("without a scenario, Remove = %v and the file is still there (%v), want it removed", err, statErr)
 			}
-			if strings.Contains(s.stdout.String(), "scenario:") || strings.Contains(s.stdout.String(), "  seed:") || strings.Contains(s.stderr.String(), "rule") {
+			if strings.Contains(s.stdout.String(), "scenario") || strings.Contains(s.stdout.String(), "  seed:") || strings.Contains(s.stderr.String(), "rule fired") {
 				t.Errorf("without a scenario, sftpit reported one:\n%s%s", s.stdout.String(), s.stderr.String())
 			}
 			continue
@@ -405,36 +403,28 @@ scenarios:
 		if !errors.Is(err, fs.ErrPermission) || statErr != nil {
 			t.Errorf("Remove = %v and the file is gone (%v), want permission denied and the file kept", err, statErr)
 		}
-		if out := s.stdout.String(); !strings.Contains(out, "scenario: deny-ack (1 fault rule)") {
+		if out := s.stdout.String(); !strings.Contains(out, "  scenario on: deny-ack\n") {
 			t.Errorf("banner does not name the scenario:\n%s", out)
 		}
-		if logs := s.stderr.String(); !strings.Contains(logs, `msg="rule fired" rule=deny-remove operation=remove path=/outgoing/orders.csv user=test ordinal=1`) {
+		if logs := s.stderr.String(); !strings.Contains(logs, `msg="rule fired" rule=deletes-fail-1 operation=remove path=/outgoing/orders.csv user=test ordinal=1`) {
 			t.Errorf("stderr does not log the rule firing:\n%s", logs)
 		}
 	}
 }
 
-func TestServeShowsTheScenariosChaos(t *testing.T) {
-	config := filepath.Join(t.TempDir(), "sftpit.yaml")
-	testutil.WriteFile(t, config, `schema_version: 1
-server:
-  host_key: keys
-scenarios:
-  dev-chaos:
-    chaos: {preset: moderate}
-  paused-chaos:
-    chaos: {preset: heavy, paused: true}
-`)
-	tests := []struct{ scenario, want string }{
-		{"dev-chaos", "  scenario: dev-chaos (0 fault rules)\n  chaos: moderate\n"},
-		{"paused-chaos", "  scenario: paused-chaos (0 fault rules)\n  chaos: heavy, paused\n"},
+func TestServeTurnsOnABuiltInScenario(t *testing.T) {
+	s := startServe(t, "--scenario", "unreliable-light")
+	if want := "  scenario on: unreliable-light\n"; !strings.Contains(s.stdout.String(), want) {
+		t.Errorf("the banner lacks %q:\n%s", want, s.stdout.String())
 	}
-	for _, tt := range tests {
-		s := startServe(t, "--config", config, "--scenario", tt.scenario)
-		s.stop(t)
-		if out := s.stdout.String(); !strings.Contains(out, tt.want) {
-			t.Errorf("the banner of %s lacks %q:\n%s", tt.scenario, tt.want, out)
-		}
+	got := requestJSON(t, "http://"+s.apiAddr+"/api/faults")
+	list, _ := got["faults"].([]any)
+	if len(list) != 2 || list[0].(map[string]any)["scenario"] != "unreliable-light" {
+		t.Errorf("the faults = %v, want the scenario's two", got)
+	}
+	requestJSONStatus(t, "POST", "http://"+s.apiAddr+"/api/reset", "", http.StatusNoContent)
+	if got := requestJSON(t, "http://"+s.apiAddr+"/api/faults"); len(got["faults"].([]any)) != 0 {
+		t.Errorf("after a reset, the faults = %v, want none", got)
 	}
 }
 
@@ -444,9 +434,7 @@ func TestServeInjectsFaultsAtLogin(t *testing.T) {
 scenarios:
   cut-first-login:
     faults:
-      - id: first-login
-        match: {operation: authenticate, occurrence: [1]}
-        action: {type: close_connection}
+      - {steps: [authenticate], do: drop, only: 1}
 `)
 	s := startServe(t, "--config", config, "--scenario", "cut-first-login")
 	if conn, err := ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
@@ -471,13 +459,11 @@ func TestServeTakesTheListenerDownAtAMomentOfTheRun(t *testing.T) {
 scenarios:
   outage:
     faults:
-      - id: at-the-start
-        trigger: {at: 0s, anchor: run}
-        action: {type: listener_down, duration: 1m}
+      - {preset: server_goes_down, seconds: 60}
 `)
 	s := startServe(t, "--config", config, "--scenario", "outage")
 	// The run starts with the outage, before serve announces itself.
-	if want := `msg="injected fault" fault=listener_down when=timer duration=1m0s close_existing=false`; !strings.Contains(s.stderr.String(), want) {
+	if want := `msg="injected fault" fault=listener_down when=timer duration=1m0s close_existing=true`; !strings.Contains(s.stderr.String(), want) {
 		t.Fatalf("serve did not take the listener down as the run started:\n%s", s.stderr.String())
 	}
 	if conn, err := net.Dial("tcp", s.addr); !errors.Is(err, syscall.ECONNREFUSED) {
@@ -741,13 +727,13 @@ func TestServeKeepsConfiguredPasswordsOutOfTheAPI(t *testing.T) {
 func TestServeRunsScenarioFiles(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "sftpit.yaml")
-	testutil.WriteFile(t, config, "schema_version: 1\nscenarios:\n  configured: {faults: []}\n")
+	testutil.WriteFile(t, config, "schema_version: 1\nscenarios:\n  configured: {faults: [{preset: deletes_fail}]}\n")
 	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "from-file.yaml"), `schema_version: 1
 faults:
-  - {id: deny-stat, match: {operation: stat}, action: {type: fail, when: before, status: permission_denied}}
+  - {steps: [stat], do: refuse, error: permission_denied}
 `)
 	s := startServe(t, "--config", config, "--scenario", "from-file")
-	if want := "  scenario: from-file (1 fault rule)\n"; !strings.Contains(s.stdout.String(), want) {
+	if want := "  scenario on: from-file\n"; !strings.Contains(s.stdout.String(), want) {
 		t.Errorf("the banner lacks %q:\n%s", want, s.stdout.String())
 	}
 	if _, err := s.dial(t, "test", "test").Stat("/"); !errors.Is(err, os.ErrPermission) {
@@ -825,7 +811,7 @@ func TestServeRejectsInvalidSettings(t *testing.T) {
 		{"stray argument", []string{"extra"}, `unexpected arguments ["extra"]`},
 		{"missing config", []string{"--config", "missing.yaml"}, "missing.yaml"},
 		{"missing secret", []string{"--config", missingSecret}, "SFTPIT_SERVE_TEST_UNSET is not set"},
-		{"undefined scenario", []string{"--scenario", "upload-recovery"}, `scenario "upload-recovery" is not defined`},
+		{"undefined scenario", []string{"--scenario", "upload-recovery"}, `unknown scenario "upload-recovery"; the scenarios are unreliable-heavy, unreliable-light, unreliable-moderate`},
 		{"unknown log level", []string{"--log-level", "loud"}, `invalid value "loud" for flag -log-level: log level "loud" is not debug, info, warn or error`},
 	}
 	for _, tt := range tests {

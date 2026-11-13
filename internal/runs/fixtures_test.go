@@ -217,7 +217,7 @@ func tempWorkspace(t *testing.T) *Workspace {
 // the directory they are in.
 func newBackend(t *testing.T, w *Workspace) (*backend.Embedded, string) {
 	t.Helper()
-	run, err := w.NewRun(Scenario{})
+	run, err := w.NewRun(0)
 	if err != nil {
 		t.Fatalf("NewRun: %v", err)
 	}

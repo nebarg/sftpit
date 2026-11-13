@@ -6,10 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
 // TestOpenSSHConnectionEvents acts on OpenSSH's connection as the server
@@ -19,12 +17,9 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
-	connect := faults.Match{Operations: []faults.Operation{faults.Connect}}
-	login := faults.Match{Operations: []faults.Operation{faults.Authenticate}, User: testUser, KeyFingerprint: ssh.FingerprintSHA256(clientSigner.PublicKey())}
 	tests := []struct {
 		name    string
-		match   faults.Match
-		action  sftpproxy.Action
+		fault   config.Fault
 		options []string
 		// output holds the forms in which the tested versions of sftp
 		// report the fault.
@@ -34,23 +29,20 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 	}{
 		{
 			name:    "a slow connect",
-			match:   connect,
-			action:  sftpproxy.Delay{Duration: 3 * time.Second},
+			fault:   config.Fault{Name: "Event", Steps: []string{"connect"}, Do: "wait", Seconds: new(3.0)},
 			options: []string{"ConnectTimeout=1"},
 			output:  []string{"Connection timed out during banner exchange"},
 			log:     "fault=delay duration=3s",
 		},
 		{
 			name:   "a close at connect",
-			match:  connect,
-			action: sftpproxy.Drop{},
+			fault:  config.Fault{Name: "Event", Steps: []string{"connect"}, Do: "drop"},
 			output: []string{"kex_exchange_identification: Connection closed by remote host", "Connection closed by 127.0.0.1 port"},
 			log:    "fault=close_connection mode=fin",
 		},
 		{
-			name:   "a reset at connect",
-			match:  connect,
-			action: sftpproxy.Drop{Reset: true},
+			name:  "a reset at connect",
+			fault: config.Fault{Name: "Event", Steps: []string{"connect"}, Do: "drop", Abrupt: true},
 			// The client reports a reset as its write of its version or
 			// its read of the server's fails, whichever comes first, and
 			// on Linux may name no peer, as the reset leaves none.
@@ -59,30 +51,26 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 		},
 		{
 			name:    "a freeze at connect",
-			match:   connect,
-			action:  sftpproxy.Freeze{Limit: 5 * time.Second},
+			fault:   config.Fault{Name: "Event", Steps: []string{"connect"}, Do: "freeze", Seconds: new(5.0)},
 			options: []string{"ConnectTimeout=1"},
 			output:  []string{"Connection timed out during banner exchange"},
 			log:     "fault=freeze_connection limit=5s",
 		},
 		{
 			name:   "a close at login",
-			match:  login,
-			action: sftpproxy.Drop{},
+			fault:  config.Fault{Name: "Event", Steps: []string{"authenticate"}, Do: "drop", User: testUser},
 			output: []string{"Connection closed by 127.0.0.1 port"},
 			log:    "user=test fault=close_connection mode=fin",
 		},
 		{
 			name:   "a reset at login",
-			match:  login,
-			action: sftpproxy.Drop{Reset: true},
+			fault:  config.Fault{Name: "Event", Steps: []string{"authenticate"}, Do: "drop", Abrupt: true, User: testUser},
 			output: []string{"Connection reset by 127.0.0.1 port"},
 			log:    "user=test fault=close_connection mode=rst",
 		},
 		{
 			name:   "a freeze at login",
-			match:  login,
-			action: sftpproxy.Freeze{Limit: time.Second},
+			fault:  config.Fault{Name: "Event", Steps: []string{"authenticate"}, Do: "freeze", Seconds: new(1.0), User: testUser},
 			output: []string{"Connection closed by 127.0.0.1 port"},
 			log:    "user=test fault=freeze_connection limit=1s",
 		},
@@ -91,7 +79,7 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var logs capturedLog
-			srv := startScenario(t, []faults.Rule{{ID: "event", Match: tt.match, Action: tt.action}}, logs.logger())
+			srv := startFaults(t, logs.logger(), tt.fault)
 
 			out, err := openSSH(t, sftpPath, srv, t.TempDir(), "ls\n", tt.options...)
 			if err == nil {
@@ -100,11 +88,10 @@ func TestOpenSSHConnectionEvents(t *testing.T) {
 			if !slices.ContainsFunc(tt.output, func(o string) bool { return strings.Contains(string(out), o) }) {
 				t.Errorf("sftp output contains none of %q:\n%s", tt.output, out)
 			}
-			if got := srv.counts(t, "event"); got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
+			if got := srv.counts(t, "event-1"); got != (faults.Counts{Matched: 1, Selected: 1, Fired: 1}) {
 				t.Errorf("counts = %+v, want the one connection's event selected and fired", got)
 			}
-			event := tt.match.Operations[0]
-			if want := `msg="injected fault" conn=1 operation=` + string(event) + " " + tt.log; !strings.Contains(logs.text(), want) {
+			if want := `msg="injected fault" conn=1 operation=` + tt.fault.Steps[0] + " " + tt.log; !strings.Contains(logs.text(), want) {
 				t.Errorf("logs lack %q:\n%s", want, logs.text())
 			}
 		})
@@ -118,11 +105,7 @@ func TestOpenSSHWaitsForASlowLogin(t *testing.T) {
 	sftpPath := openSSHOrSkip(t)
 
 	var logs capturedLog
-	srv := startScenario(t, []faults.Rule{{
-		ID:     "slow-login",
-		Match:  faults.Match{Operations: []faults.Operation{faults.Authenticate}},
-		Action: sftpproxy.Delay{Duration: time.Second},
-	}}, logs.logger())
+	srv := startFaults(t, logs.logger(), config.Fault{Steps: []string{"authenticate"}, Do: "wait", Seconds: new(1.0)})
 
 	start := time.Now()
 	out, err := openSSH(t, sftpPath, srv, t.TempDir(), "ls\n")

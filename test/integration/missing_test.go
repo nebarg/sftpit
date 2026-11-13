@@ -6,9 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/runs"
 )
 
-// TestOpenSSHMissesHiddenFiles hides 250 files with the missing_file recipe
+// TestOpenSSHMissesHiddenFiles hides 250 files with a hide fault
 // and checks that OpenSSH's sftp lists only the file that is not hidden,
 // and finds no hidden file to download or remove, while the files stay on
 // the server. The hidden files come first in a listing, so the backend's
@@ -27,15 +30,12 @@ func TestOpenSSHMissesHiddenFiles(t *testing.T) {
 	}
 	data := randomBytes(64<<10 + 321)
 	writeFile(t, filepath.Join(seed, "outgoing", "orders.csv"), data)
-	opts := scenarioOptions(t, `  missing:
-    faults:
-      - id: missing
-        missing_file: {path_glob: /outgoing/hidden-*.csv}
-`, "missing")
 	var logs capturedLog
-	opts.Logger = logs.logger()
-	opts.SeedDir = seed
-	_, srv := startRuns(t, opts)
+	m, srv := startRuns(t, runs.Options{Logger: logs.logger(), SeedDir: seed})
+	hide := config.Fault{Steps: []string{"open_read", "stat", "list", "remove", "rename"}, Do: "hide", Names: "hidden-*.csv"}
+	if _, err := m.AddFault(hide); err != nil {
+		t.Fatalf("AddFault: %v", err)
+	}
 	work := t.TempDir()
 
 	out, err := openSSH(t, sftpPath, srv, work, `ls -1a /outgoing

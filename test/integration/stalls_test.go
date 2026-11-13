@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/config"
 )
 
 // TestOpenSSHUntilAStallIsReleased stalls OpenSSH's listing and releases it
@@ -15,13 +14,10 @@ import (
 func TestOpenSSHUntilAStallIsReleased(t *testing.T) {
 	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
-	// Only the listing's first request, its OPENDIR, since its READDIRs
-	// would otherwise each stall in turn.
-	list := faults.Match{Operations: []faults.Operation{faults.List}, Occurrence: []uint64{1}}
 	tests := []struct {
-		name   string
-		action sftpproxy.Action
-		hold   time.Duration
+		name string
+		do   string
+		hold time.Duration
 		// output is what sftp reports, which it does with success only for
 		// a stall.
 		output string
@@ -29,19 +25,21 @@ func TestOpenSSHUntilAStallIsReleased(t *testing.T) {
 	}{
 		// The SSH layer keeps answering keepalives, so only an operation
 		// timeout could end a stall.
-		{"stall", sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}, 4 * time.Second, "orders.csv", true},
-		{"freeze", sftpproxy.Freeze{When: sftpproxy.Before, Limit: time.Minute}, 500 * time.Millisecond, "Connection to 127.0.0.1 closed by remote host.", false},
+		{"stall", "hold", 4 * time.Second, "orders.csv", true},
+		{"freeze", "freeze", 500 * time.Millisecond, "Connection to 127.0.0.1 closed by remote host.", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var logs capturedLog
-			srv := startScenario(t, []faults.Rule{{ID: "held", Match: list, Action: tt.action}}, logs.logger())
+			// Only the listing's first request, its OPENDIR, since its
+			// READDIRs would otherwise each stall in turn.
+			srv := startFaults(t, logs.logger(), config.Fault{Name: "Held", Steps: []string{"list"}, Do: tt.do, Seconds: new(60.0), Only: new(uint64(1))})
 			writeFile(t, srv.path("/orders.csv"), []byte("id,total\n"))
 			released := make(chan time.Time, 1)
 			go func() {
 				deadline := time.Now().Add(10 * time.Second)
-				for srv.counts(t, "held").Fired == 0 && time.Now().Before(deadline) {
+				for srv.counts(t, "held-1").Fired == 0 && time.Now().Before(deadline) {
 					time.Sleep(10 * time.Millisecond)
 				}
 				time.Sleep(tt.hold)

@@ -3,27 +3,19 @@ package config
 import (
 	"bytes"
 	"cmp"
-	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
-	"strings"
-	"time"
 
 	"go.yaml.in/yaml/v3"
-
-	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
-	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
 // Explain returns the configuration that Load reads for opts, written as a
-// configuration file: every default filled in, every path absolute, recipes
-// in the long form and each scenario's rules in the order they are tried.
-// Comments say where each secret comes from, without its value, and show the
-// rules that each chaos applies. Loading the result gives the same
-// configuration. Unlike Load, Explain reports a missing or empty secret in a
+// configuration file: every default filled in, every path absolute, and
+// each scenario's faults with their presets and defaults filled in. Comments
+// say where each secret comes from, without its value. Loading the result
+// gives the same configuration. Unlike Load, Explain reports a missing or empty secret in a
 // comment rather than as an error.
 func Explain(opts Options) ([]byte, error) {
 	r, err := read(opts)
@@ -34,7 +26,7 @@ func Explain(opts Options) ([]byte, error) {
 	f := fileConfig{
 		SchemaVersion: schemaVersion,
 		EnvFile:       r.envFiles,
-		ScenariosDir:  cfg.ScenarioFiles.Dir(),
+		ScenariosDir:  cfg.Scenarios.Dir(),
 		Server:        serverConfig{SFTPListen: cfg.SFTPListen, HTTPListen: cfg.HTTPListen, HostKey: cmp.Or(cfg.HostKeyDir, hostKeyWorkspace), ReplyOrder: cfg.ReplyOrder.String()},
 		Storage: storageConfig{
 			DataDir:       cfg.DataDir,
@@ -54,60 +46,26 @@ func Explain(opts Options) ([]byte, error) {
 	for _, r := range cfg.Policy.ReadOnly {
 		f.Policy.ReadOnly = append(f.Policy.ReadOnly, readOnlyConfig{PathPrefix: r.PathPrefix, Users: r.Users})
 	}
-	if len(cfg.Scenarios) > 0 {
-		f.Scenarios = make(map[string]scenarioConfig, len(cfg.Scenarios))
-	}
-	for name, s := range cfg.Scenarios {
-		s.Rules = slices.Clone(s.Rules)
-		slices.SortStableFunc(s.Rules, func(a, b faults.Rule) int { return cmp.Compare(a.Priority, b.Priority) })
-		f.Scenarios[name] = longScenario(s)
+	for name, sc := range cfg.Scenarios.configured {
+		resolved, err := sc.Resolved()
+		if err != nil {
+			return nil, fmt.Errorf("config: scenarios.%s: %w", name, err)
+		}
+		if f.Scenarios == nil {
+			f.Scenarios = make(map[string]Scenario)
+		}
+		f.Scenarios[name] = resolved
 	}
 
 	var doc yaml.Node
 	if err := doc.Encode(f); err != nil {
 		return nil, fmt.Errorf("config: write the configuration: %w", err)
 	}
-	for name, s := range cfg.Scenarios {
-		if s.Chaos == nil {
-			continue
-		}
-		if err := explainChaos(&doc, name, s.Chaos); err != nil {
-			return nil, fmt.Errorf("config: write the chaos of scenario %s: %w", name, err)
-		}
-	}
 	b := bytes.NewBufferString(r.header(opts.ConfigFile))
 	if err := encodeYAML(b, &doc); err != nil {
 		return nil, fmt.Errorf("config: write the configuration: %w", err)
 	}
 	return b.Bytes(), nil
-}
-
-// explainChaos comments the chaos of the scenario name in doc, the explained
-// configuration, with the rules that c applies.
-func explainChaos(doc *yaml.Node, name string, c *faults.Chaos) error {
-	var rules []ruleConfig
-	for _, r := range c.Rules() {
-		rules = append(rules, longForm(r))
-	}
-	var b bytes.Buffer
-	if err := encodeYAML(&b, rules); err != nil {
-		return err
-	}
-	_, scenarios := entry(doc, "scenarios")
-	_, scenario := entry(scenarios, name)
-	key, _ := entry(scenario, "chaos")
-	key.HeadComment = "Chaos applies these rules, after the scenario's own:\n" + strings.TrimSuffix(b.String(), "\n")
-	return nil
-}
-
-// entry returns the key and value of key in the mapping n.
-func entry(n *yaml.Node, key string) (k, v *yaml.Node) {
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == key {
-			return n.Content[i], n.Content[i+1]
-		}
-	}
-	return nil, nil
 }
 
 // encodeYAML writes v to w as YAML, indented by two spaces.
@@ -128,7 +86,7 @@ func (r *reading) header(configFile string) string {
 	} else {
 		fmt.Fprintf(&b, "# The configuration sftpit reads from %s.\n", configFile)
 	}
-	b.WriteString("# Every default is filled in, every path is absolute, recipes are in the\n# long form and each scenario's rules are in the order they are tried. A\n# comment shows the rules that each chaos applies.\n")
+	b.WriteString("# Every default is filled in, every path is absolute, and each scenario's\n# faults have their presets and defaults filled in.\n")
 	if r.cfg.DefaultCredentials {
 		fmt.Fprintf(&b, "#\n# No users are configured, so sftpit accepts the user %s with the password %s.\n", DefaultUser, DefaultPassword)
 	}
@@ -148,212 +106,4 @@ func (r *reading) header(configFile string) string {
 		}
 	}
 	return b.String()
-}
-
-// MarshalYAML writes a value as itself, and a range as {min, max}.
-func (r valueRange[T]) MarshalYAML() (any, error) {
-	if !r.ranged {
-		return r.Min, nil
-	}
-	return flowNode(struct {
-		Min T `yaml:"min"`
-		Max T `yaml:"max"`
-	}{r.Min, r.Max})
-}
-
-// MarshalJSON writes a value as itself, and a range as {"min", "max"}.
-func (r valueRange[T]) MarshalJSON() ([]byte, error) {
-	if !r.ranged {
-		return json.Marshal(r.Min)
-	}
-	return json.Marshal(struct {
-		Min T `json:"min"`
-		Max T `json:"max"`
-	}{r.Min, r.Max})
-}
-
-// longScenario returns s with every rule in the long form, in the order
-// given.
-func longScenario(s Scenario) scenarioConfig {
-	sc := scenarioConfig{Description: s.Description, Faults: []ruleConfig{}}
-	for _, rule := range s.Rules {
-		sc.Faults = append(sc.Faults, longForm(rule))
-	}
-	if s.Chaos != nil {
-		sc.Chaos = longChaos(s.Chaos)
-	}
-	return sc
-}
-
-// longForm returns r as a rule in the long form, with every default
-// spelled out.
-func longForm(r faults.Rule) ruleConfig {
-	rc := ruleConfig{ID: r.ID, Priority: r.Priority, MaxTriggers: r.MaxTriggers, Match: longMatch(r.Match), Trigger: longTrigger(r.Trigger), Action: longAction(r)}
-	if r.Probability != nil {
-		scope := "operation"
-		if r.IsTransfer() {
-			scope = "transfer"
-		}
-		rc.Decision = &decisionConfig{Probability: r.Probability, Scope: scope}
-	}
-	return rc
-}
-
-func longTrigger(t *faults.Trigger) *triggerConfig {
-	if t == nil {
-		return nil
-	}
-	tc := &triggerConfig{Anchor: t.Anchor.String()}
-	if at := t.At; at != nil {
-		tc.At = &valueRange[string]{Min: at.Min.String(), Max: at.Max.String(), ranged: at.Min != at.Max}
-	}
-	if w := t.Window; w != nil {
-		tc.Window = &windowConfig{From: w.From.String(), Until: w.Until.String()}
-	}
-	return tc
-}
-
-func longMatch(m faults.Match) matchConfig {
-	mc := matchConfig{User: m.User, KeyFingerprint: m.KeyFingerprint, Occurrence: m.Occurrence}
-	for _, op := range m.Operations {
-		mc.Operation = append(mc.Operation, string(op))
-	}
-	if slices.Equal(m.Operations, []faults.Operation{faults.Rename}) {
-		setLocation(m.Path, &mc.Source, &mc.SourcePrefix, &mc.SourceGlob, &mc.SourceFilename, &mc.SourceFilenameGlob)
-	} else {
-		setLocation(m.Path, &mc.Path, &mc.PathPrefix, &mc.PathGlob, &mc.Filename, &mc.FilenameGlob)
-	}
-	setLocation(m.Target, &mc.Target, &mc.TargetPrefix, &mc.TargetGlob, &mc.TargetFilename, &mc.TargetFilenameGlob)
-	if a := m.Attempt; a != nil {
-		mc.Attempt = &attemptConfig{Numbers: a.Numbers}
-		if a.PerUser {
-			mc.Attempt.Per = append(mc.Attempt.Per, "user")
-		}
-		if a.PerPath {
-			mc.Attempt.Per = append(mc.Attempt.Per, "path")
-		}
-	}
-	return mc
-}
-
-// setLocation sets the one of the fields that matches as l does.
-func setLocation(l faults.Location, exactly, under, glob, named, namedGlob *string) {
-	field := map[faults.LocationKind]*string{
-		faults.Exactly:   exactly,
-		faults.Under:     under,
-		faults.Glob:      glob,
-		faults.Named:     named,
-		faults.NamedGlob: namedGlob,
-	}[l.Kind]
-	if field != nil {
-		*field = l.Pattern
-	}
-}
-
-func longAction(r faults.Rule) actionConfig {
-	switch a := r.Action.(type) {
-	case sftpproxy.Delay:
-		return actionConfig{Type: "delay", When: actionWhen(r, a.When), Duration: longDuration(r, a.Duration)}
-	case sftpproxy.Stall:
-		return actionConfig{Type: "stall", When: a.When.String(), MaxStall: a.Limit.String()}
-	case sftpproxy.Fail:
-		return actionConfig{Type: "fail", When: a.When.String(), Status: statusName(a.Status)}
-	case sftpproxy.Drop:
-		return actionConfig{Type: "close_connection", When: connectionWhen(r, a.When), Mode: dropMode(a)}
-	case sftpproxy.Freeze:
-		return actionConfig{Type: "freeze_connection", When: connectionWhen(r, a.When), MaxFreeze: a.Limit.String()}
-	case sftpproxy.EndSession:
-		return actionConfig{Type: "close_subsystem", When: connectionWhen(r, a.When)}
-	case sftpproxy.ListenerDown:
-		return actionConfig{Type: "listener_down", When: connectionWhen(r, a.When), Duration: longDuration(r, a.Duration), CloseExisting: &a.CloseExisting}
-	case sftpproxy.PartialUpload:
-		return cutoffAction("partial_upload", r, a.Cutoff, a.Result)
-	case sftpproxy.PartialDownload:
-		return cutoffAction("partial_download", r, a.Cutoff, a.Result)
-	case sftpproxy.CorruptDownload:
-		return corruptionAction("corrupt_download", a.Corruption, a.Offset, a.Length)
-	case sftpproxy.CorruptUpload:
-		return corruptionAction("corrupt_upload", a.Corruption, a.Offset, a.Length)
-	case sftpproxy.WrongSize:
-		if a.Delta != 0 {
-			return actionConfig{Type: "wrong_size", SizeDelta: &a.Delta}
-		}
-		return actionConfig{Type: "wrong_size", Size: &a.Size}
-	case sftpproxy.Hide:
-		return actionConfig{Type: "hide"}
-	}
-	// The configuration makes no other action, and faults.Check refuses any
-	// other.
-	panic(fmt.Sprintf("config: no long form for %T", r.Action))
-}
-
-// cutoffAction returns the long form of r's partial_upload or
-// partial_download, which cuts off at offset, or at the range r draws it
-// from, with result.
-func cutoffAction(typ string, r faults.Rule, offset uint64, result sftpproxy.Action) actionConfig {
-	ac := actionConfig{Type: typ, CutoffOffset: &valueRange[uint64]{Min: offset, Max: offset}}
-	if c := r.Cutoff; c != nil {
-		ac.CutoffOffset = &valueRange[uint64]{Min: c.Min, Max: c.Max, ranged: true}
-	}
-	switch result := result.(type) {
-	case sftpproxy.Fail:
-		ac.Result, ac.Status = "status", statusName(result.Status)
-	case sftpproxy.Drop:
-		ac.Result, ac.Mode = "close_connection", dropMode(result)
-	case sftpproxy.Freeze:
-		ac.Result, ac.MaxFreeze = "freeze_connection", result.Limit.String()
-	}
-	return ac
-}
-
-// corruptionAction returns the long form of a corrupt_download or
-// corrupt_upload.
-func corruptionAction(typ string, c sftpproxy.Corruption, offset, length uint64) actionConfig {
-	ac := actionConfig{Type: typ, Transform: c.String(), Offset: &offset}
-	if c != sftpproxy.Truncate {
-		ac.Length = &length
-	}
-	return ac
-}
-
-// longDuration returns d, or the range that r draws a duration from.
-func longDuration(r faults.Rule, d time.Duration) *valueRange[string] {
-	if rd := r.Duration; rd != nil {
-		return &valueRange[string]{Min: rd.Min.String(), Max: rd.Max.String(), ranged: true}
-	}
-	return &valueRange[string]{Min: d.String(), Max: d.String()}
-}
-
-// actionWhen returns the when of r's action, which has none at connect or
-// authenticate.
-func actionWhen(r faults.Rule, w sftpproxy.When) string {
-	if slices.ContainsFunc(r.Match.Operations, faults.Operation.IsEvent) {
-		return ""
-	}
-	return w.String()
-}
-
-// connectionWhen returns the when of r's connection action, which has none
-// at a moment either.
-func connectionWhen(r faults.Rule, w sftpproxy.When) string {
-	if r.AtMoment() {
-		return ""
-	}
-	return actionWhen(r, w)
-}
-
-func dropMode(d sftpproxy.Drop) string {
-	if d.Reset {
-		return "rst"
-	}
-	return "fin"
-}
-
-func statusName(code sftpwire.StatusCode) string {
-	for name, c := range statuses {
-		if c == code {
-			return name
-		}
-	}
-	return code.String()
 }

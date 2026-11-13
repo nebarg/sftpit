@@ -36,7 +36,7 @@ func on(p sftpwire.Packet, path string) sftpproxy.Request {
 
 func newEngine(t *testing.T, rules ...faults.Rule) *faults.Engine {
 	t.Helper()
-	e, err := faults.New(rules, nil, testSeed, faults.Options{Logger: slog.New(slog.DiscardHandler)})
+	e, err := faults.New(rules, testSeed, faults.Options{Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

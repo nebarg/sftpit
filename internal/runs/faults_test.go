@@ -84,7 +84,7 @@ func errOf(_ Fault, err error) error { return err }
 func TestFaultsKeepTheRunsOwnRules(t *testing.T) {
 	m, addr := startManager(t, Options{})
 	run := m.Status().Run.ID
-	if _, err := m.changeRules(run, 1, []faults.Rule{denyStats}, nil); err != nil {
+	if _, err := m.changeRules(run, 1, []faults.Rule{denyStats}); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
 	c, _ := dialSFTP(t, addr)
@@ -133,7 +133,7 @@ func TestFaultIDsComeFromTheirNames(t *testing.T) {
 		{config.Fault{Preset: "deletes_fail"}, "deletes-fail-1"},
 		{config.Fault{Preset: "deletes_fail"}, "deletes-fail-2"},
 		{config.Fault{Name: "Partner B's slow week!", Preset: "slow_responses"}, "partner-b-s-slow-week-3"},
-		{config.Fault{Name: "Chaos", Preset: "slow_responses"}, "fault-chaos-4"},
+		{config.Fault{Name: "Chaos", Preset: "slow_responses"}, "chaos-4"},
 		{config.Fault{Name: "!!!", Preset: "slow_responses"}, "fault-5"},
 	} {
 		got, err := m.AddFault(tt.fault)
@@ -148,7 +148,7 @@ func TestAResetRemovesTheFaults(t *testing.T) {
 	if _, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); err != nil {
 		t.Fatalf("AddFault: %v", err)
 	}
-	if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+	if _, err := m.Reset(t.Context()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 	if got := m.Faults(); len(got) != 0 {

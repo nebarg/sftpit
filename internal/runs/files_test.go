@@ -98,7 +98,7 @@ func TestFilesDescribeARunsFilesAgainstTheSeed(t *testing.T) {
 	}
 
 	// A run that has ended keeps its files, which can no longer change.
-	if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+	if _, err := m.Reset(t.Context()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 	if files, live, err := m.Files(run, "/new.txt", false); err != nil || live || len(files) != 1 {

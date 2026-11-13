@@ -8,9 +8,7 @@ import (
 	"time"
 
 	"github.com/nebarg/sftpit/internal/config"
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
 // TestOpenSSHAcrossAReset resets the run while OpenSSH uploads through slow
@@ -23,12 +21,10 @@ func TestOpenSSHAcrossAReset(t *testing.T) {
 
 	seed := t.TempDir()
 	writeFile(t, filepath.Join(seed, "orders.csv"), []byte("id,total\n"))
-	slow := faults.Rule{ID: "slow", Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Delay{Duration: 10 * time.Millisecond}}
-	m, srv := startRuns(t, runs.Options{
-		SeedDir:   seed,
-		Scenarios: map[string]config.Scenario{"slow": {Rules: []faults.Rule{slow}}},
-		Scenario:  "slow",
-	})
+	m, srv := startRuns(t, runs.Options{SeedDir: seed})
+	if _, err := m.AddFault(config.Fault{Steps: []string{"write"}, Do: "wait", Seconds: new(0.01)}); err != nil {
+		t.Fatalf("AddFault: %v", err)
+	}
 	work := t.TempDir()
 	writeFile(t, filepath.Join(work, "big.bin"), randomBytes(8<<20))
 
@@ -51,7 +47,7 @@ func TestOpenSSHAcrossAReset(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if _, err := m.Reset(t.Context(), runs.ResetRequest{}); err != nil {
+	if _, err := m.Reset(t.Context()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 	before, err := os.Stat(upload)

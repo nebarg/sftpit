@@ -1,8 +1,7 @@
 // Package config loads sftpit's configuration file, applies command-line
 // overrides and resolves the secrets the configuration references. It
-// validates every scenario, explains a configuration as the file sftpit
-// reads it as, and reads and writes rules and chaos in the JSON form that the
-// control API uses.
+// validates every scenario, keeps the scenarios saved as files, and explains
+// a configuration as the file sftpit reads it as.
 //
 // Secrets come only from the fields that name an environment variable, such
 // as password_env. Each variable is looked up in the process environment
@@ -15,7 +14,6 @@ package config
 import (
 	"bytes"
 	"cmp"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +29,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/backend"
-	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
@@ -108,42 +105,16 @@ type Config struct {
 	// Policy is what clients may do, whatever faults a run injects.
 	Policy Policy
 
-	// Scenarios are the configuration's scenarios, by name.
-	Scenarios map[string]Scenario
+	// Scenarios are the scenarios that can be turned on: the built-in
+	// ones, the configuration's and those saved as files.
+	Scenarios *Scenarios
 
-	// ScenarioFiles are the scenarios saved as files, one for each, which
-	// are read again each time one is used.
-	ScenarioFiles *ScenarioFiles
-
-	// Scenario names the scenario whose rules inject faults, or is "" for
+	// Scenario names the scenario to turn on at startup, or is "" for
 	// none.
 	Scenario string
 
 	// Warnings describe problems that do not prevent sftpit from starting.
 	Warnings []string
-
-	// chosen is the scenario that Scenario names, as it was read.
-	chosen Scenario
-}
-
-// Chosen returns the scenario that Scenario names, from the configuration
-// file or from its scenario file as it was read, or no scenario if Scenario
-// is "".
-func (c *Config) Chosen() Scenario {
-	return c.chosen
-}
-
-// Scenario is a validated scenario.
-type Scenario struct {
-	// Description says what the scenario is for.
-	Description string
-
-	// Rules are the scenario's fault rules, in the order they were given.
-	Rules []faults.Rule
-
-	// Chaos is the scenario's chaos, whose rules are tried after its own, or
-	// nil.
-	Chaos *faults.Chaos
 }
 
 // Options are the command-line settings. They take precedence over the
@@ -171,8 +142,8 @@ type Options struct {
 	// DataDir overrides the configured workspace directory when non-empty.
 	DataDir string
 
-	// Scenario names the scenario whose faults to inject, or is "" for no
-	// faults.
+	// Scenario names the scenario to turn on at startup, or is "" for
+	// none.
 	Scenario string
 
 	// EnvFiles are read after the configuration's env files, so their
@@ -197,7 +168,7 @@ type fileConfig struct {
 	Users         []userConfig  `yaml:"users,omitempty"`
 	Policy        policyConfig  `yaml:"policy,omitempty"`
 
-	Scenarios map[string]scenarioConfig `yaml:"scenarios,omitempty"`
+	Scenarios map[string]Scenario `yaml:"scenarios,omitempty"`
 }
 
 type storageConfig struct {
@@ -250,23 +221,6 @@ func (l *stringList) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	}
 	return fmt.Errorf("line %d: expected a string or a list of strings", n.Line)
-}
-
-func (l *stringList) UnmarshalJSON(b []byte) error {
-	if string(b) == "null" {
-		return nil
-	}
-	var s string
-	if err := json.Unmarshal(b, &s); err == nil {
-		*l = stringList{s}
-		return nil
-	}
-	var ss []string
-	if err := json.Unmarshal(b, &ss); err != nil {
-		return errors.New("expected a string or a list of strings")
-	}
-	*l = ss
-	return nil
 }
 
 // MarshalYAML writes a list of one as a single string.
@@ -435,25 +389,20 @@ func read(opts Options) (*reading, error) {
 	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
 		return nil, err
 	}
-	if cfg.Scenarios, err = scenarios(f.Scenarios, cfg.Users); err != nil {
-		return nil, err
-	}
 	defaultDir := defaultScenariosDir
 	if opts.ConfigFile == "" {
 		defaultDir = defaultScenariosDirWithoutConfig
 	}
-	cfg.ScenarioFiles = NewScenarioFiles(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), cfg.Users, cfg.Scenarios)
-	files, err := cfg.ScenarioFiles.List()
-	if err != nil {
+	if cfg.Scenarios, err = NewScenarios(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), f.Scenarios, cfg.Users); err != nil {
 		return nil, err
 	}
-	for _, file := range files {
-		if file.Err != nil {
-			return nil, file.Err
+	if err := cfg.Scenarios.checkFiles(); err != nil {
+		return nil, err
+	}
+	if opts.Scenario != "" {
+		if _, err := cfg.Scenarios.Get(opts.Scenario); err != nil {
+			return nil, err
 		}
-	}
-	if cfg.chosen, err = choose(opts.Scenario, cfg.Scenarios, files); err != nil {
-		return nil, err
 	}
 	cfg.Scenario = opts.Scenario
 	return &reading{cfg: cfg, file: f, dir: dir, envFiles: envFiles, secrets: secrets}, nil

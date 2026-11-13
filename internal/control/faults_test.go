@@ -57,10 +57,10 @@ func TestFaultsAreRemovedAllAtOnceAndByAReset(t *testing.T) {
 		}
 	}
 	if code, _ := send(t, api, "DELETE", "/api/faults", ""); code != http.StatusNoContent || len(m.Faults()) != 0 {
-		t.Errorf("DELETE /api/faults = %d, leaving %+v; want 204 and none", code, m.Faults())
+		t.Errorf("DELETE /api/faults = %d, leaving %+v; want 204 and none, the scenario's included", code, m.Faults())
 	}
-	if set, _ := m.Rules(m.Status().Run.ID); len(set.Rules) != 1 || set.Rules[0].ID != "deny-stats" {
-		t.Errorf("after removing the faults, the rules are %+v, want the scenario's", set.Rules)
+	if set, _ := m.Rules(m.Status().Run.ID); len(set.Rules) != 0 {
+		t.Errorf("after removing the faults, the rules are %+v, want none", set.Rules)
 	}
 
 	if code, body := call(t, api, "POST", "/api/faults", `{"preset": "deletes_fail"}`); code != http.StatusCreated {
@@ -73,8 +73,8 @@ func TestFaultsAreRemovedAllAtOnceAndByAReset(t *testing.T) {
 		}
 	}
 	s := m.Status()
-	if s.Run.ID == before || s.Run.Scenario.Name != "" || len(m.Faults()) != 0 {
-		t.Errorf("after a reset, run %s with scenario %q and faults %+v; want a new run with neither", s.Run.ID, s.Run.Scenario.Name, m.Faults())
+	if s.Run.ID == before || len(m.Faults()) != 0 {
+		t.Errorf("after a reset, run %s with faults %+v; want a new run without faults", s.Run.ID, m.Faults())
 	}
 	if code, got := send(t, api, "POST", "/api/reset", `{"scenario": "x"}`); code != http.StatusBadRequest || !strings.Contains(got, "unknown field") {
 		t.Errorf("POST /api/reset with a field = %d %s, want 400", code, got)

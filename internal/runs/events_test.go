@@ -9,7 +9,6 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/events"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
@@ -18,7 +17,8 @@ import (
 
 func TestEachRunRecordsItsEvents(t *testing.T) {
 	deny := faults.Rule{ID: "deny", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}
-	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"deny": {Rules: []faults.Rule{deny}}}, Scenario: "deny"})
+	m, addr := startManager(t, Options{})
+	withRules(t, m, deny)
 	first := m.Status().Run.ID
 	rec, err := m.Events(first)
 	if err != nil {
@@ -41,33 +41,35 @@ func TestEachRunRecordsItsEvents(t *testing.T) {
 	for _, e := range got {
 		kinds = append(kinds, e.Kind)
 	}
-	want := []events.Kind{events.RunStarted, events.Connected, events.Authenticated, events.FaultInjected, events.Operation, events.Disconnected}
+	want := []events.Kind{events.RunStarted, events.RulesChanged, events.Connected, events.Authenticated, events.FaultInjected, events.Operation, events.Disconnected}
 	if !slices.Equal(kinds, want) {
 		t.Fatalf("events are %v, want %v", kinds, want)
 	}
 	started := got[0]
-	if r := started.Run; r == nil || r.ID != first || r.Scenario != "deny" || started.Rules == nil || started.Rules.Revision != 1 || len(started.Rules.Faults) == 0 {
-		t.Errorf("run_started = %+v, want the run, its scenario and its first rules", started)
+	if r := started.Run; r == nil || r.ID != first || r.Seed == "" || started.Rules == nil || started.Rules.Revision != 1 {
+		t.Errorf("run_started = %+v, want the run, its seed and its first revision", started)
 	}
-	id := got[1].Connection
-	for _, e := range got[2:] {
+	if r := got[1].Rules; r == nil || r.Revision != 2 || r.Previous != 1 {
+		t.Errorf("rules_changed = %+v, want revision 2, replacing 1", got[1])
+	}
+	id := got[2].Connection
+	for _, e := range got[3:] {
 		if e.Connection != id || e.User != testUser {
 			t.Errorf("%s event of connection %d as %q, want %d as %q", e.Kind, e.Connection, e.User, id, testUser)
 		}
 	}
-	if op := got[4]; op.Request != "SSH_FXP_STAT" || op.Path != "/f" || op.Reply != "SSH_FX_PERMISSION_DENIED" || op.Rule != "deny" {
+	if op := got[5]; op.Request != "SSH_FXP_STAT" || op.Path != "/f" || op.Reply != "SSH_FX_PERMISSION_DENIED" || op.Rule != "deny" {
 		t.Errorf("operation = %+v, want the STAT denied by deny", op)
 	}
 
-	if _, err := m.changeRules(first, 1, nil, nil); err != nil {
+	if _, err := m.changeRules(first, 2, nil); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
-	changed := awaitEvent(t, rec, events.RulesChanged)
-	if r := changed.Rules; r.Revision != 2 || r.Previous != 1 || string(r.Faults) != "[]" {
-		t.Errorf("rules_changed = %+v, want revision 2 with no rules, replacing 1", r)
+	if got := rec.Events(0, 100, events.Filter{}).Events; got[len(got)-1].Kind != events.RulesChanged || got[len(got)-1].Rules.Revision != 3 {
+		t.Errorf("the last event is %+v, want rules_changed to revision 3", got[len(got)-1])
 	}
 
-	if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+	if _, err := m.Reset(t.Context()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 	if !rec.Closed() {
@@ -93,7 +95,7 @@ func TestEventsAreKeptForTheRunsTheWorkspaceKeeps(t *testing.T) {
 	var ids []string
 	for range keptRuns + 1 {
 		ids = append(ids, m.Status().Run.ID)
-		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+		if _, err := m.Reset(t.Context()); err != nil {
 			t.Fatalf("Reset: %v", err)
 		}
 	}
@@ -109,7 +111,8 @@ func TestEventsAreKeptForTheRunsTheWorkspaceKeeps(t *testing.T) {
 func TestStatusCountsWaitsAndEventsCountCancellations(t *testing.T) {
 	stuck := faults.Rule{ID: "stuck", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}}
 	frozen := connectRule(sftpproxy.Freeze{Limit: time.Minute})
-	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"held": {Rules: []faults.Rule{stuck, frozen}}}, Scenario: "held"})
+	m, addr := startManager(t, Options{})
+	withRules(t, m, stuck, frozen)
 	run := m.Status().Run.ID
 	rec, err := m.Events(run)
 	if err != nil {
@@ -133,7 +136,7 @@ func TestStatusCountsWaitsAndEventsCountCancellations(t *testing.T) {
 	}
 
 	// Without the freeze, a client can log in and stall.
-	if _, err := m.changeRules(run, 1, []faults.Rule{stuck}, nil); err != nil {
+	if _, err := m.changeRules(run, 2, []faults.Rule{stuck}); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
 	c, _ := dialSFTP(t, addr)
@@ -142,7 +145,7 @@ func TestStatusCountsWaitsAndEventsCountCancellations(t *testing.T) {
 	if s := m.Status(); s.Stalled != 1 || s.Frozen != 0 {
 		t.Errorf("status with a stall: %d stalled, %d frozen; want 1 and 0", s.Stalled, s.Frozen)
 	}
-	if _, err := m.changeRules(run, 2, nil, nil); err != nil {
+	if _, err := m.changeRules(run, 3, nil); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
 	deadline := time.Now().Add(waitTimeout)

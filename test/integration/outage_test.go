@@ -6,51 +6,37 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
+	"github.com/nebarg/sftpit/internal/config"
 )
 
 // TestOpenSSHOutages takes the server down, closing OpenSSH's connection,
-// at a login, after a request and at a moment of the run. A reconnect during
-// the outage is refused, and one after it succeeds.
+// at a login and after a request. A reconnect during the outage is refused,
+// and one after it succeeds.
 func TestOpenSSHOutages(t *testing.T) {
 	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
 
 	const outage = 1500 * time.Millisecond
-	down := sftpproxy.ListenerDown{Duration: outage, CloseExisting: true}
-	slow := faults.Rule{ID: "slow", Priority: 1, Match: faults.Match{Operations: []faults.Operation{faults.Write}}, Action: sftpproxy.Delay{When: sftpproxy.Before, Duration: 20 * time.Millisecond}}
-	afterRename := down
-	afterRename.When = sftpproxy.After
 	tests := []struct {
 		name   string
-		rule   faults.Rule
+		fault  config.Fault
 		batch  string
 		output string
 		// stored is the file the first connection leaves, if any.
 		stored string
-		// slow slows each write, so that the upload outlasts the moment.
-		slow bool
 	}{
 		{
 			name:   "at the first login",
-			rule:   faults.Rule{ID: "outage", MaxTriggers: 1, Match: faults.Match{Operations: []faults.Operation{faults.Authenticate}}, Action: down},
+			fault:  config.Fault{Name: "Outage", Steps: []string{"authenticate"}, Do: "down", Seconds: new(outage.Seconds()), First: new(uint64(1))},
 			batch:  "ls\n",
 			output: "Connection closed by 127.0.0.1 port",
 		},
 		{
 			name:   "after a rename",
-			rule:   faults.Rule{ID: "outage", Match: faults.Match{Operations: []faults.Operation{faults.Rename}}, Action: afterRename},
+			fault:  config.Fault{Name: "Outage", Steps: []string{"rename"}, Do: "down", Seconds: new(outage.Seconds()), After: true},
 			batch:  "put orders.csv orders.csv.part\nrename orders.csv.part orders.csv\n",
 			output: "Connection to 127.0.0.1 closed by remote host.",
 			stored: "/orders.csv",
-		},
-		{
-			name:   "at a moment of the run",
-			rule:   faults.Rule{ID: "outage", Trigger: &faults.Trigger{Anchor: faults.Run, At: &faults.Range[time.Duration]{Min: 500 * time.Millisecond, Max: 500 * time.Millisecond}}, Action: down},
-			batch:  "put orders.csv\n",
-			output: "Connection to 127.0.0.1 closed by remote host.",
-			slow:   true,
 		},
 	}
 	data := randomBytes(2 << 20)
@@ -58,11 +44,7 @@ func TestOpenSSHOutages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var logs capturedLog
-			rules := []faults.Rule{tt.rule}
-			if tt.slow {
-				rules = append(rules, slow)
-			}
-			srv := startScenario(t, rules, logs.logger())
+			srv := startFaults(t, logs.logger(), tt.fault)
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
@@ -83,7 +65,7 @@ func TestOpenSSHOutages(t *testing.T) {
 			if tt.stored != "" {
 				assertHolds(t, srv, tt.stored, data)
 			}
-			if got := srv.counts(t, "outage").Fired; got != 1 {
+			if got := srv.counts(t, "outage-1").Fired; got != 1 {
 				t.Errorf("the outage fired %d times, want once", got)
 			}
 			if !strings.Contains(logs.text(), "fault=listener_down") || !strings.Contains(logs.text(), "duration=1.5s close_existing=true") {

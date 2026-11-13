@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/runs"
 )
 
@@ -98,7 +99,7 @@ func TestTempWorkspaceIsDeletedOnClose(t *testing.T) {
 	if !w.Temporary() {
 		t.Error("Temporary() = false for a temporary workspace")
 	}
-	if _, err := w.NewRun(runs.Scenario{}); err != nil {
+	if _, err := w.NewRun(0); err != nil {
 		t.Fatalf("NewRun: %v", err)
 	}
 	closeWorkspace(t, w)
@@ -111,7 +112,7 @@ func TestRunsWithReadOnlyDirectoriesAreStillDeleted(t *testing.T) {
 	// A client can leave a directory that cannot be written or listed.
 	leaveLockedDirectory := func(t *testing.T, w *runs.Workspace) {
 		t.Helper()
-		r, err := w.NewRun(runs.Scenario{})
+		r, err := w.NewRun(0)
 		if err != nil {
 			t.Fatalf("NewRun: %v", err)
 		}
@@ -145,7 +146,7 @@ func TestRunsWithReadOnlyDirectoriesAreStillDeleted(t *testing.T) {
 		leaveLockedDirectory(t, w)
 		for range 5 {
 			time.Sleep(2 * time.Millisecond)
-			if _, err := w.NewRun(runs.Scenario{}); err != nil {
+			if _, err := w.NewRun(0); err != nil {
 				t.Fatalf("NewRun once the run with the locked directory is the oldest of six: %v", err)
 			}
 		}
@@ -171,7 +172,7 @@ func TestNewRunKeepsTheNewestFiveRuns(t *testing.T) {
 	for range 7 {
 		// Runs started in the same millisecond have no order.
 		time.Sleep(2 * time.Millisecond)
-		r, err := w.NewRun(runs.Scenario{})
+		r, err := w.NewRun(0)
 		if err != nil {
 			t.Fatalf("NewRun: %v", err)
 		}
@@ -201,24 +202,16 @@ func TestNewRunKeepsTheNewestFiveRuns(t *testing.T) {
 	}
 }
 
-func TestNewRunRecordsItsScenarioAndSeed(t *testing.T) {
+func TestNewRunRecordsItsSeed(t *testing.T) {
 	w := openWorkspace(t, t.TempDir())
 	defer closeWorkspace(t, w)
-	tests := []struct {
-		scenario runs.Scenario
-		want     map[string]any
-	}{
-		{runs.Scenario{Seed: 12}, map[string]any{"seed": 12.0}},
-		{runs.Scenario{Name: "upload-recovery", Seed: 0}, map[string]any{"scenario": "upload-recovery", "seed": 0.0}},
-		{runs.Scenario{Name: "dev-chaos", Seed: 4294967295}, map[string]any{"scenario": "dev-chaos", "seed": 4294967295.0}},
-	}
-	for _, tt := range tests {
-		r, err := w.NewRun(tt.scenario)
+	for _, seed := range []faults.Seed{0, 12, 4294967295} {
+		r, err := w.NewRun(seed)
 		if err != nil {
 			t.Fatalf("NewRun: %v", err)
 		}
-		if r.Scenario != tt.scenario {
-			t.Errorf("NewRun(%+v) has Scenario %+v", tt.scenario, r.Scenario)
+		if r.Seed != seed {
+			t.Errorf("NewRun(%d) has Seed %d", seed, r.Seed)
 		}
 		b, err := os.ReadFile(filepath.Join(r.Dir, "run.json"))
 		if err != nil {
@@ -230,8 +223,8 @@ func TestNewRunRecordsItsScenarioAndSeed(t *testing.T) {
 		}
 		delete(record, "id")
 		delete(record, "started")
-		if !maps.Equal(record, tt.want) {
-			t.Errorf("NewRun(%+v) wrote run.json\n%s\nwant, besides the ID and start, %v", tt.scenario, b, tt.want)
+		if want := map[string]any{"seed": float64(seed)}; !maps.Equal(record, want) {
+			t.Errorf("NewRun(%d) wrote run.json\n%s\nwant, besides the ID and start, %v", seed, b, want)
 		}
 	}
 }

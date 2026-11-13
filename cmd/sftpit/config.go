@@ -16,8 +16,8 @@ Commands:
              without starting anything; serve checks the seed's contents,
              the data directory and the host keys when it starts
   explain    print the configuration as sftpit reads it: every default
-             filled in, recipes in the long form and each secret's
-             source, but never its value
+             filled in, each fault's preset and defaults, and each
+             secret's source, but never its value
 
 Flags:
   --config FILE     the configuration file to read
@@ -88,14 +88,18 @@ func configCommand(args []string, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "sftpit config validate: warning: %s\n", warning)
 	}
-	files, err := cfg.ScenarioFiles.List()
+	scenarios, err := cfg.Scenarios.List()
 	if err != nil {
 		fmt.Fprintf(stderr, "sftpit config validate: %v\n", err)
 		return exitFailure
 	}
-	summary := count(len(cfg.Users), "user") + " and " + count(len(cfg.Scenarios), "scenario")
-	if len(files) > 0 {
-		summary = count(len(cfg.Users), "user") + ", " + count(len(cfg.Scenarios), "scenario") + " and " + count(len(files), "scenario file")
+	sources := make(map[config.Source]int)
+	for _, s := range scenarios {
+		sources[s.Source]++
+	}
+	summary := count(len(cfg.Users), "user") + " and " + count(sources[config.Configured], "scenario")
+	if files := sources[config.Saved]; files > 0 {
+		summary = count(len(cfg.Users), "user") + ", " + count(sources[config.Configured], "scenario") + " and " + count(files, "scenario file")
 	}
 	fmt.Fprintf(stdout, "%s is valid: %s\n", opts.ConfigFile, summary)
 	return exitOK

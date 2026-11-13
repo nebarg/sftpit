@@ -232,7 +232,7 @@ func TestTransfersAreSelectedAtOpenAndFireAtTheirEffect(t *testing.T) {
 		MaxTriggers: 1,
 		Match:       faults.Match{Operations: ops(faults.Write), Path: faults.Location{Kind: faults.Exactly, Pattern: "/in/a.csv"}},
 		Action:      cutOff,
-	}}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	}}, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 
 	if err != nil {
 		t.Fatal(err)
@@ -441,7 +441,7 @@ func TestRangesDrawAValueForEachDecision(t *testing.T) {
 	e, err := faults.New([]faults.Rule{
 		{ID: "slow", Match: faults.Match{Operations: ops(faults.Stat)}, Duration: &durations, Action: sftpproxy.Delay{When: sftpproxy.After}},
 		{ID: "cut", Match: faults.Match{Operations: ops(faults.Write)}, Cutoff: &cutoffs, Action: cutOff},
-	}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	}, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 
 	if err != nil {
 		t.Fatal(err)
@@ -514,7 +514,7 @@ func TestProbabilityDecisionsAreLogged(t *testing.T) {
 	var logs bytes.Buffer
 	e, err := faults.New([]faults.Rule{
 		{ID: "random", Match: faults.Match{Operations: ops(faults.Remove)}, Probability: new(0.25), Action: failure},
-	}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	}, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 
 	if err != nil {
 		t.Fatal(err)
@@ -538,7 +538,6 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 	}{
 		{"no ID", []faults.Rule{{Match: read, Action: failure}}, "a rule has no ID"},
 		{"a repeated ID", []faults.Rule{failOn("r", read), failOn("r", read)}, `rule ID "r" is used twice`},
-		{"an ID of chaos", []faults.Rule{failOn("chaos-delay", read)}, `rule ID "chaos-delay" starts with chaos-, which only the rules of a chaos preset have`},
 		{"no operation", []faults.Rule{failOn("r", faults.Match{})}, "needs at least one operation"},
 		{"an unknown operation", []faults.Rule{failOn("r", faults.Match{Operations: ops("upload")})}, `unknown operation "upload"`},
 		{"a repeated operation", []faults.Rule{failOn("r", faults.Match{Operations: ops(faults.Read, faults.Read)})}, `operation "read" is listed twice`},
@@ -588,7 +587,7 @@ func TestRulesThatCannotApplyAreRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := faults.New(tt.rules, nil, testSeed, faults.Options{})
+			_, err := faults.New(tt.rules, testSeed, faults.Options{})
 			if err == nil || !strings.Contains(err.Error(), tt.err) || !strings.HasPrefix(err.Error(), "faults: ") {
 				t.Errorf("New = %v, want an error about %q", err, tt.err)
 			}
@@ -637,10 +636,11 @@ func TestEngineRecordsItsDecisionsAndSuppressedFaults(t *testing.T) {
 		{ID: "flaky", Match: stat, Probability: new(0.5), Action: failure},
 		{ID: "slow", Match: faults.Match{Operations: ops(faults.Mkdir)}, Duration: &faults.Range[time.Duration]{Min: time.Second, Max: time.Minute}, Action: sftpproxy.Delay{}},
 		{ID: "cut-once", Match: faults.Match{Operations: ops(faults.Write)}, MaxTriggers: 1, Action: sftpproxy.PartialUpload{Cutoff: 1, Result: failure}},
-	}, nil, testSeed, faults.Options{
+	}, testSeed, faults.Options{
 		Logger: slog.New(slog.DiscardHandler),
 		Record: func(e events.Event) { recorded = append(recorded, e) },
 	})
+
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

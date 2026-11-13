@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/testutil"
@@ -20,7 +19,8 @@ import (
 
 func TestReleaseStallsLetsAStalledRequestGoOn(t *testing.T) {
 	stuck := faults.Rule{ID: "stuck", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Stall{When: sftpproxy.Before, Limit: time.Minute}}
-	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"stuck": {Rules: []faults.Rule{stuck}}}, Scenario: "stuck"})
+	m, addr := startManager(t, Options{})
+	withRules(t, m, stuck)
 	run := m.Status().Run.ID
 	c, _ := dialSFTP(t, addr)
 	for stat := 1; stat <= 2; stat++ {
@@ -62,7 +62,8 @@ func TestReleaseStallsClosesAConnectionFrozenAtConnectButLeavesADelay(t *testing
 		t.Run(tt.name, func(t *testing.T) {
 			logs := make(messages, 64)
 			held := connectRule(tt.action)
-			m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"held": {Rules: []faults.Rule{held}}}, Scenario: "held", Logger: slog.New(logs)})
+			m, addr := startManager(t, Options{Logger: slog.New(logs)})
+			withRules(t, m, held)
 			raw, err := net.Dial("tcp", addr)
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
@@ -105,7 +106,8 @@ func TestAReleaseAsAFreezeAtConnectIsAnnouncedEndsIt(t *testing.T) {
 			t.Errorf("ReleaseStalls: %v", err)
 		}
 	})
-	started, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"held": {Rules: []faults.Rule{connectRule(sftpproxy.Freeze{Limit: time.Minute})}}}, Scenario: "held", Logger: slog.New(release)})
+	started, addr := startManager(t, Options{Logger: slog.New(release)})
+	withRules(t, started, connectRule(sftpproxy.Freeze{Limit: time.Minute}))
 	m.Store(started)
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {

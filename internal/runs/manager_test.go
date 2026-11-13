@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -47,7 +46,7 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	next, err := m.Reset(t.Context(), ResetRequest{})
+	next, err := m.Reset(t.Context())
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
@@ -71,123 +70,73 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 	}
 }
 
-func TestResetChoosesTheNextRunsScenario(t *testing.T) {
-	scenarios := map[string]config.Scenario{"chaos": {}, "own": {}}
-	tests := []struct {
-		name     string
-		scenario string
-		req      ResetRequest
-		want     string
-	}{
-		{name: "the scenario is repeated", scenario: "chaos", want: "chaos"},
-		{name: "a named scenario", scenario: "chaos", req: ResetRequest{Scenario: new("own")}, want: "own"},
-		{name: "no scenario", scenario: "chaos", req: ResetRequest{Scenario: new("")}, want: ""},
-		{name: "still no scenario", want: ""},
+func TestResetStartsARunWithoutFaultsAndAFreshSeed(t *testing.T) {
+	m, addr := startManager(t, Options{Scenarios: testScenarios(t), Scenario: "unreliable-light"})
+	deny := faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}
+	if _, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); err != nil {
+		t.Fatalf("AddFault: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m, _ := startManager(t, Options{Scenarios: scenarios, Scenario: tt.scenario})
-			first := m.Status().Run
-			next, err := m.Reset(t.Context(), tt.req)
-			if err != nil {
-				t.Fatalf("Reset: %v", err)
-			}
-			got := next.Run.Scenario
-			if got.Name != tt.want || got.Seed == first.Scenario.Seed {
-				t.Errorf("after %+v, the next run has %+v, want scenario %q and a fresh seed", first.Scenario, got, tt.want)
-			}
-		})
+	set := m.Status()
+	if _, err := m.changeRules(set.Run.ID, set.Revision, append(m.current.rules.Rules().Rules, deny)); err != nil {
+		t.Fatalf("changeRules: %v", err)
+	}
+	first := m.Status().Run
+	c, _ := dialSFTP(t, addr)
+	if _, err := c.Stat("/"); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("a stat in the first run = %v, want it denied", err)
+	}
+
+	next, err := m.Reset(t.Context())
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if next.Run.Seed == first.Seed {
+		t.Errorf("the next run has the seed %d of the first", next.Run.Seed)
+	}
+	if got := m.Faults(); len(got) != 0 {
+		t.Errorf("after a reset, Faults = %+v, want none", got)
+	}
+	if set, err := m.Rules(next.Run.ID); err != nil || len(set.Rules) != 0 {
+		t.Errorf("after a reset, the rules are %+v, %v, want none", set, err)
+	}
+	scenarios, err := m.Scenarios()
+	if err != nil {
+		t.Fatalf("Scenarios: %v", err)
+	}
+	for _, s := range scenarios {
+		if s.On {
+			t.Errorf("after a reset, scenario %s is on", s.Name)
+		}
+	}
+	c, _ = dialSFTP(t, addr)
+	if _, err := c.Stat("/"); err != nil {
+		t.Errorf("a stat after the reset = %v, want it to work", err)
 	}
 }
 
-func TestResetRefusesARunItCannotStart(t *testing.T) {
-	scenarios := map[string]config.Scenario{"chaos": {}, "own": {}}
-	tests := []struct {
-		name     string
-		scenario string
-		req      ResetRequest
-		err      error
-		want     string
-	}{
-		{name: "an unknown scenario", req: ResetRequest{Scenario: new("flaky")}, err: ErrUnknownScenario, want: `runs: unknown scenario "flaky"; the configuration defines chaos, own`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m, addr := startManager(t, Options{Scenarios: scenarios, Scenario: tt.scenario})
-			first := m.Status()
-			_, ended := dialSFTP(t, addr)
-			if _, err := m.Reset(t.Context(), tt.req); !errors.Is(err, tt.err) || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("Reset = %v, want %v saying %q", err, tt.err, tt.want)
-			}
-			if got := m.Status(); got != first {
-				t.Errorf("after the refused reset, the status is %+v, want %+v", got, first)
-			}
-			select {
-			case err := <-ended:
-				t.Errorf("the refused reset ended a connection: %v", err)
-			default:
-			}
-		})
-	}
-}
-
-func TestResetStartsTheRulesAgain(t *testing.T) {
-	deny := faults.Rule{ID: "deny-first-stat", MaxTriggers: 1, Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}
-	m, addr := startManager(t, Options{Scenarios: map[string]config.Scenario{"deny": {Rules: []faults.Rule{deny}}}, Scenario: "deny"})
-	for run := 1; run <= 2; run++ {
-		c, _ := dialSFTP(t, addr)
-		if _, err := c.Stat("/"); !errors.Is(err, os.ErrPermission) {
-			t.Errorf("run %d: the first stat = %v, want it denied", run, err)
+func TestResetEndsAnOutage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newManager(t, Options{})
+		withRules(t, m, outageAt(time.Second))
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if s := m.Status(); s.State != StateDown || !s.DownUntil.Equal(time.Now().Add(time.Minute)) {
+			t.Errorf("a second into the run, the status is %+v, want down for a minute", s)
 		}
-		if _, err := c.Stat("/"); err != nil {
-			t.Errorf("run %d: the second stat = %v, want the rule used up", run, err)
-		}
-		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+		if _, err := m.Reset(t.Context()); err != nil {
 			t.Fatalf("Reset: %v", err)
 		}
-	}
-}
-
-func TestResetEndsAnOutageAndTimesTheNextRunFromItsStart(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(time.Second)}}}, Scenario: "outage"})
-		for run := 1; run <= 2; run++ {
-			time.Sleep(time.Second - time.Nanosecond)
-			synctest.Wait()
-			if s := m.Status(); s.State != StateUp {
-				t.Errorf("run %d: just before a second into the run, the status is %+v, want up", run, s)
-			}
-			time.Sleep(time.Nanosecond)
-			synctest.Wait()
-			if s := m.Status(); s.State != StateDown || !s.DownUntil.Equal(time.Now().Add(time.Minute)) {
-				t.Errorf("run %d: a second into the run, the status is %+v, want down for a minute", run, s)
-			}
-			if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
-				t.Fatalf("Reset: %v", err)
-			}
-			if s := m.Status(); s.State != StateUp {
-				t.Errorf("run %d: after the reset, the status is %+v, want the next run up", run, s)
-			}
+		if s := m.Status(); s.State != StateUp {
+			t.Errorf("after the reset, the status is %+v, want the next run up", s)
 		}
 	})
 }
 
-func TestAnOutageAtTheStartOfARunBeginsWithIt(t *testing.T) {
-	m, _ := startManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(0)}}}, Scenario: "outage"})
-	for run := 1; run <= 2; run++ {
-		if s := m.Status(); s.State != StateDown {
-			t.Errorf("run %d: the status is %+v, want the server down from the run's start", run, s)
-		}
-		if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
-			t.Fatalf("Reset: %v", err)
-		}
-	}
-}
-
 func TestResetStopsTheRunsTimers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(300 * time.Millisecond)}}}, Scenario: "outage"})
-		if _, err := m.Reset(t.Context(), ResetRequest{Scenario: new("")}); err != nil {
+		m := newManager(t, Options{})
+		withRules(t, m, outageAt(300*time.Millisecond))
+		if _, err := m.Reset(t.Context()); err != nil {
 			t.Fatalf("Reset: %v", err)
 		}
 		time.Sleep(time.Hour)
@@ -215,12 +164,8 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(seed, "big.bin"), make([]byte, 1<<20), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			m, addr := startManager(t, Options{
-				SeedDir:   seed,
-				Scenarios: map[string]config.Scenario{"slow": {Rules: []faults.Rule{tt.rule}}},
-				Scenario:  "slow",
-				Logger:    slog.New(injected),
-			})
+			m, addr := startManager(t, Options{SeedDir: seed, Logger: slog.New(injected)})
+			withRules(t, m, tt.rule)
 			first := m.Status().Run
 			c, _ := dialSFTP(t, addr)
 			go func() {
@@ -241,7 +186,7 @@ func TestResetWaitsForEverySessionToFinish(t *testing.T) {
 			testutil.ReceiveUntil(t, injected, "injected fault")
 
 			start := time.Now()
-			if _, err := m.Reset(t.Context(), ResetRequest{}); err != nil {
+			if _, err := m.Reset(t.Context()); err != nil {
 				t.Fatalf("Reset: %v", err)
 			}
 			if took := time.Since(start); took > waitTimeout {
@@ -295,7 +240,7 @@ func TestAFailedResetLeavesTheRunUnavailableUntilOneSucceeds(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := m.Reset(ctx, ResetRequest{}); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := m.Reset(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Reset = %v, want the deadline exceeded", err)
 	}
 	if s := m.Status(); s.State != StateUnavailable || !errors.Is(s.Err, context.DeadlineExceeded) || s.Run != first {
@@ -305,7 +250,7 @@ func TestAFailedResetLeavesTheRunUnavailableUntilOneSucceeds(t *testing.T) {
 
 	reset := make(chan error, 1)
 	go func() {
-		_, err := m.Reset(t.Context(), ResetRequest{})
+		_, err := m.Reset(t.Context())
 		reset <- err
 	}()
 	awaitState(t, m, StateResetting)
@@ -336,7 +281,8 @@ func TestCloseEndsTheRun(t *testing.T) {
 
 func TestCloseStopsTheRunsTimers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(300 * time.Millisecond)}}}, Scenario: "outage"})
+		m := newManager(t, Options{})
+		withRules(t, m, outageAt(300*time.Millisecond))
 		if err := m.Close(); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
@@ -436,7 +382,7 @@ func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
 
 	reset := make(chan error, 1)
 	go func() {
-		_, err := m.Reset(t.Context(), ResetRequest{})
+		_, err := m.Reset(t.Context())
 		reset <- err
 	}()
 	awaitState(t, m, StateResetting)
@@ -456,23 +402,7 @@ func TestAResetUnderwayWhenTheManagerClosesStartsNoRun(t *testing.T) {
 	if runs, err := os.ReadDir(filepath.Join(m.workspace.Dir(), runsDir)); err != nil || len(runs) != 1 {
 		t.Errorf("the workspace holds runs %v (%v), want only the first", runs, err)
 	}
-	if _, err := m.changeRules(m.Status().Run.ID, 1, nil, nil); !errors.Is(err, sshfront.ErrServerClosed) {
+	if _, err := m.changeRules(m.Status().Run.ID, 1, nil); !errors.Is(err, sshfront.ErrServerClosed) {
 		t.Errorf("changeRules after Close = %v, want ErrServerClosed", err)
 	}
-}
-
-// TestAResetReturnsWithTheNextRunsStartingOutageUnderWay checks that an
-// outage at the start of the next run, which begins while the reset holds
-// admission closed, has begun by the time Reset returns.
-func TestAResetReturnsWithTheNextRunsStartingOutageUnderWay(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		m := newManager(t, Options{Scenarios: map[string]config.Scenario{"outage": {Rules: []faults.Rule{outageAt(0)}}}, Scenario: "outage"})
-		status, err := m.Reset(t.Context(), ResetRequest{})
-		if err != nil {
-			t.Fatalf("Reset: %v", err)
-		}
-		if status.State != StateDown || !status.DownUntil.Equal(time.Now().Add(time.Minute)) {
-			t.Errorf("Reset answered %+v, want the next run down from its start", status)
-		}
-	})
 }

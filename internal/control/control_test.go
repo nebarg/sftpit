@@ -14,11 +14,11 @@ import (
 )
 
 func TestStatus(t *testing.T) {
-	m, api := start(t, runs.Options{Scenario: "chaos"})
+	m, api := start(t, runs.Options{})
 	code, body := call(t, api, "GET", "/api/status", "")
 	want := map[string]any{
 		"sftp": map[string]any{"state": "up"},
-		"run":  map[string]any{"id": m.Status().Run.ID, "scenario": "chaos", "stalled": 0, "frozen": 0},
+		"run":  map[string]any{"id": m.Status().Run.ID, "stalled": 0, "frozen": 0},
 	}
 	if code != http.StatusOK || !equalJSON(body, want) {
 		t.Errorf("status = %d %v, want %v", code, body, want)

@@ -152,7 +152,7 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 			tb.Errorf("close the workspace: %v", err)
 		}
 	})
-	run, err := workspace.NewRun(runs.Scenario{})
+	run, err := workspace.NewRun(0)
 	if err != nil {
 		tb.Fatalf("NewRun: %v", err)
 	}
@@ -201,15 +201,16 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 	return s
 }
 
-// startScenario starts runs, as sftpit serve does, whose first run injects
-// the faults of rules, and logs to logger, or nowhere if it is nil.
-func startScenario(tb testing.TB, rules []faults.Rule, logger *slog.Logger) *server {
+// startFaults starts runs, as sftpit serve does, adds faults to the first
+// run, as the API does, and logs to logger, or nowhere if it is nil.
+func startFaults(tb testing.TB, logger *slog.Logger, faults ...config.Fault) *server {
 	tb.Helper()
-	_, srv := startRuns(tb, runs.Options{
-		Scenarios: map[string]config.Scenario{"test": {Rules: rules}},
-		Scenario:  "test",
-		Logger:    logger,
-	})
+	m, srv := startRuns(tb, runs.Options{Logger: logger})
+	for _, f := range faults {
+		if _, err := m.AddFault(f); err != nil {
+			tb.Fatalf("AddFault(%+v): %v", f, err)
+		}
+	}
 	return srv
 }
 
@@ -261,29 +262,6 @@ func startRuns(tb testing.TB, opts runs.Options) (*runs.Manager, *server) {
 		tb.Fatalf("SplitHostPort: %v", err)
 	}
 	return m, s
-}
-
-// scenarioOptions returns the options of runs whose first run injects the
-// faults of scenario, as sftpit serve --scenario does, from a configuration
-// with the test user and scenarios as its scenarios section.
-func scenarioOptions(tb testing.TB, scenarios, scenario string) runs.Options {
-	tb.Helper()
-	configFile := filepath.Join(tb.TempDir(), "sftpit.yaml")
-	writeFile(tb, configFile, []byte(`schema_version: 1
-users:
-  - name: `+testUser+`
-    password_env: TEST_PASSWORD
-scenarios:
-`+scenarios))
-	cfg, err := config.Load(config.Options{
-		ConfigFile: configFile,
-		Scenario:   scenario,
-		LookupEnv:  func(name string) (string, bool) { return testPassword, name == "TEST_PASSWORD" },
-	})
-	if err != nil {
-		tb.Fatalf("Load: %v", err)
-	}
-	return runs.Options{Scenarios: cfg.Scenarios, Scenario: cfg.Scenario}
 }
 
 // testUsers are the users of a server: the test user, with a password and

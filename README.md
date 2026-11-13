@@ -110,6 +110,36 @@ Every fault can be narrowed:
 
 For `stop_partway` and `corrupt`, `only` counts the uploads or downloads of each file, so `"only": 2` acts on the second upload of each file.
 
+## Scenarios
+
+A scenario is a named group of faults that are turned on and off together. Turning one on adds its faults; turning it off removes them. A reset turns every scenario off.
+
+```bash
+curl -X PATCH -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/scenarios/unreliable-moderate -d '{"on": true}'
+```
+
+sftpit has three built-in scenarios:
+
+| Scenario | Faults |
+|---|---|
+| `unreliable-light` | 5% of commands wait 2 seconds, and 1% fail. |
+| `unreliable-moderate` | 10% of commands wait 2 seconds, 3% fail, and 2% of uploads and downloads stop partway. |
+| `unreliable-heavy` | 20% of commands wait 2 seconds, 8% fail, 5% of uploads and downloads stop partway, and 0.5% of commands stop responding for 15 seconds. |
+
+"Commands" are every request except connecting, logging in and reading or writing file data.
+
+Scenarios of your own are saved as YAML files in a scenarios folder: `scenarios` beside the configuration file, `sftpit-scenarios` in the working folder without one, or the folder `scenarios_dir` names. Each fault is written as it is sent to `POST /api/faults`:
+
+```yaml
+schema_version: 1
+description: "Partner B's uploads fail, and listings are slow."
+faults:
+  - { preset: "upload_stops_partway", user: "partner-b", first: 1 }
+  - { name: "Slow listings", steps: ["list"], do: "wait", seconds: 1.5 }
+```
+
+`PUT /api/scenarios/{name}` saves a scenario to that folder, and the dashboard can save the faults that are on as one. A configuration file can define scenarios too, under `scenarios:`, in the same form. `--scenario NAME` turns a scenario on at startup.
+
 ## Using sftpit from a test
 
 Point your code at sftpit like any SFTP server. In a test, turn a fault on, run the code, check that the fault happened, and check how the code handled it. Then reset sftpit for the next test.
@@ -132,7 +162,7 @@ curl http://127.0.0.1:8122/api/faults/deletes-fail-1
 curl -X POST -H 'Sftpit-Control: 1' http://127.0.0.1:8122/api/reset
 ```
 
-A reset turns every fault off, disconnects every client, deletes what clients wrote and restores the starting files.
+A reset removes every fault, disconnects every client, deletes what clients wrote and restores the starting files.
 
 Every request that changes something must include the `Sftpit-Control` header, with any value. Browsers cannot send it from other websites, so a web page cannot change sftpit.
 
@@ -147,8 +177,12 @@ Every request that changes something must include the `Sftpit-Control` header, w
 | `GET /api/faults/{id}` | Answers with one fault. |
 | `PATCH /api/faults/{id}` | Turns a fault on or off: `{"on": false}`. Turning it on again counts `happened` from 0. |
 | `DELETE /api/faults/{id}` | Removes a fault, answering 204. |
-| `DELETE /api/faults` | Removes every fault, answering 204. |
-| `POST /api/reset` | Turns every fault off, disconnects every client and restores the starting files, answering 204. |
+| `DELETE /api/faults` | Removes every fault, scenarios' included, answering 204. |
+| `GET /api/scenarios` | Lists the scenarios, as `{"scenarios": [...]}`, each with its `source` (`built_in`, `config` or `file`), whether it is `on`, and its faults. |
+| `PATCH /api/scenarios/{name}` | Turns a scenario on or off: `{"on": true}`. Turning it on again replaces its faults with new ones, counting from 0. |
+| `PUT /api/scenarios/{name}` | Saves a scenario as a file: `{"description": "...", "faults": [...]}`. If it is on, its faults are replaced with the new ones. Built-in and configured scenarios can't be changed (409). |
+| `DELETE /api/scenarios/{name}` | Deletes a saved scenario and removes its faults, answering 204. |
+| `POST /api/reset` | Removes every fault, scenarios' included, disconnects every client and restores the starting files, answering 204. |
 | `POST /api/release` | Releases the requests `hold` faults are holding and the connections `freeze` faults are freezing. |
 | `GET /api/activity` | What clients did, as lines. `?limit=N` gives the latest N, 500 by default. |
 | `GET /api/files` | The server's files, with sizes, modes and times. `?path=/folder` lists one folder and what is in it; `?hash=true` adds SHA-256 hashes. |
@@ -158,7 +192,7 @@ Every request that changes something must include the `Sftpit-Control` header, w
 
 Errors are answered as `{"error": "..."}`.
 
-A fault's ID comes from its name, such as `deletes-fail-1`. A fault without a `name` gets its preset's name, or "Custom fault".
+A fault's ID comes from its name, such as `deletes-fail-1`. A fault without a `name` gets its preset's name, or "Custom fault". A fault that a scenario added has the scenario's name in `scenario`.
 
 </details>
 
@@ -228,6 +262,7 @@ By default sftpit serves SFTP on `127.0.0.1:2122` and the dashboard and API on `
 | `--seed-dir DIR` | Start with a copy of the files in `DIR`. |
 | `--data-dir DIR` | Keep the workspace in `DIR` after sftpit stops. |
 | `--config FILE` | Read users and settings from a configuration file. |
+| `--scenario NAME` | Turn a [scenario](#scenarios) on at startup. |
 | `--log-level LEVEL` | `debug` adds a line for every SFTP request; `warn` and `error` log less. `info` is the default. |
 | `--ready-file FILE` | Write the addresses to `FILE` once listening. |
 | `--profile container` | Listen on every interface, for use in a container. |
@@ -291,6 +326,7 @@ Add the service to the project's `docker-compose.yml`, as [`examples/compose`](e
 schema_version: 1
 
 env_file: ".env" # optional; a path or a list of paths
+scenarios_dir: "./scenarios" # optional; where saved scenarios go
 
 server:
   sftp_listen: "127.0.0.1:2122"
@@ -318,32 +354,20 @@ policy:
     - path_prefix: "/reference" # for every user
     - path_prefix: "/outgoing"
       users: ["partner-b"]
+
+scenarios:
+  partner-trouble:
+    description: "Deletes fail for partner-b."
+    faults:
+      - { preset: "deletes_fail", user: "partner-b" }
 ```
 
 - Relative paths are resolved from the configuration file's folder. Flags override the file. Unknown fields are errors.
 - **Users:** without `users`, sftpit accepts `test` with the password `test`. Passwords are never written in the file: `password_env` names an environment variable, read from the environment or from the env files that `env_file` and `--env-file` name. sftpit offers key login only if some user has keys, and password login only if some user has a password.
 - **Limits:** a request that would exceed a limit changes nothing and fails with "failure", as a write to a full disk does.
 - **Read-only paths:** clients can list and download there, but every change is refused with "permission denied", whatever faults are on.
-- `sftpit config validate --config FILE` checks a file without starting a server.
-
-</details>
-
-<details>
-<summary><b>Scenarios and chaos</b></summary>
-
-A configuration file can also define scenarios: named sets of rules in the engine's own format, which `--scenario NAME` applies from startup. Chaos presets in a scenario fail, delay and drop a share of requests at random. Both are being reconsidered, and the faults above are the recommended way to make sftpit fail.
-
-```yaml
-scenarios:
-  first-upload-cut:
-    faults:
-      - id: "first-upload-cut"
-        fail_upload: { path: "/incoming/orders.csv", attempts: [1], after_bytes: 32768 }
-  flaky:
-    chaos: { preset: "moderate" } # light, moderate or heavy
-```
-
-`sftpit config explain --config FILE` prints every scenario's rules in full.
+- **Scenarios:** `scenarios:` defines [scenarios](#scenarios) by name, each with a `description` and `faults`.
+- `sftpit config validate --config FILE` checks a file without starting a server, and `sftpit config explain --config FILE` prints it with every default filled in.
 
 </details>
 

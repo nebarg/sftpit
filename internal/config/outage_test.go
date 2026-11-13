@@ -11,10 +11,10 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
-func TestLoadReadsListenerDown(t *testing.T) {
+func TestLongFormReadsListenerDown(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	cfg, err := loadScenarios(t, dir, `  outages:
+	rules, err := compileLongForm(t, dir, `  outages:
     faults:
       - id: at-first-login
         max_triggers: 1
@@ -26,9 +26,9 @@ func TestLoadReadsListenerDown(t *testing.T) {
       - id: after-publishing
         match: {operation: rename}
         action: {type: listener_down, when: after, duration: 2s, close_existing: false}
-`, "")
+`)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("compileLongForm: %v", err)
 	}
 	want := []faults.Rule{
 		{
@@ -49,12 +49,12 @@ func TestLoadReadsListenerDown(t *testing.T) {
 			Action: sftpproxy.ListenerDown{When: sftpproxy.After, Duration: 2 * time.Second},
 		},
 	}
-	if got := cfg.Scenarios["outages"].Rules; !reflect.DeepEqual(got, want) {
+	if got := rules["outages"]; !reflect.DeepEqual(got, want) {
 		t.Errorf("rules =\n%+v\nwant\n%+v", got, want)
 	}
 }
 
-func TestLoadRejectsInvalidListenerDown(t *testing.T) {
+func TestLongFormRejectsInvalidListenerDown(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	tests := []struct {
@@ -68,7 +68,7 @@ func TestLoadRejectsInvalidListenerDown(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := loadScenarios(t, dir, oneRule(tt.rule), "")
+			_, err := compileLongForm(t, dir, oneRule(tt.rule))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

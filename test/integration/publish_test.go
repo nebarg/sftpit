@@ -6,15 +6,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
+
+	"github.com/nebarg/sftpit/internal/config"
+	"github.com/nebarg/sftpit/internal/runs"
 )
 
 // TestOpenSSHPublishesThroughAPartFile has OpenSSH's sftp stand in for an
 // application that uploads under a temporary name and then renames the file
-// into place, with a scenario that cuts off its first upload. An uploader
-// that tries again publishes the whole file; one that ignores the failure
-// publishes only what was stored before the cutoff.
+// into place, with a fault that refuses its first upload's first write. An
+// uploader that tries again publishes the whole file; one that ignores the
+// failure publishes only part of it.
 func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
 	t.Parallel()
 	sftpPath := openSSHOrSkip(t)
@@ -35,15 +37,12 @@ func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			opts := scenarioOptions(t, `  publish:
-    faults:
-      - id: first-upload-cutoff
-        fail_upload:
-          path: `+temporaryPath+`
-          attempts: [1]
-          after_bytes: `+strconv.Itoa(uploadCutoff)+`
-`, "publish")
-			m, srv := startRuns(t, opts)
+			m, srv := startRuns(t, runs.Options{})
+			// The first write to the temporary file is refused.
+			cutoff := config.Fault{Name: "First upload cutoff", Steps: []string{"write"}, Do: "refuse", File: temporaryPath, Only: new(uint64(1))}
+			if _, err := m.AddFault(cutoff); err != nil {
+				t.Fatalf("AddFault: %v", err)
+			}
 			work := t.TempDir()
 			writeFile(t, filepath.Join(work, "orders.csv"), data)
 
@@ -57,8 +56,8 @@ func TestOpenSSHPublishesThroughAPartFile(t *testing.T) {
 			}
 
 			srv.waitForSessions()
-			if set, err := m.Rules(srv.run.ID); err != nil || set.Counts["first-upload-cutoff"].Fired != 1 {
-				t.Errorf("the cutoff fired %+v (%v), want once", set.Counts["first-upload-cutoff"], err)
+			if set, err := m.Rules(srv.run.ID); err != nil || set.Counts["first-upload-cutoff-1"].Fired != 1 {
+				t.Errorf("the cutoff fired %+v (%v), want once", set.Counts["first-upload-cutoff-1"], err)
 			}
 			published, err := os.ReadFile(srv.path(publishedPath))
 			if err != nil {

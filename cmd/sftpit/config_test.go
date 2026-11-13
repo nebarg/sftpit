@@ -18,8 +18,7 @@ users:
 scenarios:
   upload-recovery:
     faults:
-      - id: first-upload-cutoff
-        fail_upload: {path: /incoming/orders.csv.part, attempts: [1], after_bytes: 1048576}
+      - {preset: upload_stops_partway, kb: 1024, file: /incoming/orders.csv.part, only: 1}
 `
 
 func runConfig(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -44,11 +43,11 @@ func TestConfigValidateChecksWithoutStarting(t *testing.T) {
 		t.Errorf("validate left %v in the config's directory (%v), want only the config and env file", entries, err)
 	}
 
-	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "quiet.yaml"), "schema_version: 1\nfaults: []\n")
+	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "quiet.yaml"), "schema_version: 1\nfaults: [{preset: deletes_fail}]\n")
 	if code, stdout, _ := runConfig(t, "validate", "--config", config); code != exitOK || stdout != config+" is valid: 2 users, 1 scenario and 1 scenario file\n" {
 		t.Errorf("validate = %d with stdout %q, want the scenario file counted", code, stdout)
 	}
-	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "upload-recovery.yaml"), "schema_version: 1\nfaults: []\n")
+	testutil.WriteFile(t, filepath.Join(dir, "scenarios", "upload-recovery.yaml"), "schema_version: 1\nfaults: [{preset: deletes_fail}]\n")
 	if code, _, stderr := runConfig(t, "validate", "--config", config); code != exitUsage || !strings.Contains(stderr, "the configuration file defines a scenario upload-recovery too") {
 		t.Errorf("validate = %d with stderr %q, want the clash with the configuration reported", code, stderr)
 	}
@@ -66,7 +65,7 @@ func TestConfigValidateChecksWithoutStarting(t *testing.T) {
 	tests := []struct {
 		name, config, want string
 	}{
-		{"an invalid scenario", strings.Replace(validConfig, "after_bytes: 1048576", "after_bytes: 1048576, result: retry", 1), `sftpit config validate: scenarios.upload-recovery.faults[0] (first-upload-cutoff): fail_upload: action: result "retry" is not status`},
+		{"an invalid scenario", strings.Replace(validConfig, "only: 1", "only: 1, first: 1", 1), "sftpit config validate: scenarios.upload-recovery: faults[0]: choose one of first, only, percent and minutes"},
 		{"a missing secret", strings.Replace(validConfig, "SFTPIT_CONFIG_TEST_OTHER", "SFTPIT_CONFIG_TEST_UNSET", 1), "sftpit config validate: SFTPIT_CONFIG_TEST_UNSET is not set in the environment or "},
 	}
 	for _, tt := range tests {
@@ -97,7 +96,7 @@ func TestConfigExplainPrintsTheConfigurationAsRead(t *testing.T) {
 		"#   SFTPIT_CONFIG_TEST_PASSWORD: from " + extra + "\n",
 		"#   SFTPIT_CONFIG_TEST_OTHER: missing; it is not in the environment or " + filepath.Join(dir, ".env") + " (not found), " + extra + "\n",
 		"env_file: [" + filepath.Join(dir, ".env") + ", " + extra + "]\n",
-		"          type: partial_upload\n          cutoff_offset: 1048576\n          result: status\n          status: failure\n",
+		"      - name: Uploads stop partway\n        preset: upload_stops_partway\n        steps: [write]\n        do: stop_partway\n        kb: 1024\n        file: /incoming/orders.csv.part\n        only: 1\n",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("explain printed\n%s\nwant it to hold\n%s", stdout, want)
@@ -107,9 +106,9 @@ func TestConfigExplainPrintsTheConfigurationAsRead(t *testing.T) {
 		t.Errorf("explain printed a secret:\n%s", stdout)
 	}
 
-	testutil.WriteFile(t, config, validConfig+"      - {id: bad, match: {operation: upload}, action: {type: fail, when: before, status: failure}}\n")
-	if code, stdout, stderr := runConfig(t, "explain", "--config", config); code != exitUsage || stdout != "" || !strings.Contains(stderr, `sftpit config explain: scenarios.upload-recovery: faults: rule "bad": unknown operation "upload"`) {
-		t.Errorf("explain = %d with stdout %q and stderr %q, want the invalid rule reported", code, stdout, stderr)
+	testutil.WriteFile(t, config, validConfig+"      - {steps: [upload], do: refuse}\n")
+	if code, stdout, stderr := runConfig(t, "explain", "--config", config); code != exitUsage || stdout != "" || !strings.Contains(stderr, `sftpit config explain: scenarios.upload-recovery: faults[1]: there is no step "upload"`) {
+		t.Errorf("explain = %d with stdout %q and stderr %q, want the invalid fault reported", code, stdout, stderr)
 	}
 }
 

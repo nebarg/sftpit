@@ -2,943 +2,388 @@ package config
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
-	"regexp"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
-	"go.yaml.in/yaml/v3"
-	"golang.org/x/crypto/ssh"
-
-	"github.com/nebarg/sftpit/internal/faults"
-	"github.com/nebarg/sftpit/internal/sftpproxy"
-	"github.com/nebarg/sftpit/internal/sftpwire"
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-// namePattern constrains scenario names and rule IDs, which appear in logs
-// and in the control API's replies.
-var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-type scenarioConfig struct {
-	Description string       `yaml:"description,omitempty"`
-	Faults      []ruleConfig `yaml:"faults"`
-	Chaos       *chaosConfig `yaml:"chaos,omitempty"`
+// Scenario is a named group of faults that are turned on and off together.
+// Its faults are kept as given, without their presets and defaults filled
+// in.
+type Scenario struct {
+	Description string  `json:"description,omitempty" yaml:"description,omitempty"`
+	Faults      []Fault `json:"faults" yaml:"faults"`
 }
 
-type ruleConfig struct {
-	ID          string          `yaml:"id" json:"id"`
-	Priority    int             `yaml:"priority" json:"priority"`
-	MaxTriggers int             `yaml:"max_triggers" json:"max_triggers"`
-	Match       matchConfig     `yaml:"match" json:"match"`
-	Trigger     *triggerConfig  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
-	Decision    *decisionConfig `yaml:"decision,omitempty" json:"decision,omitempty"`
-	Action      actionConfig    `yaml:"action" json:"action"`
+// Source says where a scenario is defined.
+type Source string
 
-	// A rule gives either a match and an action, or one recipe.
-	FailUpload          *failUploadConfig          `yaml:"fail_upload,omitempty" json:"fail_upload,omitempty"`
-	FailDownload        *failDownloadConfig        `yaml:"fail_download,omitempty" json:"fail_download,omitempty"`
-	FailRandomly        *failRandomlyConfig        `yaml:"fail_randomly,omitempty" json:"fail_randomly,omitempty"`
-	CorruptDownload     *corruptDownloadConfig     `yaml:"corrupt_download,omitempty" json:"corrupt_download,omitempty"`
-	CorruptUpload       *corruptUploadConfig       `yaml:"corrupt_upload,omitempty" json:"corrupt_upload,omitempty"`
-	DenyAcknowledgement *denyAcknowledgementConfig `yaml:"deny_acknowledgement,omitempty" json:"deny_acknowledgement,omitempty"`
-	MissingFile         *missingFileConfig         `yaml:"missing_file,omitempty" json:"missing_file,omitempty"`
+const (
+	// BuiltIn is a scenario that sftpit itself defines.
+	BuiltIn Source = "built_in"
+
+	// Configured is a scenario of the configuration file.
+	Configured Source = "config"
+
+	// Saved is a scenario saved as a file in the scenarios directory.
+	Saved Source = "file"
+)
+
+// NamedScenario is a scenario with its name and where it is defined.
+type NamedScenario struct {
+	Name     string
+	Source   Source
+	Scenario Scenario
+
+	// Path is the absolute path of a saved scenario's file.
+	Path string
+
+	// Err, if set, says why a saved scenario's file holds no valid
+	// scenario, which leaves Scenario unset.
+	Err error
 }
 
-type triggerConfig struct {
-	At     *valueRange[string] `yaml:"at,omitempty" json:"at,omitempty"`
-	Window *windowConfig       `yaml:"window,flow,omitempty" json:"window,omitempty"`
-	Anchor string              `yaml:"anchor" json:"anchor"`
+var (
+	// ErrUnknownScenario reports a name that no scenario has.
+	ErrUnknownScenario = errors.New("unknown scenario")
+
+	// ErrInvalidScenario reports a scenario, or a scenario file, that sftpit
+	// cannot turn on.
+	ErrInvalidScenario = errors.New("invalid scenario")
+
+	// ErrFixedScenario reports a change to a built-in or configured
+	// scenario, which only saved scenarios allow.
+	ErrFixedScenario = errors.New("fixed scenario")
+)
+
+// The scenarios directory, relative to the configuration file's directory,
+// or to the working directory when there is no configuration file, unless
+// the configuration sets scenarios_dir.
+const (
+	defaultScenariosDir              = "scenarios"
+	defaultScenariosDirWithoutConfig = "sftpit-scenarios"
+)
+
+// scenarioFileExt is the extension of a scenario file, whose name before it
+// is the scenario's.
+const scenarioFileExt = ".yaml"
+
+// builtIn are the scenarios that sftpit defines, by name.
+var builtIn = map[string]Scenario{
+	"unreliable-light": {
+		Description: "Unreliable server, light: 5% of commands wait 2 seconds, and 1% fail.",
+		Faults: []Fault{
+			{Name: "Slow commands", Steps: commandSteps, Do: "wait", Seconds: new(2.0), Percent: new(5.0)},
+			{Name: "Commands fail", Steps: commandSteps, Do: "refuse", Error: "failure", Percent: new(1.0)},
+		},
+	},
+	"unreliable-moderate": {
+		Description: "Unreliable server, moderate: 10% of commands wait 2 seconds, 3% fail, and 2% of uploads and downloads stop partway.",
+		Faults: []Fault{
+			{Name: "Slow commands", Steps: commandSteps, Do: "wait", Seconds: new(2.0), Percent: new(10.0)},
+			{Name: "Commands fail", Steps: commandSteps, Do: "refuse", Error: "failure", Percent: new(3.0)},
+			{Preset: "upload_stops_partway", Percent: new(2.0)},
+			{Preset: "download_stops_partway", Percent: new(2.0)},
+		},
+	},
+	"unreliable-heavy": {
+		Description: "Unreliable server, heavy: 20% of commands wait 2 seconds, 8% fail, 5% of uploads and downloads stop partway, and 0.5% of commands stop responding for 15 seconds.",
+		Faults: []Fault{
+			{Name: "Slow commands", Steps: commandSteps, Do: "wait", Seconds: new(2.0), Percent: new(20.0)},
+			{Name: "Commands fail", Steps: commandSteps, Do: "refuse", Error: "failure", Percent: new(8.0)},
+			{Preset: "upload_stops_partway", Percent: new(5.0)},
+			{Preset: "download_stops_partway", Percent: new(5.0)},
+			{Name: "Connection stops responding", Steps: commandSteps, Do: "freeze", Seconds: new(15.0), Percent: new(0.5)},
+		},
+	},
 }
 
-type windowConfig struct {
-	From  string `yaml:"from" json:"from"`
-	Until string `yaml:"until" json:"until"`
+// Scenarios are the scenarios that can be turned on: the built-in ones, the
+// configuration's, and those saved as files in a directory, one YAML file
+// for each, named after the scenario. Saved scenarios are read again each
+// time they are used. Its methods are safe for concurrent use.
+type Scenarios struct {
+	dir        string
+	users      []sshfront.User
+	configured map[string]Scenario
 }
 
-var anchors = map[string]faults.Anchor{
-	"run":        faults.Run,
-	"connection": faults.Connection,
-	"transfer":   faults.Transfer,
-}
-
-// connectionActions are the action types that act on the client's
-// connection or session, and so can fire at a moment.
-var connectionActions = []string{"close_connection", "freeze_connection", "close_subsystem", "listener_down"}
-
-// eventActions are the action types that apply to the connection events,
-// connect and authenticate.
-var eventActions = []string{"delay", "close_connection", "freeze_connection", "listener_down"}
-
-type decisionConfig struct {
-	Probability *float64 `yaml:"probability,omitempty" json:"probability,omitempty"`
-	Scope       string   `yaml:"scope,omitempty" json:"scope,omitempty"`
-}
-
-type matchConfig struct {
-	User           string     `yaml:"user,omitempty" json:"user,omitempty"`
-	KeyFingerprint string     `yaml:"key_fingerprint,omitempty" json:"key_fingerprint,omitempty"`
-	Operation      stringList `yaml:"operation,omitempty" json:"operation,omitempty"`
-
-	Path         string `yaml:"path,omitempty" json:"path,omitempty"`
-	PathPrefix   string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
-	PathGlob     string `yaml:"path_glob,omitempty" json:"path_glob,omitempty"`
-	Filename     string `yaml:"filename,omitempty" json:"filename,omitempty"`
-	FilenameGlob string `yaml:"filename_glob,omitempty" json:"filename_glob,omitempty"`
-
-	Source             string `yaml:"source,omitempty" json:"source,omitempty"`
-	SourcePrefix       string `yaml:"source_prefix,omitempty" json:"source_prefix,omitempty"`
-	SourceGlob         string `yaml:"source_glob,omitempty" json:"source_glob,omitempty"`
-	SourceFilename     string `yaml:"source_filename,omitempty" json:"source_filename,omitempty"`
-	SourceFilenameGlob string `yaml:"source_filename_glob,omitempty" json:"source_filename_glob,omitempty"`
-
-	Target             string `yaml:"target,omitempty" json:"target,omitempty"`
-	TargetPrefix       string `yaml:"target_prefix,omitempty" json:"target_prefix,omitempty"`
-	TargetGlob         string `yaml:"target_glob,omitempty" json:"target_glob,omitempty"`
-	TargetFilename     string `yaml:"target_filename,omitempty" json:"target_filename,omitempty"`
-	TargetFilenameGlob string `yaml:"target_filename_glob,omitempty" json:"target_filename_glob,omitempty"`
-
-	Attempt    *attemptConfig `yaml:"attempt,omitempty" json:"attempt,omitempty"`
-	Occurrence []uint64       `yaml:"occurrence,flow,omitempty" json:"occurrence,omitempty"`
-}
-
-type attemptConfig struct {
-	Per     []string `yaml:"per,flow,omitempty" json:"per,omitempty"`
-	Numbers []uint64 `yaml:"numbers,flow,omitempty" json:"numbers,omitempty"`
-}
-
-// actionConfig holds the fields of every action type. Each type allows only
-// its own fields.
-type actionConfig struct {
-	Type          string              `yaml:"type" json:"type"`
-	When          string              `yaml:"when,omitempty" json:"when,omitempty"`
-	Duration      *valueRange[string] `yaml:"duration,omitempty" json:"duration,omitempty"`
-	CutoffOffset  *valueRange[uint64] `yaml:"cutoff_offset,omitempty" json:"cutoff_offset,omitempty"`
-	Result        string              `yaml:"result,omitempty" json:"result,omitempty"`
-	Status        string              `yaml:"status,omitempty" json:"status,omitempty"`
-	Mode          string              `yaml:"mode,omitempty" json:"mode,omitempty"`
-	MaxFreeze     string              `yaml:"max_freeze,omitempty" json:"max_freeze,omitempty"`
-	MaxStall      string              `yaml:"max_stall,omitempty" json:"max_stall,omitempty"`
-	Transform     string              `yaml:"transform,omitempty" json:"transform,omitempty"`
-	Offset        *uint64             `yaml:"offset,omitempty" json:"offset,omitempty"`
-	Length        *uint64             `yaml:"length,omitempty" json:"length,omitempty"`
-	Size          *uint64             `yaml:"size,omitempty" json:"size,omitempty"`
-	SizeDelta     *int64              `yaml:"size_delta,omitempty" json:"size_delta,omitempty"`
-	CloseExisting *bool               `yaml:"close_existing,omitempty" json:"close_existing,omitempty"`
-}
-
-// valueRange is a value, such as 2s, or a range to draw one from for each
-// decision, such as {min: 1s, max: 5s}.
-type valueRange[T any] struct {
-	Min, Max T
-	ranged   bool
-}
-
-func (r *valueRange[T]) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind != yaml.MappingNode {
-		var v T
-		if err := n.Decode(&v); err != nil {
-			return err
-		}
-		*r = valueRange[T]{Min: v, Max: v}
-		return nil
-	}
-	// A node decodes without the file's KnownFields, so a misspelt bound
-	// would go unnoticed if the mapping were decoded into a struct.
-	var hasMin, hasMax bool
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		key, value := n.Content[i], n.Content[i+1]
-		var err error
-		switch {
-		case key.Value == "min" && !hasMin:
-			hasMin, err = true, value.Decode(&r.Min)
-		case key.Value == "max" && !hasMax:
-			hasMax, err = true, value.Decode(&r.Max)
-		case key.Value == "min" || key.Value == "max":
-			return fmt.Errorf("line %d: a range's %s is set twice", key.Line, key.Value)
-		default:
-			return fmt.Errorf("line %d: a range has min and max, not %s", key.Line, key.Value)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	if !hasMin || !hasMax {
-		return fmt.Errorf("line %d: a range needs both min and max", n.Line)
-	}
-	r.ranged = true
-	return nil
-}
-
-func (r *valueRange[T]) UnmarshalJSON(b []byte) error {
-	if !bytes.HasPrefix(b, []byte("{")) {
-		var v T
-		if err := json.Unmarshal(b, &v); err != nil {
-			return err
-		}
-		*r = valueRange[T]{Min: v, Max: v}
-		return nil
-	}
-	var bounds map[string]json.RawMessage
-	if err := json.Unmarshal(b, &bounds); err != nil {
-		return err
-	}
-	for _, key := range slices.Sorted(maps.Keys(bounds)) {
-		if key != "min" && key != "max" {
-			return fmt.Errorf("a range has min and max, not %s", key)
-		}
-	}
-	lo, hasMin := bounds["min"]
-	hi, hasMax := bounds["max"]
-	if !hasMin || !hasMax {
-		return errors.New("a range needs both min and max")
-	}
-	if err := json.Unmarshal(lo, &r.Min); err != nil {
-		return err
-	}
-	if err := json.Unmarshal(hi, &r.Max); err != nil {
-		return err
-	}
-	r.ranged = true
-	return nil
-}
-
-// statuses are the statuses a fault can answer with. OK would fake success,
-// and NO_CONNECTION and CONNECTION_LOST only ever come from a client itself.
-var statuses = map[string]sftpwire.StatusCode{
-	"eof":               sftpwire.StatusEOF,
-	"no_such_file":      sftpwire.StatusNoSuchFile,
-	"permission_denied": sftpwire.StatusPermissionDenied,
-	"failure":           sftpwire.StatusFailure,
-	"bad_message":       sftpwire.StatusBadMessage,
-	"op_unsupported":    sftpwire.StatusOpUnsupported,
-}
-
-var corruptions = map[string]sftpproxy.Corruption{
-	"truncate":   sftpproxy.Truncate,
-	"omit_range": sftpproxy.OmitRange,
-	"flip_bytes": sftpproxy.FlipBytes,
-}
-
-// scenarios validates every scenario. Rules may refer only to users, and
-// keys, that the configuration defines.
-func scenarios(defined map[string]scenarioConfig, users []sshfront.User) (map[string]Scenario, error) {
-	valid := make(map[string]Scenario, len(defined))
-	for _, name := range slices.Sorted(maps.Keys(defined)) {
+// NewScenarios returns the scenarios of a configuration that defines
+// configured, and saves scenarios in dir, an absolute path. Faults may
+// refer only to users that users has.
+func NewScenarios(dir string, configured map[string]Scenario, users []sshfront.User) (*Scenarios, error) {
+	for _, name := range slices.Sorted(maps.Keys(configured)) {
 		field := "scenarios." + name
-		if !namePattern.MatchString(name) {
-			return nil, fmt.Errorf("%s: a scenario name may hold only lowercase letters, digits and -, starting with a letter or digit", field)
+		if err := checkScenarioName(name); err != nil {
+			return nil, fmt.Errorf("%s: %w", field, err)
 		}
-		s, err := defined[name].scenario(field, users)
-		if err != nil {
-			return nil, err
+		if _, ok := builtIn[name]; ok {
+			return nil, fmt.Errorf("%s: sftpit has a built-in scenario named %s; choose another name", field, name)
 		}
-		valid[name] = s
+		if err := configured[name].check(users); err != nil {
+			return nil, fmt.Errorf("%s: %w", field, err)
+		}
 	}
-	return valid, nil
+	return &Scenarios{dir: dir, users: users, configured: configured}, nil
 }
 
-// choose returns the scenario selected, one of the configuration's
-// scenarios or of files, or no scenario if selected is "".
-func choose(selected string, configured map[string]Scenario, files []ScenarioFile) (Scenario, error) {
-	if s, ok := configured[selected]; ok || selected == "" {
-		return s, nil
-	}
-	names := slices.Collect(maps.Keys(configured))
-	for _, f := range files {
-		if f.Name == selected {
-			return f.Scenario, nil
-		}
-		names = append(names, f.Name)
-	}
-	if len(names) == 0 {
-		return Scenario{}, fmt.Errorf("scenario %q is not defined; the configuration defines no scenarios", selected)
-	}
-	slices.Sort(names)
-	return Scenario{}, fmt.Errorf("scenario %q is not defined; the configuration defines %s", selected, strings.Join(names, ", "))
+// Dir returns the absolute path of the directory of saved scenarios, which
+// need not exist until a scenario is saved.
+func (s *Scenarios) Dir() string {
+	return s.dir
 }
 
-func (s scenarioConfig) scenario(field string, users []sshfront.User) (Scenario, error) {
-	rules, err := parseRules(field+".", s.Faults, users)
+// List returns every scenario: the built-in ones, then the configuration's,
+// then the saved ones, each sorted by name. A saved scenario's file that
+// holds no valid scenario is listed with Err set.
+func (s *Scenarios) List() ([]NamedScenario, error) {
+	var list []NamedScenario
+	for _, name := range slices.Sorted(maps.Keys(builtIn)) {
+		list = append(list, NamedScenario{Name: name, Source: BuiltIn, Scenario: builtIn[name]})
+	}
+	for _, name := range slices.Sorted(maps.Keys(s.configured)) {
+		list = append(list, NamedScenario{Name: name, Source: Configured, Scenario: s.configured[name]})
+	}
+	names, err := s.fileNames()
 	if err != nil {
-		return Scenario{}, err
+		return nil, err
 	}
-	if err := faults.Check(rules); err != nil {
-		return Scenario{}, fmt.Errorf("%s: %w", field, err)
+	for _, name := range names {
+		list = append(list, s.read(name))
 	}
-	valid := Scenario{Description: s.Description, Rules: rules}
-	if s.Chaos != nil {
-		if valid.Chaos, err = s.Chaos.chaos(users); err != nil {
-			return Scenario{}, fmt.Errorf("%s.chaos: %w", field, err)
-		}
-	}
-	return valid, nil
+	return list, nil
 }
 
-// parseRules returns the rules that rcs give, naming each in errors as
-// prefix followed by faults and its index.
-func parseRules(prefix string, rcs []ruleConfig, users []sshfront.User) ([]faults.Rule, error) {
-	var rules []faults.Rule
-	for i, rc := range rcs {
-		field := fmt.Sprintf("%sfaults[%d]", prefix, i)
-		if rc.ID == "" {
-			return nil, fmt.Errorf("%s: id is required", field)
-		}
-		if !namePattern.MatchString(rc.ID) {
-			return nil, fmt.Errorf("%s: id %q must hold only lowercase letters, digits and -, starting with a letter or digit", field, rc.ID)
-		}
-		field += " (" + rc.ID + ")"
-		long, recipe, err := rc.expand()
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", field, err)
-		}
-		if recipe != "" {
-			field += ": " + recipe
-		}
-		r, err := long.rule(users)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", field, err)
-		}
-		rules = append(rules, r)
+// Get returns the scenario name. A name that no scenario has fails with
+// ErrUnknownScenario, and a file that holds no valid scenario with
+// ErrInvalidScenario.
+func (s *Scenarios) Get(name string) (NamedScenario, error) {
+	if sc, ok := builtIn[name]; ok {
+		return NamedScenario{Name: name, Source: BuiltIn, Scenario: sc}, nil
 	}
-	return rules, nil
+	if sc, ok := s.configured[name]; ok {
+		return NamedScenario{Name: name, Source: Configured, Scenario: sc}, nil
+	}
+	if checkScenarioName(name) == nil {
+		file := s.read(name)
+		if !errors.Is(file.Err, fs.ErrNotExist) {
+			return file, file.Err
+		}
+	}
+	return NamedScenario{}, s.unknown(name)
 }
 
-func (rc ruleConfig) rule(users []sshfront.User) (faults.Rule, error) {
-	r := faults.Rule{ID: rc.ID, Priority: rc.Priority, MaxTriggers: rc.MaxTriggers}
-	var err error
-	// A connection action at a moment of the run or the connection matches
-	// connections, not requests, so it has no operation.
-	moment := rc.atMoment()
-	if r.Match, err = rc.Match.match(users, !moment || rc.Trigger.Anchor == "transfer"); err != nil {
-		return r, fmt.Errorf("match: %w", err)
+// Save saves sc as the scenario name, replacing the file of a scenario
+// saved with that name. It fails with ErrInvalidScenario if sc is not a
+// scenario sftpit can turn on, and with ErrFixedScenario for the name of a
+// built-in or configured scenario.
+func (s *Scenarios) Save(name string, sc Scenario) (NamedScenario, error) {
+	if err := s.checkSavedName(name); err != nil {
+		return NamedScenario{}, err
 	}
-	if rc.Trigger != nil {
-		if r.Trigger, err = rc.Trigger.trigger(); err != nil {
-			return r, fmt.Errorf("trigger: %w", err)
-		}
+	if err := sc.check(s.users); err != nil {
+		return NamedScenario{}, fmt.Errorf("config: scenario %s: %w: %w", name, ErrInvalidScenario, err)
 	}
-	if err := rc.Action.checkType(); err != nil {
-		return r, fmt.Errorf("action: %w", err)
+	var b bytes.Buffer
+	if err := encodeYAML(&b, scenarioFile{SchemaVersion: schemaVersion, Scenario: sc}); err != nil {
+		return NamedScenario{}, fmt.Errorf("config: write scenario %s: %w", name, err)
 	}
-	var noWhen string
-	switch {
-	case moment:
-		noWhen = "at a moment, which acts whatever the client is doing"
-	case rc.Match.hasEvent():
-		if !slices.Contains(eventActions, rc.Action.Type) {
-			return r, fmt.Errorf("action: connect and authenticate take a delay, close_connection, freeze_connection or listener_down, not a %s", rc.Action.Type)
-		}
-		noWhen = "at connect or authenticate, which have no request to act before or after"
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return NamedScenario{}, fmt.Errorf("config: scenarios_dir: %w", err)
 	}
-	if err := rc.Action.apply(&r, noWhen); err != nil {
-		return r, fmt.Errorf("action: %w", err)
+	if err := replaceFile(s.path(name), b.Bytes()); err != nil {
+		return NamedScenario{}, fmt.Errorf("config: save scenario %s: %w", name, err)
 	}
-	if d := rc.Decision; d != nil {
-		if d.Probability == nil {
-			return r, errors.New("decision: probability is required")
-		}
-		if err := rc.checkScope(d.Scope); err != nil {
-			return r, fmt.Errorf("decision: %w", err)
-		}
-		r.Probability = d.Probability
-	}
-	return r, nil
+	return NamedScenario{Name: name, Source: Saved, Scenario: sc, Path: s.path(name)}, nil
 }
 
-// checkScope reports a decision scope that the rule cannot have. A partial
-// or corrupt upload or download is decided once for each transfer, at its
-// open, and any other fault for each request, which for an open is the same
-// as for its transfer. The scope defaults to the one the action has.
-func (rc ruleConfig) checkScope(scope string) error {
-	transfer := slices.Contains([]string{"partial_upload", "partial_download", "corrupt_download", "corrupt_upload"}, rc.Action.Type) ||
-		(rc.atMoment() && rc.Trigger.Anchor == "transfer")
-	switch scope {
-	case "":
-	case "transfer":
-		opens := !slices.ContainsFunc(rc.Match.Operation, func(op string) bool {
-			return op != string(faults.OpenRead) && op != string(faults.OpenWrite)
-		})
-		if !transfer && !opens {
-			return fmt.Errorf("scope transfer needs a partial_upload, partial_download, corrupt_upload or corrupt_download, or the open_read and open_write operations; a %s on every request of a chosen transfer is not supported", rc.Action.Type)
-		}
-	case "operation":
-		if transfer {
-			return fmt.Errorf("a %s is decided once for each transfer, at its open, so its scope is transfer", rc.Action.Type)
-		}
-	default:
-		return fmt.Errorf("scope %q is not operation or transfer", scope)
+// Delete deletes the file of the saved scenario name. It fails with
+// ErrUnknownScenario if there is no such file, and with ErrFixedScenario
+// for a built-in or configured scenario.
+func (s *Scenarios) Delete(name string) error {
+	if err := s.checkSavedName(name); err != nil {
+		return err
+	}
+	err := os.Remove(s.path(name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return s.unknown(name)
+	}
+	if err != nil {
+		return fmt.Errorf("config: delete scenario %s: %w", name, err)
 	}
 	return nil
 }
 
-// atMoment reports whether the rule is a connection action that fires at a
-// moment rather than at a request.
-func (rc ruleConfig) atMoment() bool {
-	return rc.Trigger != nil && rc.Trigger.At != nil && slices.Contains(connectionActions, rc.Action.Type)
-}
-
-func (tc triggerConfig) trigger() (*faults.Trigger, error) {
-	anchor, ok := anchors[tc.Anchor]
-	names := strings.Join(slices.Sorted(maps.Keys(anchors)), ", ")
-	switch {
-	case tc.Anchor == "":
-		return nil, fmt.Errorf("anchor is required: one of %s", names)
-	case !ok:
-		return nil, fmt.Errorf("anchor %q is not one of %s", tc.Anchor, names)
-	}
-	t := &faults.Trigger{Anchor: anchor}
-	switch {
-	case tc.At != nil && tc.Window != nil:
-		return nil, errors.New("set at or window, not both")
-	case tc.At != nil:
-		lo, err := nonNegativeDuration("at", tc.At.Min)
-		if err != nil {
-			return nil, err
-		}
-		hi := lo
-		if tc.At.ranged {
-			if hi, err = nonNegativeDuration("at", tc.At.Max); err != nil {
-				return nil, err
-			}
-		}
-		t.At = &faults.Range[time.Duration]{Min: lo, Max: hi}
-	case tc.Window != nil:
-		from, err := nonNegativeDuration("window from", tc.Window.From)
-		if err != nil {
-			return nil, err
-		}
-		until, err := nonNegativeDuration("window until", tc.Window.Until)
-		if err != nil {
-			return nil, err
-		}
-		t.Window = &faults.Window{From: from, Until: until}
-	default:
-		return nil, errors.New("at or window is required")
-	}
-	return t, nil
-}
-
-// hasEvent reports whether mc matches a connection event, connect or
-// authenticate.
-func (mc matchConfig) hasEvent() bool {
-	return slices.ContainsFunc(mc.Operation, func(op string) bool {
-		return op == string(faults.Connect) || op == string(faults.Authenticate)
-	})
-}
-
-func (mc matchConfig) match(users []sshfront.User, needsOperation bool) (faults.Match, error) {
-	m := faults.Match{User: mc.User, KeyFingerprint: mc.KeyFingerprint, Occurrence: mc.Occurrence}
-	if len(mc.Operation) == 0 && needsOperation {
-		return m, errors.New("operation is required")
-	}
-	for _, op := range mc.Operation {
-		m.Operations = append(m.Operations, faults.Operation(op))
-	}
-	if err := checkCredentials(mc.User, mc.KeyFingerprint, users); err != nil {
-		return m, err
-	}
-
-	paths, err := location([]locationField{
-		{"path", faults.Exactly, mc.Path},
-		{"path_prefix", faults.Under, mc.PathPrefix},
-		{"path_glob", faults.Glob, mc.PathGlob},
-		{"filename", faults.Named, mc.Filename},
-		{"filename_glob", faults.NamedGlob, mc.FilenameGlob},
-	})
+// checkFiles reports the first saved scenario's file that holds no valid
+// scenario.
+func (s *Scenarios) checkFiles() error {
+	names, err := s.fileNames()
 	if err != nil {
-		return m, err
+		return err
 	}
-	sources, err := location([]locationField{
-		{"source", faults.Exactly, mc.Source},
-		{"source_prefix", faults.Under, mc.SourcePrefix},
-		{"source_glob", faults.Glob, mc.SourceGlob},
-		{"source_filename", faults.Named, mc.SourceFilename},
-		{"source_filename_glob", faults.NamedGlob, mc.SourceFilenameGlob},
-	})
-	if err != nil {
-		return m, err
-	}
-	m.Target, err = location([]locationField{
-		{"target", faults.Exactly, mc.Target},
-		{"target_prefix", faults.Under, mc.TargetPrefix},
-		{"target_glob", faults.Glob, mc.TargetGlob},
-		{"target_filename", faults.Named, mc.TargetFilename},
-		{"target_filename_glob", faults.NamedGlob, mc.TargetFilenameGlob},
-	})
-	if err != nil {
-		return m, err
-	}
-	// A rename's source is the path it acts on, so the source fields are
-	// the path fields under the names that suit a rename.
-	switch renames := slices.Equal(m.Operations, []faults.Operation{faults.Rename}); {
-	case sources.Kind != faults.Anywhere && !renames:
-		return m, errors.New("the source fields need operation rename; match other operations with the path fields")
-	case sources.Kind != faults.Anywhere && paths.Kind != faults.Anywhere:
-		return m, errors.New("set the source fields or the path fields, not both")
-	case sources.Kind != faults.Anywhere:
-		m.Path = sources
-	default:
-		m.Path = paths
-	}
-
-	if mc.Attempt != nil {
-		m.Attempt = &faults.Attempt{Numbers: mc.Attempt.Numbers}
-		per := mc.Attempt.Per
-		if per == nil {
-			per = []string{"user", "path"}
+	for _, name := range names {
+		if file := s.read(name); file.Err != nil {
+			return file.Err
 		}
-		if len(per) == 0 {
-			return m, errors.New("attempt per needs user, path or both")
-		}
-		for _, p := range per {
-			switch p {
-			case "user":
-				m.Attempt.PerUser = true
-			case "path":
-				m.Attempt.PerPath = true
-			default:
-				return m, fmt.Errorf("attempt per %q is not user or path", p)
-			}
-		}
-	}
-	return m, nil
-}
-
-// checkCredentials reports a user or key fingerprint that no configured
-// user has, which would never match.
-func checkCredentials(user, keyFingerprint string, users []sshfront.User) error {
-	if user != "" && !slices.ContainsFunc(users, func(u sshfront.User) bool { return u.Name == user }) {
-		return fmt.Errorf("user %q is not a configured user", user)
-	}
-	if keyFingerprint == "" {
-		return nil
-	}
-	for _, u := range users {
-		if user != "" && u.Name != user {
-			continue
-		}
-		for _, key := range u.AuthorizedKeys {
-			if ssh.FingerprintSHA256(key) == keyFingerprint {
-				return nil
-			}
-		}
-	}
-	if user != "" {
-		return fmt.Errorf("key_fingerprint %q is not one of %s's authorized keys", keyFingerprint, user)
-	}
-	return fmt.Errorf("key_fingerprint %q is not one of the configured users' authorized keys", keyFingerprint)
-}
-
-type locationField struct {
-	name    string
-	kind    faults.LocationKind
-	pattern string
-}
-
-// location returns the one location among fields that is set, if any.
-func location(fields []locationField) (faults.Location, error) {
-	var l faults.Location
-	var set string
-	for _, f := range fields {
-		if f.pattern == "" {
-			continue
-		}
-		if set != "" {
-			return l, fmt.Errorf("%s and %s cannot both be set", set, f.name)
-		}
-		set, l = f.name, faults.Location{Kind: f.kind, Pattern: f.pattern}
-	}
-	return l, nil
-}
-
-// actionFields are the fields each action type allows, besides type.
-var actionFields = map[string][]string{
-	"delay":             {"when", "duration"},
-	"stall":             {"when", "max_stall"},
-	"fail":              {"when", "status"},
-	"close_connection":  {"when", "mode"},
-	"freeze_connection": {"when", "max_freeze"},
-	"close_subsystem":   {"when"},
-	"listener_down":     {"when", "duration", "close_existing"},
-	"partial_upload":    {"cutoff_offset", "result", "status", "mode", "max_freeze"},
-	"partial_download":  {"cutoff_offset", "result", "status", "mode", "max_freeze"},
-	"corrupt_download":  {"transform", "offset", "length"},
-	"corrupt_upload":    {"transform", "offset", "length"},
-	"wrong_size":        {"size", "size_delta"},
-	"hide":              {},
-}
-
-// checkType reports a missing or unknown action type.
-func (ac actionConfig) checkType() error {
-	types := strings.Join(slices.Sorted(maps.Keys(actionFields)), ", ")
-	switch _, ok := actionFields[ac.Type]; {
-	case ac.Type == "":
-		return fmt.Errorf("type is required: one of %s", types)
-	case !ok:
-		return fmt.Errorf("type %q is not one of %s", ac.Type, types)
 	}
 	return nil
 }
 
-// apply sets the action of r, and the ranges it draws values from. If noWhen
-// is set, the action takes no when, for the reason it gives. checkType has
-// accepted ac's type.
-func (ac actionConfig) apply(r *faults.Rule, noWhen string) error {
-	allowed := actionFields[ac.Type]
-	for _, f := range ac.set() {
-		if !slices.Contains(allowed, f) {
-			return fmt.Errorf("%s does not apply to a %s", f, ac.Type)
-		}
+// checkSavedName reports a name that a saved scenario cannot have.
+func (s *Scenarios) checkSavedName(name string) error {
+	if err := checkScenarioName(name); err != nil {
+		return fmt.Errorf("config: %w: %w", ErrInvalidScenario, err)
 	}
-	var err error
-	switch ac.Type {
-	case "delay":
-		r.Action, r.Duration, err = ac.delay(noWhen)
-	case "stall":
-		r.Action, err = ac.stall()
-	case "fail":
-		r.Action, err = ac.fail()
-	case "close_connection":
-		r.Action, err = ac.closeConnection(noWhen)
-	case "freeze_connection":
-		r.Action, err = ac.freezeConnection(noWhen)
-	case "close_subsystem":
-		var when sftpproxy.When
-		when, err = ac.whenUnless(noWhen)
-		r.Action = sftpproxy.EndSession{When: when}
-	case "listener_down":
-		r.Action, r.Duration, err = ac.listenerDown(noWhen)
-	case "partial_upload":
-		var c cutoff
-		if c, err = ac.cutoff(); err == nil {
-			r.Action, r.Cutoff = sftpproxy.PartialUpload{Cutoff: c.offset, Result: c.result}, c.ranged
-		}
-	case "partial_download":
-		var c cutoff
-		if c, err = ac.cutoff(); err == nil {
-			r.Action, r.Cutoff = sftpproxy.PartialDownload{Cutoff: c.offset, Result: c.result}, c.ranged
-		}
-	case "corrupt_download":
-		var c corruption
-		if c, err = ac.corruption(); err == nil {
-			r.Action = sftpproxy.CorruptDownload{Corruption: c.kind, Offset: c.offset, Length: c.length}
-		}
-	case "corrupt_upload":
-		var c corruption
-		if c, err = ac.corruption(); err == nil {
-			r.Action = sftpproxy.CorruptUpload{Corruption: c.kind, Offset: c.offset, Length: c.length}
-		}
-	case "wrong_size":
-		r.Action, err = ac.wrongSize()
-	case "hide":
-		r.Action = sftpproxy.Hide{}
+	if _, ok := builtIn[name]; ok {
+		return fmt.Errorf("config: scenario %s: %w: it is built in", name, ErrFixedScenario)
 	}
-	return err
+	if _, ok := s.configured[name]; ok {
+		return fmt.Errorf("config: scenario %s: %w: it is defined in the configuration file", name, ErrFixedScenario)
+	}
+	return nil
 }
 
-// set returns the names of the fields that are set, besides type.
-func (ac actionConfig) set() []string {
+// fileNames returns the names of the saved scenarios, sorted: those of the
+// files in the directory whose names end in .yaml and do not start with a
+// dot. A directory that does not exist holds none.
+func (s *Scenarios) fileNames() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("config: scenarios_dir: %w", err)
+	}
 	var names []string
-	for name, set := range map[string]bool{
-		"when":           ac.When != "",
-		"duration":       ac.Duration != nil,
-		"status":         ac.Status != "",
-		"mode":           ac.Mode != "",
-		"max_freeze":     ac.MaxFreeze != "",
-		"max_stall":      ac.MaxStall != "",
-		"cutoff_offset":  ac.CutoffOffset != nil,
-		"result":         ac.Result != "",
-		"transform":      ac.Transform != "",
-		"offset":         ac.Offset != nil,
-		"length":         ac.Length != nil,
-		"size":           ac.Size != nil,
-		"size_delta":     ac.SizeDelta != nil,
-		"close_existing": ac.CloseExisting != nil,
-	} {
-		if set {
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), scenarioFileExt)
+		if ok && !strings.HasPrefix(name, ".") && !e.IsDir() {
 			names = append(names, name)
 		}
 	}
+	return names, nil
+}
+
+// read reads the saved scenario name. A name without a file has an Err
+// wrapping fs.ErrNotExist, and a file that holds no valid scenario one
+// wrapping ErrInvalidScenario.
+func (s *Scenarios) read(name string) NamedScenario {
+	file := NamedScenario{Name: name, Source: Saved, Path: s.path(name)}
+	data, err := os.ReadFile(file.Path)
+	if err != nil {
+		file.Err = fmt.Errorf("config: %w", err)
+		return file
+	}
+	invalid := func(err error) NamedScenario {
+		file.Err = fmt.Errorf("config: %w %s: %w", ErrInvalidScenario, file.Path, err)
+		return file
+	}
+	if err := checkScenarioName(name); err != nil {
+		return invalid(err)
+	}
+	if _, ok := builtIn[name]; ok {
+		return invalid(fmt.Errorf("sftpit has a built-in scenario named %s; rename the file", name))
+	}
+	if _, ok := s.configured[name]; ok {
+		return invalid(fmt.Errorf("the configuration file defines a scenario %s too; rename one of them", name))
+	}
+	var sf scenarioFile
+	if err := decodeStrict(data, &sf, &sf.SchemaVersion); err != nil {
+		return invalid(err)
+	}
+	if err := sf.check(s.users); err != nil {
+		return invalid(err)
+	}
+	file.Scenario = sf.Scenario
+	return file
+}
+
+func (s *Scenarios) path(name string) string {
+	return filepath.Join(s.dir, name+scenarioFileExt)
+}
+
+// unknown returns the error for name, which no scenario has, listing the
+// names that scenarios do have.
+func (s *Scenarios) unknown(name string) error {
+	names := slices.Collect(maps.Keys(builtIn))
+	names = append(names, slices.Collect(maps.Keys(s.configured))...)
+	if files, err := s.fileNames(); err == nil {
+		names = append(names, files...)
+	}
 	slices.Sort(names)
-	return names
+	return fmt.Errorf("config: %w %q; the scenarios are %s", ErrUnknownScenario, name, strings.Join(slices.Compact(names), ", "))
 }
 
-// delay returns the delay of ac, and the range it draws its duration from
-// if ac gives one.
-func (ac actionConfig) delay(noWhen string) (sftpproxy.Action, *faults.Range[time.Duration], error) {
-	when, err := ac.whenUnless(noWhen)
-	if err != nil {
-		return nil, nil, err
+// check reports a scenario that sftpit cannot turn on: one without faults,
+// or with a fault that is not valid for users.
+func (sc Scenario) check(users []sshfront.User) error {
+	if len(sc.Faults) == 0 {
+		return errors.New("a scenario needs at least one fault")
 	}
-	d, drawn, err := ac.duration()
-	if err != nil {
-		return nil, nil, err
-	}
-	return sftpproxy.Delay{When: when, Duration: d}, drawn, nil
-}
-
-// stall returns the stall of ac, which holds a request or its reply until it
-// is released or max_stall passes.
-func (ac actionConfig) stall() (sftpproxy.Action, error) {
-	when, err := ac.when()
-	if err != nil {
-		return nil, err
-	}
-	limit, err := positiveDuration("max_stall", ac.MaxStall)
-	if err != nil {
-		return nil, err
-	}
-	return sftpproxy.Stall{When: when, Limit: limit}, nil
-}
-
-// listenerDown returns the outage of ac, which leaves existing connections
-// open unless close_existing is true, and the range it draws its duration
-// from if ac gives one.
-func (ac actionConfig) listenerDown(noWhen string) (sftpproxy.Action, *faults.Range[time.Duration], error) {
-	when, err := ac.whenUnless(noWhen)
-	if err != nil {
-		return nil, nil, err
-	}
-	d, drawn, err := ac.duration()
-	if err != nil {
-		return nil, nil, err
-	}
-	closeExisting := ac.CloseExisting != nil && *ac.CloseExisting
-	return sftpproxy.ListenerDown{When: when, Duration: d, CloseExisting: closeExisting}, drawn, nil
-}
-
-// duration returns ac's duration, or the range to draw it from if ac gives
-// one.
-func (ac actionConfig) duration() (time.Duration, *faults.Range[time.Duration], error) {
-	if ac.Duration == nil {
-		return 0, nil, errors.New("duration is required")
-	}
-	lo, err := positiveDuration("duration", ac.Duration.Min)
-	if err != nil {
-		return 0, nil, err
-	}
-	if !ac.Duration.ranged {
-		return lo, nil, nil
-	}
-	hi, err := positiveDuration("duration", ac.Duration.Max)
-	if err != nil {
-		return 0, nil, err
-	}
-	return 0, &faults.Range[time.Duration]{Min: lo, Max: hi}, nil
-}
-
-func (ac actionConfig) fail() (sftpproxy.Action, error) {
-	when, err := ac.when()
-	if err != nil {
-		return nil, err
-	}
-	code, err := status(ac.Status)
-	if err != nil {
-		return nil, err
-	}
-	return sftpproxy.Fail{When: when, Status: code}, nil
-}
-
-func (ac actionConfig) when() (sftpproxy.When, error) {
-	switch ac.When {
-	case "before":
-		return sftpproxy.Before, nil
-	case "after":
-		return sftpproxy.After, nil
-	case "":
-		return 0, errors.New("when is required: before the server acts, or after")
-	}
-	return 0, fmt.Errorf("when %q is not before or after", ac.When)
-}
-
-// whenUnless returns when ac acts, or Before, which is ignored, if noWhen
-// gives a reason it takes no when.
-func (ac actionConfig) whenUnless(noWhen string) (sftpproxy.When, error) {
-	if noWhen == "" {
-		return ac.when()
-	}
-	if ac.When != "" {
-		return 0, fmt.Errorf("when does not apply to a %s %s", ac.Type, noWhen)
-	}
-	return sftpproxy.Before, nil
-}
-
-// closeConnection returns the Drop that ac's mode chooses, fin unless set.
-func (ac actionConfig) closeConnection(noWhen string) (sftpproxy.Action, error) {
-	when, err := ac.whenUnless(noWhen)
-	if err != nil {
-		return nil, err
-	}
-	d, err := ac.drop()
-	if err != nil {
-		return nil, err
-	}
-	d.When = when
-	return d, nil
-}
-
-// drop returns the Drop that ac's mode chooses, fin unless set.
-func (ac actionConfig) drop() (sftpproxy.Drop, error) {
-	switch ac.Mode {
-	case "", "fin":
-		return sftpproxy.Drop{}, nil
-	case "rst":
-		return sftpproxy.Drop{Reset: true}, nil
-	}
-	return sftpproxy.Drop{}, fmt.Errorf("mode %q is not fin or rst", ac.Mode)
-}
-
-func (ac actionConfig) freezeConnection(noWhen string) (sftpproxy.Action, error) {
-	when, err := ac.whenUnless(noWhen)
-	if err != nil {
-		return nil, err
-	}
-	limit, err := positiveDuration("max_freeze", ac.MaxFreeze)
-	if err != nil {
-		return nil, err
-	}
-	return sftpproxy.Freeze{When: when, Limit: limit}, nil
-}
-
-// cutoff is the cutoff of a partial_upload or partial_download, and the
-// range it draws its cutoff from if it gives one.
-type cutoff struct {
-	offset uint64
-	ranged *faults.Range[uint64]
-	result sftpproxy.Action
-}
-
-func (ac actionConfig) cutoff() (cutoff, error) {
-	if ac.CutoffOffset == nil {
-		return cutoff{}, errors.New("cutoff_offset is required")
-	}
-	var c cutoff
-	if ac.CutoffOffset.ranged {
-		c.ranged = &faults.Range[uint64]{Min: ac.CutoffOffset.Min, Max: ac.CutoffOffset.Max}
-	} else {
-		c.offset = ac.CutoffOffset.Min
-	}
-	var err error
-	c.result, err = ac.cutoffResult()
-	return c, err
-}
-
-// cutoffResult returns what a partial upload or download of ac does at its
-// cutoff.
-func (ac actionConfig) cutoffResult() (sftpproxy.Action, error) {
-	if ac.Status != "" && ac.Result != "status" {
-		return nil, errors.New("status applies only to result status")
-	}
-	switch ac.Result {
-	case "status":
-		if ac.Mode != "" || ac.MaxFreeze != "" {
-			return nil, errors.New("mode and max_freeze apply only to result close_connection or freeze_connection")
+	for i, f := range sc.Faults {
+		if _, err := f.Rule("check", users); err != nil {
+			return fmt.Errorf("faults[%d]: %w", i, err)
 		}
-		code, err := status(ac.Status)
-		if err != nil {
-			return nil, err
+	}
+	return nil
+}
+
+// Resolved returns sc with each fault's preset and defaults filled in, as
+// Fault.Resolve gives them.
+func (sc Scenario) Resolved() (Scenario, error) {
+	resolved := Scenario{Description: sc.Description, Faults: make([]Fault, len(sc.Faults))}
+	for i, f := range sc.Faults {
+		var err error
+		if resolved.Faults[i], err = f.Resolve(); err != nil {
+			return Scenario{}, fmt.Errorf("faults[%d]: %w", i, err)
 		}
-		return sftpproxy.Fail{Status: code}, nil
-	case "close_connection":
-		if ac.MaxFreeze != "" {
-			return nil, errors.New("max_freeze applies only to result freeze_connection")
-		}
-		d, err := ac.drop()
-		if err != nil {
-			return nil, err
-		}
-		return d, nil
-	case "freeze_connection":
-		if ac.Mode != "" {
-			return nil, errors.New("mode applies only to result close_connection")
-		}
-		limit, err := positiveDuration("max_freeze", ac.MaxFreeze)
-		if err != nil {
-			return nil, err
-		}
-		return sftpproxy.Freeze{Limit: limit}, nil
-	case "":
-		return nil, errors.New("result is required: status, close_connection or freeze_connection")
 	}
-	return nil, fmt.Errorf("result %q is not status, close_connection or freeze_connection", ac.Result)
+	return resolved, nil
 }
 
-// corruption is the transform of a corrupt_download or corrupt_upload.
-type corruption struct {
-	kind           sftpproxy.Corruption
-	offset, length uint64
+// scenarioFile is a scenario file as written: a scenario with the schema
+// version.
+type scenarioFile struct {
+	SchemaVersion int `yaml:"schema_version"`
+	Scenario      `yaml:",inline"`
 }
 
-func (ac actionConfig) corruption() (corruption, error) {
-	names := strings.Join(slices.Sorted(maps.Keys(corruptions)), ", ")
-	kind, ok := corruptions[ac.Transform]
-	switch {
-	case ac.Transform == "":
-		return corruption{}, fmt.Errorf("transform is required: one of %s", names)
-	case !ok:
-		return corruption{}, fmt.Errorf("transform %q is not one of %s", ac.Transform, names)
+// checkScenarioName reports a name that a scenario cannot have, which
+// keeps a scenario's file in the directory.
+func checkScenarioName(name string) error {
+	if !namePattern.MatchString(name) {
+		return fmt.Errorf("scenario name %q may hold only lowercase letters, digits and -, starting with a letter or digit", name)
 	}
-	if ac.Offset == nil {
-		return corruption{}, errors.New("offset is required")
-	}
-	c := corruption{kind: kind, offset: *ac.Offset}
-	switch {
-	case kind == sftpproxy.Truncate && ac.Length != nil:
-		return corruption{}, errors.New("length does not apply to truncate")
-	case kind != sftpproxy.Truncate && (ac.Length == nil || *ac.Length == 0):
-		return corruption{}, fmt.Errorf("%s needs a length of at least 1", ac.Transform)
-	case kind != sftpproxy.Truncate:
-		c.length = *ac.Length
-	}
-	return c, nil
+	return nil
 }
 
-func (ac actionConfig) wrongSize() (sftpproxy.Action, error) {
-	switch {
-	case ac.Size != nil && ac.SizeDelta != nil:
-		return nil, errors.New("set size or size_delta, not both")
-	case ac.Size != nil:
-		return sftpproxy.WrongSize{Size: *ac.Size}, nil
-	case ac.SizeDelta != nil && *ac.SizeDelta != 0:
-		return sftpproxy.WrongSize{Delta: *ac.SizeDelta}, nil
+// replaceFile writes data to name through a temporary file beside it, so
+// that a reader sees the old file or the new one, never part of one.
+func replaceFile(name string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name)+".tmp-*")
+	if err != nil {
+		return err
 	}
-	return nil, errors.New("size or a size_delta other than 0 is required")
-}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
 
-func status(name string) (sftpwire.StatusCode, error) {
-	if name == "" {
-		return 0, errors.New("status is required")
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
 	}
-	code, ok := statuses[name]
-	if !ok {
-		return 0, fmt.Errorf("status %q is not one of %s", name, strings.Join(slices.Sorted(maps.Keys(statuses)), ", "))
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
 	}
-	return code, nil
-}
-
-func nonNegativeDuration(field, value string) (time.Duration, error) {
-	if value == "" {
-		return 0, fmt.Errorf("%s is required", field)
+	if err := f.Close(); err != nil {
+		return err
 	}
-	d, err := time.ParseDuration(value)
-	if err != nil || d < 0 {
-		return 0, fmt.Errorf("%s %q is not a duration of 0 or more, such as 0s or 2s", field, value)
-	}
-	return d, nil
-}
-
-func positiveDuration(field, value string) (time.Duration, error) {
-	if value == "" {
-		return 0, fmt.Errorf("%s is required", field)
-	}
-	d, err := time.ParseDuration(value)
-	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("%s %q is not a positive duration, such as 500ms or 2s", field, value)
-	}
-	return d, nil
+	return os.Rename(tmpPath, name)
 }

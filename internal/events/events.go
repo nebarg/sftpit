@@ -7,7 +7,6 @@
 package events
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -17,8 +16,8 @@ import (
 type Kind string
 
 const (
-	// RunStarted is the first event of every run, with its scenario and
-	// seed in Run, and the rules it starts with in Rules.
+	// RunStarted is the first event of every run, with its seed in Run,
+	// and the revision of the rules it starts with in Rules.
 	RunStarted Kind = "run_started"
 
 	// Connected is a connection the server accepted, before its handshake.
@@ -56,7 +55,7 @@ const (
 	// DecisionDrawn is a random decision a rule drew from the run's seed.
 	DecisionDrawn Kind = "decision"
 
-	// RulesChanged is a change of the run's rules, with the new rules.
+	// RulesChanged is a change of the run's rules, with their revision.
 	RulesChanged Kind = "rules_changed"
 )
 
@@ -169,20 +168,17 @@ type Decision struct {
 	Value       string   `json:"value,omitempty"`
 }
 
-// Run describes the scenario a run started with.
+// Run describes a run as it starts.
 type Run struct {
-	ID       string `json:"id"`
-	Scenario string `json:"scenario,omitempty"`
-	Seed     string `json:"seed"`
+	ID   string `json:"id"`
+	Seed string `json:"seed"`
 }
 
-// Rules describes a run's rules: their Revision, the one they replaced, if
-// any, and the rules and chaos, as the control API writes them.
+// Rules describes a change of a run's rules: their Revision, and the one
+// they replaced, if any.
 type Rules struct {
-	Revision uint64          `json:"revision"`
-	Previous uint64          `json:"previous,omitempty"`
-	Faults   json.RawMessage `json:"faults"`
-	Chaos    json.RawMessage `json:"chaos,omitempty"`
+	Revision uint64 `json:"revision"`
+	Previous uint64 `json:"previous,omitempty"`
 }
 
 // Millis is a duration written in JSON as milliseconds, to the microsecond.

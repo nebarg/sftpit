@@ -122,7 +122,7 @@ func TestConnectionActionsAreTimedForEachSession(t *testing.T) {
 		e, err := faults.New([]faults.Rule{
 			{ID: "per-connection", Match: faults.Match{User: "a"}, Trigger: &faults.Trigger{Anchor: faults.Connection, At: &atRandom}, Action: reset},
 			{ID: "once-in-the-run", MaxTriggers: 1, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(10 * time.Second)}, Action: sftpproxy.EndSession{}},
-		}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+		}, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 
 		if err != nil {
 			t.Fatal(err)
@@ -206,7 +206,7 @@ func TestAFixedMomentDrawsNothing(t *testing.T) {
 		var logs bytes.Buffer
 		e, err := faults.New([]faults.Rule{
 			{ID: "r", Match: stat, Trigger: &faults.Trigger{Anchor: faults.Run, At: at(time.Second)}, Action: failure},
-		}, nil, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+		}, testSeed, faults.Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 
 		if err != nil {
 			t.Fatal(err)

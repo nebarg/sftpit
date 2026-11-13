@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/backend"
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 	"github.com/nebarg/sftpit/internal/sftpwire"
@@ -57,6 +58,26 @@ func newManager(t *testing.T, opts Options) *Manager {
 		}
 	})
 	return m
+}
+
+// testScenarios returns the built-in scenarios, and saves scenarios in a
+// new directory, for testUser.
+func testScenarios(t *testing.T) *config.Scenarios {
+	t.Helper()
+	s, err := config.NewScenarios(t.TempDir(), nil, []sshfront.User{{Name: testUser, Password: testPassword, Home: "/"}})
+	if err != nil {
+		t.Fatalf("NewScenarios: %v", err)
+	}
+	return s
+}
+
+// withRules replaces the current run's rules with rules.
+func withRules(t *testing.T, m *Manager, rules ...faults.Rule) {
+	t.Helper()
+	s := m.Status()
+	if _, err := m.changeRules(s.Run.ID, s.Revision, rules); err != nil {
+		t.Fatalf("changeRules: %v", err)
+	}
 }
 
 // startManager starts runs as newManager does, and serves them on a

@@ -18,16 +18,16 @@ import (
 type Fault struct {
 	// Name is what the dashboard calls the fault; a preset's own name, or
 	// "Custom fault", if empty.
-	Name string `json:"name,omitempty"`
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
 
 	// Preset names one of Presets, which sets Steps and Do and the
 	// defaults of the settings, which the fault may still change.
-	Preset string `json:"preset,omitempty"`
+	Preset string `json:"preset,omitempty" yaml:"preset,omitempty"`
 
 	// Steps are the ids of the Steps the fault acts on, and Do the id of
 	// one of Actions, what it does there.
-	Steps []string `json:"steps,omitempty"`
-	Do    string   `json:"do,omitempty"`
+	Steps []string `json:"steps,omitempty" yaml:"steps,flow,omitempty"`
+	Do    string   `json:"do,omitempty" yaml:"do,omitempty"`
 
 	// The settings of what it does: the Error a refusal answers with,
 	// the Seconds of a wait or outage, or the longest a hold or freeze
@@ -35,28 +35,28 @@ type Fault struct {
 	// after, how far a reported size is off by, whether a dropped
 	// connection is reset rather than closed, and whether the fault acts
 	// after the server has done what was asked rather than before.
-	Error     string   `json:"error,omitempty"`
-	Seconds   *float64 `json:"seconds,omitempty"`
-	KB        *uint64  `json:"kb,omitempty"`
-	SizeOffBy *int64   `json:"size_off_by,omitempty"`
-	Abrupt    bool     `json:"abrupt,omitempty"`
-	After     bool     `json:"after,omitempty"`
+	Error     string   `json:"error,omitempty" yaml:"error,omitempty"`
+	Seconds   *float64 `json:"seconds,omitempty" yaml:"seconds,omitempty"`
+	KB        *uint64  `json:"kb,omitempty" yaml:"kb,omitempty"`
+	SizeOffBy *int64   `json:"size_off_by,omitempty" yaml:"size_off_by,omitempty"`
+	Abrupt    bool     `json:"abrupt,omitempty" yaml:"abrupt,omitempty"`
+	After     bool     `json:"after,omitempty" yaml:"after,omitempty"`
 
 	// At most one of Folder, everything beneath a directory, File, one
 	// path, and Names, a pattern for the last part of a path, such as
 	// *.csv, narrows the files. User narrows it to one user's requests.
-	Folder string `json:"folder,omitempty"`
-	File   string `json:"file,omitempty"`
-	Names  string `json:"names,omitempty"`
-	User   string `json:"user,omitempty"`
+	Folder string `json:"folder,omitempty" yaml:"folder,omitempty"`
+	File   string `json:"file,omitempty" yaml:"file,omitempty"`
+	Names  string `json:"names,omitempty" yaml:"names,omitempty"`
+	User   string `json:"user,omitempty" yaml:"user,omitempty"`
 
 	// At most one of these says how often it happens, every time if none:
 	// the First times only, Only the time numbered so, a Percent of the
 	// times, or for the next Minutes.
-	First   *uint64  `json:"first,omitempty"`
-	Only    *uint64  `json:"only,omitempty"`
-	Percent *float64 `json:"percent,omitempty"`
-	Minutes *float64 `json:"minutes,omitempty"`
+	First   *uint64  `json:"first,omitempty" yaml:"first,omitempty"`
+	Only    *uint64  `json:"only,omitempty" yaml:"only,omitempty"`
+	Percent *float64 `json:"percent,omitempty" yaml:"percent,omitempty"`
+	Minutes *float64 `json:"minutes,omitempty" yaml:"minutes,omitempty"`
 }
 
 // Step is a step of a client's work that a fault can act on.
@@ -132,8 +132,6 @@ var Presets = []Preset{
 	{"server_goes_down", "Server goes down", "Open connections close, and new ones are refused for 30 seconds.", Fault{Do: "down", Seconds: new(30.0)}},
 	{"logins_fail", "Logins fail", "The connection closes just after a successful login.", Fault{Steps: []string{"authenticate"}, Do: "drop"}},
 }
-
-//go:fix inline
 
 // errorStatuses are the errors a refusal can answer with, by their plain
 // names, and the statuses they are.

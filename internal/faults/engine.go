@@ -8,7 +8,6 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +19,7 @@ import (
 // revision that is no longer current.
 var ErrStaleRevision = errors.New("stale revision")
 
-// Engine applies the rules of a scenario, and its chaos, to the requests of
-// one run, which starts when the engine is made. Each rule counts the
+// Engine applies fault rules to the requests of one run, which starts when the engine is made. Each rule counts the
 // requests it matches from the start of the run, or from the change that
 // applied it, and draws its random decisions from the run's seed. Its
 // methods are safe for concurrent use.
@@ -34,10 +32,8 @@ type Engine struct {
 	// revision numbers the rules: 1 for those the run starts with, and one
 	// more for each change.
 	revision uint64
-	// rules are in the order they are tried: the scenario's own, then those
-	// of chaos, if it is set.
+	// rules are in the order they are tried.
 	rules []*rule
-	chaos *Chaos
 	// sessions are the sessions that have not ended, which the rules a
 	// change applies are timed for.
 	sessions map[*Session]struct{}
@@ -65,10 +61,6 @@ type rule struct {
 	// removed is closed once a change removes the rule, which ends the
 	// waits it holds.
 	removed chan struct{}
-
-	// chaos is set for a rule of the engine's chaos, which matches nothing
-	// while chaos is paused.
-	chaos bool
 
 	// attempts counts the opens of each user, path or both, for a rule with
 	// an Attempt.
@@ -143,46 +135,30 @@ type Options struct {
 	Record func(events.Event)
 }
 
-// New returns an engine for rules, and for chaos if it is set, for a run
-// that starts now. It draws its random decisions from seed.
-func New(rules []Rule, chaos *Chaos, seed Seed, opts Options) (*Engine, error) {
+// New returns an engine for rules, for a run that starts now. It draws its
+// random decisions from seed.
+func New(rules []Rule, seed Seed, opts Options) (*Engine, error) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if err := check(rules, chaos); err != nil {
+	if err := Check(rules); err != nil {
 		return nil, err
 	}
-	e := &Engine{seed: seed, logger: logger, record: opts.Record, revision: 1, chaos: chaos, sessions: make(map[*Session]struct{}), stalls: make(chan struct{})}
+	e := &Engine{seed: seed, logger: logger, record: opts.Record, revision: 1, sessions: make(map[*Session]struct{}), stalls: make(chan struct{})}
 	start := time.Now()
-	for i, r := range tried(rules, chaos) {
-		ru := newRule(r, 0, start)
-		ru.chaos = i >= len(rules)
-		e.rules = append(e.rules, ru)
+	for _, r := range tried(rules) {
+		e.rules = append(e.rules, newRule(r, 0, start))
 	}
 	e.timers = e.runTimers(e.rules)
 	return e, nil
 }
 
-// check reports rules, or a chaos, that an engine cannot apply.
-func check(rules []Rule, chaos *Chaos) error {
-	if err := Check(rules); err != nil {
-		return err
-	}
-	if chaos != nil {
-		return chaos.Check()
-	}
-	return nil
-}
-
 // tried returns rules in the order they are tried: by priority, and as
-// given among equal priorities, and then the rules of chaos, if it is set.
-func tried(rules []Rule, chaos *Chaos) []Rule {
+// given among equal priorities.
+func tried(rules []Rule) []Rule {
 	all := slices.Clone(rules)
 	slices.SortStableFunc(all, func(a, b Rule) int { return cmp.Compare(a.Priority, b.Priority) })
-	if chaos != nil {
-		all = append(all, chaos.Rules()...)
-	}
 	return all
 }
 
@@ -228,13 +204,11 @@ func (e *Engine) Timers() []sftpproxy.Timer {
 	return e.timers
 }
 
-// Replace replaces the engine's rules with rules, and its chaos with chaos,
-// all at once between two requests, as the next revision, if revision is
+// Replace replaces the engine's rules with rules, all at once between two requests, as the next revision, if revision is
 // still the current one.
 //
 // A rule with the ID and the definition of a current rule carries on as it
-// was, with its counts, ordinals and moments, so a change that only pauses
-// or resumes chaos keeps its rules as they were. Any other rule starts from
+// was, with its counts, ordinals and moments. Any other rule starts from
 // now: its attempts and occurrences count from the change, and a trigger
 // anchored to the run measures from it. A rule that is no longer there ends
 // the delays, stalls and freezes it holds at once, and none of its moments
@@ -245,8 +219,8 @@ func (e *Engine) Timers() []sftpproxy.Timer {
 // now, as a session that starts now would be, through its MoreTimers.
 // Replace returns the timers of those rules that take the listener down at
 // a moment of the run, for the run to take as it takes Timers.
-func (e *Engine) Replace(revision uint64, rules []Rule, chaos *Chaos) ([]sftpproxy.Timer, error) {
-	if err := check(rules, chaos); err != nil {
+func (e *Engine) Replace(revision uint64, rules []Rule) ([]sftpproxy.Timer, error) {
+	if err := Check(rules); err != nil {
 		return nil, err
 	}
 	now := time.Now()
@@ -264,7 +238,7 @@ func (e *Engine) Replace(revision uint64, rules []Rule, chaos *Chaos) ([]sftppro
 	// whose definition changed.
 	var next, fresh []*rule
 	var added, changed, kept []string
-	for i, r := range tried(rules, chaos) {
+	for _, r := range tried(rules) {
 		old := current[r.ID]
 		delete(current, r.ID)
 		if old != nil && reflect.DeepEqual(old.Rule, r) {
@@ -279,7 +253,6 @@ func (e *Engine) Replace(revision uint64, rules []Rule, chaos *Chaos) ([]sftppro
 			added = append(added, r.ID)
 		}
 		ru := newRule(r, e.revision, now)
-		ru.chaos = i >= len(rules)
 		next = append(next, ru)
 		fresh = append(fresh, ru)
 	}
@@ -287,25 +260,15 @@ func (e *Engine) Replace(revision uint64, rules []Rule, chaos *Chaos) ([]sftppro
 	for _, ru := range current {
 		close(ru.removed)
 	}
-	e.rules, e.chaos = next, chaos
+	e.rules = next
 	// A connection's moments are drawn in the order the connections came,
 	// whatever order the map gives.
 	live := slices.SortedFunc(maps.Keys(e.sessions), func(a, b *Session) int { return cmp.Compare(a.client.Connection, b.client.Connection) })
 	for _, s := range live {
 		s.timeAdded(fresh, now)
 	}
-	attrs := []any{"from", revision, "to", e.revision, "added", added, "changed", changed, "removed", removed, "kept", kept}
-	if chaos != nil {
-		attrs = append(attrs, "chaos", chaos.Preset, "chaos_paused", chaos.Paused)
-	}
-	e.logger.Info("rules changed", attrs...)
+	e.logger.Info("rules changed", "from", revision, "to", e.revision, "added", added, "changed", changed, "removed", removed, "kept", kept)
 	return e.runTimers(fresh), nil
-}
-
-// paused reports whether ru is a rule of the engine's chaos, which is
-// paused. e.mu must be held.
-func (e *Engine) paused(ru *rule) bool {
-	return ru.chaos && e.chaos.Paused
 }
 
 // ReleaseStalls releases every stall and freeze in progress, whichever rule
@@ -328,14 +291,11 @@ func (e *Engine) Released() <-chan struct{} {
 	return e.stalls
 }
 
-// RuleSet is an engine's rules at one revision: the rules it was given, in
-// the order they are tried, and its chaos, or nil, whose rules are tried
-// after them. Counts holds what each rule has done so far, those of chaos
-// included, by rule ID.
+// RuleSet is an engine's rules at one revision, in the order they are
+// tried. Counts holds what each rule has done so far, by rule ID.
 type RuleSet struct {
 	Revision uint64
 	Rules    []Rule
-	Chaos    *Chaos
 	Counts   map[string]Counts
 }
 
@@ -343,11 +303,9 @@ type RuleSet struct {
 func (e *Engine) Rules() RuleSet {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	set := RuleSet{Revision: e.revision, Chaos: e.chaos, Counts: make(map[string]Counts, len(e.rules))}
+	set := RuleSet{Revision: e.revision, Counts: make(map[string]Counts, len(e.rules))}
 	for _, ru := range e.rules {
-		if !ru.chaos {
-			set.Rules = append(set.Rules, ru.Rule)
-		}
+		set.Rules = append(set.Rules, ru.Rule)
 		set.Counts[ru.ID] = ru.counts
 	}
 	return set
@@ -362,15 +320,11 @@ func (e *Engine) Revision() uint64 {
 }
 
 // Check reports the first of rules that an engine cannot apply as written.
-// Their IDs may not start with chaos-, which only the rules of chaos have.
 func Check(rules []Rule) error {
 	ids := make(map[string]bool)
 	for _, r := range rules {
 		if r.ID == "" {
 			return errors.New("faults: a rule has no ID")
-		}
-		if strings.HasPrefix(r.ID, chaosPrefix) {
-			return fmt.Errorf("faults: rule ID %q starts with %s, which only the rules of a chaos preset have", r.ID, chaosPrefix)
 		}
 		if ids[r.ID] {
 			return fmt.Errorf("faults: rule ID %q is used twice", r.ID)
@@ -534,7 +488,7 @@ func (e *Engine) reserveTransfer(r *rule, attrs []any) func() bool {
 }
 
 // reserveMoment returns the Reserve of a moment that r timed, which lets the
-// fault take effect if r is still a current rule, not paused, and has not
+// fault take effect if r is still a current rule and has not
 // used up its MaxTriggers by then. Given once, a moment of a connection, the
 // fault takes effect only once, whichever of the connection's sessions it
 // is timed for.
@@ -544,10 +498,6 @@ func (e *Engine) reserveMoment(r *rule, attrs []any, once *connectionMoment) fun
 		defer e.mu.Unlock()
 		if r.isRemoved() {
 			e.suppressed(r, attrs, "removed")
-			return false
-		}
-		if e.paused(r) {
-			e.suppressed(r, attrs, "paused")
 			return false
 		}
 		if once != nil {

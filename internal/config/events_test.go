@@ -11,10 +11,10 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpproxy"
 )
 
-func TestLoadReadsRulesForConnectionEvents(t *testing.T) {
+func TestLongFormReadsRulesForConnectionEvents(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	cfg, err := loadScenarios(t, dir, `  logins:
+	rules, err := compileLongForm(t, dir, `  logins:
     faults:
       - id: slow-connect
         match: {operation: connect}
@@ -27,9 +27,9 @@ func TestLoadReadsRulesForConnectionEvents(t *testing.T) {
         match: {operation: [connect, authenticate]}
         trigger: {window: {from: 10s, until: 15s}, anchor: run}
         action: {type: freeze_connection, max_freeze: 5s}
-`, "")
+`)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("compileLongForm: %v", err)
 	}
 	want := []faults.Rule{
 		{
@@ -51,12 +51,12 @@ func TestLoadReadsRulesForConnectionEvents(t *testing.T) {
 			Action:  sftpproxy.Freeze{Limit: 5 * time.Second},
 		},
 	}
-	if got := cfg.Scenarios["logins"].Rules; !reflect.DeepEqual(got, want) {
+	if got := rules["logins"]; !reflect.DeepEqual(got, want) {
 		t.Errorf("rules =\n%+v\nwant\n%+v", got, want)
 	}
 }
 
-func TestLoadRejectsInvalidRulesForConnectionEvents(t *testing.T) {
+func TestLongFormRejectsInvalidRulesForConnectionEvents(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	tests := []struct {
@@ -75,7 +75,7 @@ func TestLoadRejectsInvalidRulesForConnectionEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := loadScenarios(t, dir, oneRule(tt.rule), "")
+			_, err := compileLongForm(t, dir, oneRule(tt.rule))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

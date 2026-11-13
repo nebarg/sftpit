@@ -1,5 +1,6 @@
 // Package control serves sftpit's API over HTTP: the faults of the current
-// run, which can be added, turned on and off and removed, what clients did,
+// run, which can be added, turned on and off and removed, the scenarios,
+// which turn groups of faults on and off and can be saved, what clients did,
 // the run's files, how to connect, the server's status, the release of
 // held requests, and resets that turn every fault off and restore the
 // starting files. It serves the dashboard, which uses the API, too.
@@ -58,6 +59,10 @@ func Handler(m *runs.Manager, opts Options) http.Handler {
 	mux.HandleFunc("GET /api/faults/{id}", a.fault)
 	mux.HandleFunc("PATCH /api/faults/{id}", a.switchFault)
 	mux.HandleFunc("DELETE /api/faults/{id}", a.removeFault)
+	mux.HandleFunc("GET /api/scenarios", a.scenarios)
+	mux.HandleFunc("PATCH /api/scenarios/{name}", a.switchScenario)
+	mux.HandleFunc("PUT /api/scenarios/{name}", a.saveScenario)
+	mux.HandleFunc("DELETE /api/scenarios/{name}", a.deleteScenario)
 	mux.HandleFunc("POST /api/reset", a.startAgain)
 	mux.HandleFunc("GET /api/activity", a.activity)
 	mux.HandleFunc("GET /api/server", a.server)
@@ -89,11 +94,11 @@ func (a *api) current(h http.HandlerFunc) http.HandlerFunc {
 // statusFor returns the HTTP status that answers err from the runs.
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision):
+	case errors.Is(err, runs.ErrStaleRun), errors.Is(err, faults.ErrStaleRevision), errors.Is(err, config.ErrFixedScenario):
 		return http.StatusConflict
-	case errors.Is(err, runs.ErrUnknownScenario), errors.Is(err, config.ErrInvalidScenarioFile):
+	case errors.Is(err, config.ErrInvalidScenario):
 		return http.StatusBadRequest
-	case errors.Is(err, runs.ErrUnknownRun), errors.Is(err, runs.ErrUnknownFault):
+	case errors.Is(err, runs.ErrUnknownRun), errors.Is(err, runs.ErrUnknownFault), errors.Is(err, config.ErrUnknownScenario):
 		return http.StatusNotFound
 	}
 	return http.StatusInternalServerError
@@ -120,20 +125,18 @@ type SFTPStatus struct {
 	Error     string     `json:"error,omitempty"`
 }
 
-// RunStatus describes the current run: its ID, the scenario it started
-// with, if any, how many requests and replies holds are holding, and how
-// many connections freezes are holding.
+// RunStatus describes the current run: its ID, how many requests and
+// replies holds are holding, and how many connections freezes are holding.
 type RunStatus struct {
-	ID       string `json:"id"`
-	Scenario string `json:"scenario,omitempty"`
-	Stalled  int    `json:"stalled"`
-	Frozen   int    `json:"frozen"`
+	ID      string `json:"id"`
+	Stalled int    `json:"stalled"`
+	Frozen  int    `json:"frozen"`
 }
 
 func newStatus(s runs.Status) Status {
 	body := Status{
 		SFTP: SFTPStatus{State: s.State, DownUntil: s.DownUntil.UTC()},
-		Run:  RunStatus{ID: s.Run.ID, Scenario: s.Run.Scenario.Name, Stalled: s.Stalled, Frozen: s.Frozen},
+		Run:  RunStatus{ID: s.Run.ID, Stalled: s.Stalled, Frozen: s.Frozen},
 	}
 	if s.Err != nil {
 		body.SFTP.Error = s.Err.Error()

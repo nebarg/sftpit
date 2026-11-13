@@ -12,10 +12,10 @@ import (
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
-func TestLoadReadsTriggersAndConnectionActions(t *testing.T) {
+func TestLongFormReadsTriggersAndConnectionActions(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
-	cfg, err := loadScenarios(t, dir, `  timed:
+	rules, err := compileLongForm(t, dir, `  timed:
     faults:
       - id: bad-five-seconds
         match: {operation: any}
@@ -44,9 +44,9 @@ func TestLoadReadsTriggersAndConnectionActions(t *testing.T) {
         trigger: {at: 1s, anchor: transfer}
         decision: {probability: 0.5}
         action: {type: close_connection}
-`, "")
+`)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("compileLongForm: %v", err)
 	}
 	want := []faults.Rule{
 		{
@@ -91,12 +91,12 @@ func TestLoadReadsTriggersAndConnectionActions(t *testing.T) {
 			Action:      sftpproxy.Drop{},
 		},
 	}
-	if got := cfg.Scenarios["timed"].Rules; !reflect.DeepEqual(got, want) {
+	if got := rules["timed"]; !reflect.DeepEqual(got, want) {
 		t.Errorf("rules =\n%+v\nwant\n%+v", got, want)
 	}
 }
 
-func TestLoadRejectsInvalidTriggers(t *testing.T) {
+func TestLongFormRejectsInvalidTriggers(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthorizedKeys(t, filepath.Join(dir, "partner-b.pub"), "")
 	tests := []struct {
@@ -123,7 +123,7 @@ func TestLoadRejectsInvalidTriggers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := loadScenarios(t, dir, oneRule(tt.rule), "")
+			_, err := compileLongForm(t, dir, oneRule(tt.rule))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %v, want %q", err, tt.want)
 			}

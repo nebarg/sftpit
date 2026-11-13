@@ -39,8 +39,9 @@ Flags:
                        addresses; container listens on every interface by
                        default, for other containers on its network
   --config FILE        read settings, users and scenarios from FILE
-  --scenario NAME      inject the faults of the scenario NAME in the
-                       config; without it, no faults are injected
+  --scenario NAME      turn on the scenario NAME at startup: a built-in
+                       one, one in the config or a saved one; a reset
+                       turns it off
   --sftp-listen ADDR   listen on ADDR instead of the configured address
                        (default 127.0.0.1:2122, or :2122 in the container
                        profile; port 0 picks a free port)
@@ -167,15 +168,14 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 		return err
 	}
 	manager, err := runs.Start(workspace, runs.Options{
-		Server:        sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
-		SeedDir:       cfg.SeedDir,
-		Limits:        cfg.Limits,
-		ReplyOrder:    cfg.ReplyOrder,
-		Policy:        cfg.Policy,
-		Scenarios:     cfg.Scenarios,
-		ScenarioFiles: cfg.ScenarioFiles,
-		Scenario:      cfg.Scenario,
-		Logger:        logger,
+		Server:     sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
+		SeedDir:    cfg.SeedDir,
+		Limits:     cfg.Limits,
+		ReplyOrder: cfg.ReplyOrder,
+		Policy:     cfg.Policy,
+		Scenarios:  cfg.Scenarios,
+		Scenario:   cfg.Scenario,
+		Logger:     logger,
 	})
 	if err != nil {
 		return err
@@ -292,15 +292,8 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 		fmt.Fprintf(w, "  workspace: %s (kept, with its last five runs)\n", workspace.Dir())
 	}
 	fmt.Fprintf(w, "  run: %s\n", run.ID)
-	if s := run.Scenario; s.Name != "" {
-		fmt.Fprintf(w, "  scenario: %s (%s)\n", s.Name, count(len(cfg.Chosen().Rules), "fault rule"))
-		if c := cfg.Chosen().Chaos; c != nil {
-			paused := ""
-			if c.Paused {
-				paused = ", paused"
-			}
-			fmt.Fprintf(w, "  chaos: %s%s\n", c.Preset, paused)
-		}
+	if cfg.Scenario != "" {
+		fmt.Fprintf(w, "  scenario on: %s\n", cfg.Scenario)
 	}
 	if cfg.SeedDir != "" {
 		fmt.Fprintf(w, "  seeded from: %s\n", cfg.SeedDir)
