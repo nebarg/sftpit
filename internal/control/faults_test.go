@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/control"
 	"github.com/nebarg/sftpit/internal/runs"
 )
@@ -109,8 +110,8 @@ func TestAnInvalidFaultIsRefusedWithWhatIsWrong(t *testing.T) {
 		`{"preset": "oops"}`:                                          `there is no preset "oops"`,
 		`{"steps": ["remove"], "do": "explode"}`:                      `there is nothing to do called "explode"`,
 		`{"steps": ["remove"], "do": "refuse", "user": "nobody"}`:     `user "nobody" is not a configured user`,
-		`{"preset": "deletes_fail", "first": 9223372036854775808}`:    "first must be at most 9223372036854775807",
-		`{"preset": "upload_stops_partway", "kb": 18014398509481984}`: "kb must be at most 18014398509481983",
+		`{"preset": "deletes_fail", "first": 9223372036854775808}`:    "first must be at most 1000000",
+		`{"preset": "upload_stops_partway", "kb": 18014398509481984}`: "kb must be at most 1073741824",
 	} {
 		code, got := call(t, api, "POST", "/api/faults", body)
 		if code != http.StatusBadRequest || !equalJSON(got, map[string]any{"error": want}) {
@@ -180,5 +181,29 @@ func TestTheCurrentRunsRoutesNeedNoRunID(t *testing.T) {
 	}
 	if code, body := call(t, api, "POST", "/api/release", ""); code != http.StatusOK || body["run"].(map[string]any)["id"] != m.Status().Run.ID {
 		t.Errorf("POST /api/release = %d %v, want the status", code, body)
+	}
+}
+
+func TestChangesAreRefusedAsUnavailableOnceTheServerHasClosed(t *testing.T) {
+	m, api := start(t, runs.Options{})
+	f, err := m.AddFault(config.Fault{Preset: "deletes_fail"})
+	if err != nil {
+		t.Fatalf("AddFault: %v", err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for _, change := range []struct{ method, path, body string }{
+		{"POST", "/api/faults", `{"preset": "deletes_fail"}`},
+		{"PATCH", "/api/faults/" + f.ID, `{"on": false}`},
+		{"DELETE", "/api/faults/" + f.ID, ""},
+		{"DELETE", "/api/faults", ""},
+		{"PATCH", "/api/scenarios/unreliable-light", `{"on": true}`},
+		{"POST", "/api/reset", ""},
+	} {
+		code, body := call(t, api, change.method, change.path, change.body)
+		if message, _ := body["error"].(string); code != http.StatusServiceUnavailable || !strings.Contains(message, "server closed") {
+			t.Errorf("%s %s after the server closed = %d %v, want 503 saying it has closed", change.method, change.path, code, body)
+		}
 	}
 }

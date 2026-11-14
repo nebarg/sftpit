@@ -27,6 +27,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/runs"
+	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
 // RequestHeader must be set, to any non-empty value, on every request that
@@ -90,6 +91,8 @@ func statusFor(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, runs.ErrUnknownFault), errors.Is(err, config.ErrUnknownScenario):
 		return http.StatusNotFound
+	case errors.Is(err, sshfront.ErrServerClosed):
+		return http.StatusServiceUnavailable
 	}
 	return http.StatusInternalServerError
 }
