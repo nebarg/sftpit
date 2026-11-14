@@ -40,17 +40,16 @@ type plainFault struct {
 }
 
 // Faults returns the faults added to the current run, in the order they
-// were added.
+// were added. It does not wait for a reset or a change of the run's rules.
 func (m *Manager) Faults() []Fault {
-	m.resetting.Lock()
-	defer m.resetting.Unlock()
-	current := m.active()
-	counts := current.rules.Rules().Counts
-	list := make([]Fault, len(current.faults))
-	for i, f := range current.faults {
-		list[i] = describeFault(f, counts)
+	m.mu.Lock()
+	list, counts := m.current.faults, m.current.rules.Rules().Counts
+	m.mu.Unlock()
+	described := make([]Fault, len(list))
+	for i, f := range list {
+		described[i] = describeFault(f, counts)
 	}
-	return list
+	return described
 }
 
 // Fault returns the current run's fault id, or fails with ErrUnknownFault.
@@ -80,11 +79,9 @@ func (m *Manager) AddFault(spec config.Fault) (Fault, error) {
 		return Fault{}, fmt.Errorf("runs: add a fault: %w", sshfront.ErrServerClosed)
 	}
 	current := m.active()
-	f := newPlainFault(m.faultID(current, resolved.Name), resolved, rule, "")
-	current.faults = append(current.faults, f)
-	set, err := m.applyFaults(current)
+	f := newPlainFault(m.faultID(current, current.faults, resolved.Name), resolved, rule, "")
+	set, err := m.replaceFaults(current, append(slices.Clone(current.faults), f))
 	if err != nil {
-		current.faults = current.faults[:len(current.faults)-1]
 		return Fault{}, err
 	}
 	return describeFault(f, set.Counts), nil
@@ -101,14 +98,13 @@ func (m *Manager) SwitchFault(id string, on bool) (Fault, error) {
 	if i < 0 {
 		return Fault{}, fmt.Errorf("runs: fault %q: %w", id, ErrUnknownFault)
 	}
-	was := current.faults[i].on
-	current.faults[i].on = on
-	set, err := m.applyFaults(current)
+	next := slices.Clone(current.faults)
+	next[i].on = on
+	set, err := m.replaceFaults(current, next)
 	if err != nil {
-		current.faults[i].on = was
 		return Fault{}, err
 	}
-	return describeFault(current.faults[i], set.Counts), nil
+	return describeFault(next[i], set.Counts), nil
 }
 
 // RemoveFault removes the current run's fault id.
@@ -120,51 +116,33 @@ func (m *Manager) RemoveFault(id string) error {
 	if i < 0 {
 		return fmt.Errorf("runs: fault %q: %w", id, ErrUnknownFault)
 	}
-	was := current.faults
-	current.faults = slices.Delete(slices.Clone(was), i, i+1)
-	return m.removing(current, was)
+	_, err := m.replaceFaults(current, slices.Delete(slices.Clone(current.faults), i, i+1))
+	return err
 }
 
 // RemoveFaults removes every fault added to the current run.
 func (m *Manager) RemoveFaults() error {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
-	current := m.active()
-	was := current.faults
-	current.faults = nil
-	return m.removing(current, was)
+	_, err := m.replaceFaults(m.active(), nil)
+	return err
 }
 
-// removing applies current's faults once some of was are gone, putting was
-// back if that fails.
-func (m *Manager) removing(current *activeRun, was []plainFault) error {
-	if _, err := m.replaceFaults(current, was); err != nil {
-		current.faults = was
-		return err
-	}
-	return nil
-}
-
-// applyFaults replaces the rules of current's faults with those its faults
-// give now.
-func (m *Manager) applyFaults(current *activeRun) (faults.RuleSet, error) {
-	return m.replaceFaults(current, current.faults)
-}
-
-// replaceFaults replaces the rules of previous, current's faults before a
-// change, with those of current's faults now, after the run's other rules.
-// The caller holds resetting.
-func (m *Manager) replaceFaults(current *activeRun, previous []plainFault) (faults.RuleSet, error) {
+// replaceFaults replaces current's faults with next, and their rules with
+// those of next, after the run's other rules, and returns the new rules. If
+// that fails, current keeps its faults. next must not be changed once
+// passed, since readers may hold it. The caller holds resetting.
+func (m *Manager) replaceFaults(current *activeRun, next []plainFault) (faults.RuleSet, error) {
 	set := current.rules.Rules()
 	rules := slices.DeleteFunc(slices.Clone(set.Rules), func(r faults.Rule) bool {
-		return slices.ContainsFunc(previous, func(f plainFault) bool { return f.id == r.ID })
+		return slices.ContainsFunc(current.faults, func(f plainFault) bool { return f.id == r.ID })
 	})
-	for _, f := range current.faults {
+	for _, f := range next {
 		if f.on {
 			rules = append(rules, f.rule)
 		}
 	}
-	return m.replaceRules(current, set.Revision, rules)
+	return m.replaceRules(current, set.Revision, rules, next)
 }
 
 // newPlainFault returns spec, resolved and compiled to rule, as the fault
@@ -176,17 +154,18 @@ func newPlainFault(id string, spec config.Fault, rule faults.Rule, scenario stri
 
 var notID = regexp.MustCompile(`[^a-z0-9]+`)
 
-// faultID returns an ID for a new fault of current named name: its name
-// in lowercase letters, digits and -, numbered so that no rule of the run
-// has it.
-func (m *Manager) faultID(current *activeRun, name string) string {
+// faultID returns an ID for a new fault of current named name, to join
+// list: its name in lowercase letters, digits and -, numbered so that no
+// rule of the run, and no fault of list, has it. The caller holds
+// resetting.
+func (m *Manager) faultID(current *activeRun, list []plainFault, name string) string {
 	base := cmp.Or(strings.Trim(notID.ReplaceAllString(strings.ToLower(name), "-"), "-"), "fault")
 	taken := current.rules.Rules().Counts
 	for {
 		current.lastFault++
 		id := base + "-" + strconv.Itoa(current.lastFault)
 		_, ruled := taken[id]
-		if !ruled && !slices.ContainsFunc(current.faults, func(f plainFault) bool { return f.id == id }) {
+		if !ruled && !slices.ContainsFunc(list, func(f plainFault) bool { return f.id == id }) {
 			return id
 		}
 	}

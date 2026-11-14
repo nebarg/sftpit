@@ -67,15 +67,25 @@ type Manager struct {
 	srv       *sshfront.Server
 
 	// resetting serialises each reset, each change of the current run's
-	// rules, so that none arms timers on a run that a reset is ending, and
-	// Close. It guards activeRun.stops, and closed, which Close sets so that
-	// nothing starts or changes a run after it.
+	// rules or faults, so that none arms timers on a run that a reset is
+	// ending, and Close. It is held for the whole of a reset, so nothing
+	// that only reads takes it. It guards activeRun.stops and
+	// activeRun.lastFault, and closed, which Close sets so that nothing
+	// starts or changes a run after it.
 	resetting sync.Mutex
 	closed    bool
 
-	// mu guards current, inReset and failed. current also changes only
-	// while resetting is held, so code holding resetting reads it without
-	// mu.
+	// scenarioFiles serialises reading the saved scenarios with saving and
+	// deleting them, along with the change each makes to the current run's
+	// faults, so that a list of the scenarios is of one moment. Code that
+	// holds resetting too takes it after resetting.
+	scenarioFiles sync.Mutex
+
+	// mu guards current, inReset and failed, and activeRun.faults, which
+	// change along with the run's rules under it, so that code holding mu
+	// sees the faults and the counts of their rules as of one moment. It is
+	// held only briefly. current and activeRun.faults also change only while
+	// resetting is held, so code holding resetting reads them without mu.
 	mu      sync.Mutex
 	current *activeRun
 	// inReset is set while a reset is under way, and failed once one has
@@ -99,8 +109,8 @@ type activeRun struct {
 	stops []func()
 
 	// faults are the faults added to the run in plain terms, in the order
-	// added, and lastFault numbers them. They are guarded by the Manager's
-	// resetting.
+	// added. A change replaces the slice, never its elements, since readers
+	// keep it once mu is released. lastFault numbers them.
 	faults    []plainFault
 	lastFault int
 }
@@ -212,12 +222,18 @@ func (m *Manager) Rules() faults.RuleSet {
 
 // replaceRules replaces the rules of current, the current run, with rules,
 // as faults.Engine.Replace does if revision is still the current revision,
-// and returns the new rules. It fails with faults.ErrStaleRevision for
-// another revision. The run takes the listener down at the moments of the
-// rules that start afresh, as it does at those of the rules it started
-// with. The caller holds resetting.
-func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
+// and its faults with list, and returns the new rules. It fails with
+// faults.ErrStaleRevision for another revision, and whenever it fails it
+// leaves the rules and the faults as they were. The run takes the listener
+// down at the moments of the rules that start afresh, as it does at those
+// of the rules it started with. The caller holds resetting.
+func (m *Manager) replaceRules(current *activeRun, revision uint64, rules []faults.Rule, list []plainFault) (faults.RuleSet, error) {
+	m.mu.Lock()
 	timers, err := current.rules.Replace(revision, rules)
+	if err == nil {
+		current.faults = list
+	}
+	m.mu.Unlock()
 	if err != nil {
 		return faults.RuleSet{}, err
 	}

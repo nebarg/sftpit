@@ -16,18 +16,21 @@ type Scenario struct {
 }
 
 // Scenarios returns every scenario, as config.Scenarios.List gives them,
-// with whether each is on in the current run.
+// with whether each is on in the current run. It does not wait for a reset
+// or a change of the run's rules.
 func (m *Manager) Scenarios() ([]Scenario, error) {
-	m.resetting.Lock()
-	defer m.resetting.Unlock()
+	m.scenarioFiles.Lock()
+	defer m.scenarioFiles.Unlock()
 	listed, err := m.opts.Scenarios.List()
 	if err != nil {
 		return nil, err
 	}
-	current := m.active()
+	m.mu.Lock()
+	have := m.current.faults
+	m.mu.Unlock()
 	list := make([]Scenario, len(listed))
 	for i, s := range listed {
-		list[i] = Scenario{NamedScenario: s, On: isOn(current, s.Name)}
+		list[i] = Scenario{NamedScenario: s, On: isOn(have, s.Name)}
 	}
 	return list, nil
 }
@@ -47,7 +50,7 @@ func (m *Manager) SwitchScenario(name string, on bool) (Scenario, error) {
 	named, err := m.opts.Scenarios.Get(name)
 	// A scenario whose file has gone, or no longer holds a valid scenario,
 	// can still be turned off.
-	if err != nil && (on || !isOn(current, name)) {
+	if err != nil && (on || !isOn(current.faults, name)) {
 		return Scenario{}, err
 	}
 	named.Name = name
@@ -67,12 +70,14 @@ func (m *Manager) SwitchScenario(name string, on bool) (Scenario, error) {
 func (m *Manager) SaveScenario(name string, sc config.Scenario) (Scenario, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	m.scenarioFiles.Lock()
+	defer m.scenarioFiles.Unlock()
 	saved, err := m.opts.Scenarios.Save(name, sc)
 	if err != nil {
 		return Scenario{}, err
 	}
 	current := m.active()
-	on := isOn(current, name)
+	on := isOn(current.faults, name)
 	if on && !m.closed {
 		if err := m.setScenarioFaults(current, name, sc.Faults); err != nil {
 			return Scenario{}, err
@@ -86,6 +91,8 @@ func (m *Manager) SaveScenario(name string, sc config.Scenario) (Scenario, error
 func (m *Manager) DeleteScenario(name string) error {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	m.scenarioFiles.Lock()
+	defer m.scenarioFiles.Unlock()
 	if err := m.opts.Scenarios.Delete(name); err != nil {
 		return err
 	}
@@ -96,28 +103,25 @@ func (m *Manager) DeleteScenario(name string) error {
 }
 
 // setScenarioFaults replaces the faults that the scenario name added to
-// current with specs, each switched on, or puts current's faults back if
-// that fails. The caller holds resetting.
+// current with specs, each switched on, or leaves current's faults as they
+// were if that fails. The caller holds resetting.
 func (m *Manager) setScenarioFaults(current *activeRun, name string, specs []config.Fault) error {
-	was := current.faults
-	current.faults = slices.DeleteFunc(slices.Clone(was), func(f plainFault) bool { return f.scenario == name })
+	next := slices.DeleteFunc(slices.Clone(current.faults), func(f plainFault) bool { return f.scenario == name })
 	for i, spec := range specs {
 		resolved, rule, err := spec.Compile(m.opts.Server.Users)
 		if err != nil {
-			current.faults = was
 			return fmt.Errorf("runs: scenario %s: faults[%d]: %w", name, i, err)
 		}
-		current.faults = append(current.faults, newPlainFault(m.faultID(current, resolved.Name), resolved, rule, name))
+		next = append(next, newPlainFault(m.faultID(current, next, resolved.Name), resolved, rule, name))
 	}
-	if _, err := m.replaceFaults(current, was); err != nil {
-		current.faults = was
+	if _, err := m.replaceFaults(current, next); err != nil {
 		return fmt.Errorf("runs: scenario %s: %w", name, err)
 	}
 	return nil
 }
 
-// isOn reports whether current has any of the faults that the scenario
-// name added. The caller holds resetting.
-func isOn(current *activeRun, name string) bool {
-	return slices.ContainsFunc(current.faults, func(f plainFault) bool { return f.scenario == name })
+// isOn reports whether list has any of the faults that the scenario name
+// added.
+func isOn(list []plainFault, name string) bool {
+	return slices.ContainsFunc(list, func(f plainFault) bool { return f.scenario == name })
 }

@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,7 +87,8 @@ func withRules(t *testing.T, m *Manager, rules ...faults.Rule) {
 func changeRules(m *Manager, revision uint64, rules []faults.Rule) (faults.RuleSet, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
-	return m.replaceRules(m.active(), revision, rules)
+	current := m.active()
+	return m.replaceRules(current, revision, rules, current.faults)
 }
 
 // startManager starts runs as newManager does, and serves them on a
@@ -107,6 +110,35 @@ func startManager(t *testing.T, opts Options) (*Manager, string) {
 		}
 	})
 	return m, ln.Addr().String()
+}
+
+// holdSession starts an SFTP session of the current run of m, served at
+// addr, that outlasts its connection, as none of the proxy's do, so that a
+// reset waits for it. It returns a function that lets the session finish,
+// which the test's cleanup calls too, before the server is closed.
+func holdSession(t *testing.T, m *Manager, addr string) (free func()) {
+	t.Helper()
+	release := make(chan struct{})
+	free = sync.OnceFunc(func() { close(release) })
+	t.Cleanup(free)
+	started := make(chan struct{}, 1)
+	m.mu.Lock()
+	m.current.handler = func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+	m.mu.Unlock()
+	session, err := dialSSH(t, addr).NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { session.Close() })
+	if err := session.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("RequestSubsystem(sftp): %v", err)
+	}
+	testutil.Receive(t, started)
+	return free
 }
 
 // newHostKey returns a new Ed25519 host key, which is quicker to make than

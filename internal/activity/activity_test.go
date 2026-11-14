@@ -266,3 +266,45 @@ func TestLines(t *testing.T) {
 		})
 	}
 }
+
+// BenchmarkLines builds the lines of as many events as a run keeps, as the
+// dashboard asks for them each second.
+func BenchmarkLines(b *testing.B) {
+	evs := numbered(sessions(10000)...)
+	names := map[string]string{"deletes-fail-1": "Deletes fail"}
+	b.ReportAllocs()
+	for b.Loop() {
+		Lines(evs, names)
+	}
+}
+
+// sessions returns n events of connections, one after another, each of
+// which logs in, uploads a file, lists a directory, has a delete refused by
+// a fault, checks a missing file, downloads a file and logs out.
+func sessions(n int) []events.Event {
+	var evs []events.Event
+	for conn := uint64(1); len(evs) < n; conn++ {
+		session := append(login(),
+			op(1, "SSH_FXP_REALPATH", "/", "SSH_FXP_NAME"),
+			open(2, "/in/a.csv", "write"),
+			transfer("/in/a.csv", events.Totals{Mode: "write", Writes: 4, BytesWritten: 131072, Closed: "close"}),
+			op(3, "SSH_FXP_CLOSE", "/in/a.csv", "SSH_FX_OK"),
+			op(4, "SSH_FXP_OPENDIR", "/out", "SSH_FXP_HANDLE"),
+			op(5, "SSH_FXP_READDIR", "/out", "SSH_FXP_NAME"),
+			op(6, "SSH_FXP_READDIR", "/out", "SSH_FX_EOF"),
+			op(7, "SSH_FXP_CLOSE", "/out", "SSH_FX_OK"),
+			fault(1, 8, "SSH_FXP_REMOVE", "/out/r.csv", "deletes-fail-1", "fail"),
+			faulted(op(8, "SSH_FXP_REMOVE", "/out/r.csv", "SSH_FX_PERMISSION_DENIED"), "deletes-fail-1"),
+			op(9, "SSH_FXP_STAT", "/out/x", "SSH_FX_NO_SUCH_FILE"),
+			open(10, "/out/b.csv", "read"),
+			transfer("/out/b.csv", events.Totals{Mode: "read", Reads: 2, BytesRead: 65536, Closed: "close"}),
+			op(11, "SSH_FXP_CLOSE", "/out/b.csv", "SSH_FX_OK"),
+			events.Event{Kind: events.Disconnected, Connection: 1, User: "test"},
+		)
+		for i := range session {
+			session[i].Connection = conn
+		}
+		evs = append(evs, session...)
+	}
+	return evs[:n]
+}

@@ -3,13 +3,17 @@ package runs
 import (
 	"errors"
 	"os"
+	"reflect"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/pkg/sftp"
 
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/testutil"
 )
 
 func TestAFaultCanBeAddedSwitchedAndRemoved(t *testing.T) {
@@ -160,6 +164,171 @@ func TestAResetRemovesTheFaults(t *testing.T) {
 	if err := c.Remove("/a.csv"); err != nil {
 		t.Errorf("after a reset, a delete = %v, want it to work", err)
 	}
+}
+
+func TestFaultsAndScenariosCanBeReadWhileAResetWaits(t *testing.T) {
+	m, addr := startManager(t, Options{Scenarios: testScenarios(t)})
+	if _, err := m.SwitchScenario("unreliable-light", true); err != nil {
+		t.Fatalf("SwitchScenario: %v", err)
+	}
+	added, err := m.AddFault(config.Fault{Preset: "deletes_fail"})
+	if err != nil {
+		t.Fatalf("AddFault: %v", err)
+	}
+	had := m.Faults()
+	free := holdSession(t, m, addr)
+	reset := make(chan error, 1)
+	go func() {
+		_, err := m.Reset(t.Context())
+		reset <- err
+	}()
+	awaitState(t, m, StateResetting)
+
+	// promptly calls read, failing the test if it waits for the reset.
+	promptly := func(name string, read func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			read()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(waitTimeout):
+			t.Fatalf("%s waited for the reset to end", name)
+		}
+	}
+	var got []Fault
+	promptly("Faults", func() { got = m.Faults() })
+	if !reflect.DeepEqual(got, had) {
+		t.Errorf("during the reset, Faults = %+v, want the run's %+v", got, had)
+	}
+	var fault Fault
+	promptly("Fault", func() { fault, err = m.Fault(added.ID) })
+	if err != nil || !reflect.DeepEqual(fault, added) {
+		t.Errorf("during the reset, Fault = %+v, %v; want %+v", fault, err, added)
+	}
+	var list []Scenario
+	promptly("Scenarios", func() { list, err = m.Scenarios() })
+	if err != nil {
+		t.Errorf("during the reset, Scenarios: %v", err)
+	}
+	if i := slices.IndexFunc(list, func(s Scenario) bool { return s.Name == "unreliable-light" }); i < 0 || !list[i].On {
+		t.Errorf("during the reset, Scenarios = %+v, want unreliable-light on", list)
+	}
+
+	free()
+	if err := testutil.Receive(t, reset); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if got := m.Faults(); len(got) != 0 {
+		t.Errorf("after the reset, Faults = %+v, want none", got)
+	}
+}
+
+// TestReadersSeeOnlyWholeChangesOfTheFaults checks that while faults are
+// added, switched and removed, a scenario is turned on and off, and a
+// change whose rules the engine refuses is made, a reader sees each change
+// whole or not at all, and the run's rules as of the same moment.
+func TestReadersSeeOnlyWholeChangesOfTheFaults(t *testing.T) {
+	m := newManager(t, Options{Scenarios: testScenarios(t)})
+	withRules(t, m, denyStats)
+	const scenario, rounds = "unreliable-moderate", 50
+	resolved, rule, err := config.Fault{Preset: "deletes_fail"}.Compile(m.opts.Server.Users)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	// refused adds a fault whose ID the run's own rule has, which the
+	// engine refuses.
+	refused := func() error {
+		m.resetting.Lock()
+		defer m.resetting.Unlock()
+		current := m.active()
+		f := newPlainFault(denyStats.ID, resolved, rule, "")
+		_, err := m.replaceFaults(current, append(slices.Clone(current.faults), f))
+		return err
+	}
+
+	var writers sync.WaitGroup
+	writers.Go(func() {
+		for range rounds {
+			f, err := m.AddFault(config.Fault{Preset: "deletes_fail"})
+			if err != nil {
+				t.Errorf("AddFault: %v", err)
+				return
+			}
+			if _, err := m.SwitchFault(f.ID, false); err != nil {
+				t.Errorf("SwitchFault: %v", err)
+			}
+			if err := m.RemoveFault(f.ID); err != nil {
+				t.Errorf("RemoveFault: %v", err)
+			}
+		}
+	})
+	writers.Go(func() {
+		for range rounds {
+			for _, on := range []bool{true, false} {
+				if _, err := m.SwitchScenario(scenario, on); err != nil {
+					t.Errorf("SwitchScenario(%t): %v", on, err)
+				}
+			}
+		}
+	})
+	writers.Go(func() {
+		for range rounds {
+			if err := refused(); err == nil {
+				t.Error("a fault with the ID of the run's own rule was added")
+			}
+		}
+	})
+
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			list := m.Faults()
+			if n := len(slices.DeleteFunc(slices.Clone(list), func(f Fault) bool { return f.Scenario != scenario })); n != 0 && n != 4 {
+				t.Errorf("Faults has %d of the scenario's 4 faults: %+v", n, list)
+			}
+			if slices.ContainsFunc(list, func(f Fault) bool { return f.ID == denyStats.ID }) {
+				t.Errorf("Faults has the refused fault: %+v", list)
+			}
+			if _, err := m.Scenarios(); err != nil {
+				t.Errorf("Scenarios: %v", err)
+			}
+		}
+	})
+	readers.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			m.mu.Lock()
+			list, set := m.current.faults, m.current.rules.Rules()
+			m.mu.Unlock()
+			for _, r := range set.Rules {
+				on := slices.ContainsFunc(list, func(f plainFault) bool { return f.id == r.ID && f.on })
+				if !on && r.ID != denyStats.ID {
+					t.Errorf("rule %s is of no fault switched on: %+v", r.ID, list)
+				}
+			}
+			for _, f := range list {
+				if _, ruled := set.Counts[f.id]; ruled != f.on {
+					t.Errorf("fault %s is on: %t, but has a rule: %t", f.id, f.on, ruled)
+				}
+			}
+		}
+	})
+	writers.Wait()
+	close(done)
+	readers.Wait()
 }
 
 func mustCreate(t *testing.T, c *sftp.Client, name string) {
