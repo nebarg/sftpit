@@ -67,6 +67,29 @@ func TestShutdownDuringAFreezeIsNoFailure(t *testing.T) {
 	}
 }
 
+func TestArmTimersSkipsATimerThatIsNotAnOutage(t *testing.T) {
+	srv, err := sshfront.New(sshfront.Config{
+		HostKeys: []ssh.Signer{newHostKey(t)},
+		Users:    []sshfront.User{{Name: "test", Password: "test"}},
+		Handler:  func(context.Context, *sshfront.Conn, io.ReadWriteCloser) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("sshfront.New: %v", err)
+	}
+	defer srv.Close()
+	logs := make(messages, 8)
+	timers := []sftpproxy.Timer{
+		{At: time.Now(), Action: sftpproxy.Drop{}, Rule: "drop"},
+		{At: time.Now(), Action: sftpproxy.ListenerDown{Duration: time.Minute}, Rule: "outage"},
+	}
+	stop := armTimers(timers, srv, slog.New(logs), events.NewRecorder(time.Now(), 10).Record)
+	defer stop()
+	if _, down := srv.Outage(); !down {
+		t.Error("the outage after the skipped timer did not begin")
+	}
+	testutil.ReceiveUntil(t, logs, "a run's timer is not a listener_down; skipping it")
+}
+
 // TestArmTimersStartsNoOutageOnceStopped stops a run's timer as it fires,
 // many times over, since only a stop that races a firing timer can fall
 // between its firing and the outage.

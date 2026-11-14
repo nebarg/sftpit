@@ -3,6 +3,7 @@ package runs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -111,7 +112,11 @@ func armTimers(timers []sftpproxy.Timer, srv *sshfront.Server, logger *slog.Logg
 		armed   []*time.Timer
 	)
 	for _, t := range timers {
-		down := t.Action.(sftpproxy.ListenerDown)
+		down, ok := t.Action.(sftpproxy.ListenerDown)
+		if !ok {
+			logger.Error("a run's timer is not a listener_down; skipping it", "rule", t.Rule, "action", fmt.Sprintf("%T", t.Action))
+			continue
+		}
 		fire := func() {
 			mu.Lock()
 			defer mu.Unlock()

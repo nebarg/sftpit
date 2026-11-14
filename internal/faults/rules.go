@@ -52,11 +52,11 @@ type Rule struct {
 	// or Fail; a Drop, Freeze, EndSession or ListenerDown, which are
 	// connection actions; a PartialUpload or CorruptUpload for the write
 	// operation or a PartialDownload or CorruptDownload for the read
-	// operation, chosen when the transfer's file is opened; a WrongSize for the stat, lstat, fstat
-	// and list operations; or a Hide for the open_read, stat, lstat, list,
-	// remove and rename operations. A WrongSize or Hide for list applies to
-	// the entries of a listing, not to the listing itself. The engine sets
-	// the Reserve of a transfer's action, and
+	// operation, chosen when the transfer's file is opened; a WrongSize for
+	// the stat, lstat, fstat and list operations; or a Hide for the
+	// open_read, stat, lstat, list, remove and rename operations. A WrongSize
+	// or Hide for list applies to the entries of a listing, not to the
+	// listing itself. The engine sets the Reserve of a transfer's action, and
 	// the Release of a Delay, Stall or Freeze. A connection action can also
 	// fire at a moment, as Trigger says, whatever the client is doing then.
 	Action sftpproxy.Action

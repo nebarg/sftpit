@@ -173,10 +173,10 @@ func (m *Manager) Close() error {
 // does, along with the run's timers, and waits until every session has
 // finished, so that no client of the run can still change its files, or
 // until ctx is done. The next run's files are restored from the seed
-// snapshot. Reset returns the status of the run it started, as Status gives it, before
-// another reset can start. If anything fails once admission is closed,
-// admission stays closed and Status reports the run unavailable until a
-// reset succeeds. A reset that begins after Close has been called, or that
+// snapshot. Reset returns the status of the run it started, as Status gives
+// it, before another reset can start. If anything fails once admission is
+// closed, admission stays closed and Status reports the run unavailable until
+// a reset succeeds. A reset that begins after Close has been called, or that
 // is still waiting for sessions when it is called, fails with an error
 // wrapping sshfront.ErrServerClosed.
 func (m *Manager) Reset(ctx context.Context) (Status, error) {

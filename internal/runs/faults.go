@@ -89,10 +89,13 @@ func (m *Manager) AddFault(spec config.Fault) (Fault, error) {
 
 // SwitchFault switches the current run's fault id on or off, and returns
 // it. A fault switched off is not tried until it is switched on again, and
-// then counts its times from zero.
+// then counts its times from zero. It fails once Close has returned.
 func (m *Manager) SwitchFault(id string, on bool) (Fault, error) {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	if m.closed {
+		return Fault{}, fmt.Errorf("runs: switch a fault: %w", sshfront.ErrServerClosed)
+	}
 	current := m.active()
 	i := slices.IndexFunc(current.faults, func(f plainFault) bool { return f.id == id })
 	if i < 0 {
@@ -107,10 +110,14 @@ func (m *Manager) SwitchFault(id string, on bool) (Fault, error) {
 	return describeFault(next[i], set.Counts), nil
 }
 
-// RemoveFault removes the current run's fault id.
+// RemoveFault removes the current run's fault id. It fails once Close has
+// returned.
 func (m *Manager) RemoveFault(id string) error {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	if m.closed {
+		return fmt.Errorf("runs: remove a fault: %w", sshfront.ErrServerClosed)
+	}
 	current := m.active()
 	i := slices.IndexFunc(current.faults, func(f plainFault) bool { return f.id == id })
 	if i < 0 {
@@ -120,10 +127,14 @@ func (m *Manager) RemoveFault(id string) error {
 	return err
 }
 
-// RemoveFaults removes every fault added to the current run.
+// RemoveFaults removes every fault added to the current run. It fails once
+// Close has returned.
 func (m *Manager) RemoveFaults() error {
 	m.resetting.Lock()
 	defer m.resetting.Unlock()
+	if m.closed {
+		return fmt.Errorf("runs: remove the faults: %w", sshfront.ErrServerClosed)
+	}
 	_, err := m.replaceFaults(m.active(), nil)
 	return err
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -878,5 +880,50 @@ func TestServeHelp(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Usage: sftpit serve") {
 		t.Errorf("stdout = %q, want the serve usage", stdout.String())
+	}
+}
+
+func TestStopAPIWaitsForARequestInFlight(t *testing.T) {
+	finish := make(chan struct{})
+	api, addr, started, served := serveHeldRequests(t, finish)
+	replied := getBody(addr)
+	testutil.Receive(t, started)
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- stopAPI(api, testutil.WaitTimeout, slog.New(slog.DiscardHandler)) }()
+	awaitRefused(t, addr)
+	close(finish)
+	if body := testutil.Receive(t, replied); body != "done" {
+		t.Errorf("the request in flight got %q, want done", body)
+	}
+	if err := testutil.Receive(t, stopped); err != nil {
+		t.Errorf("stopAPI: %v", err)
+	}
+	if err := testutil.Receive(t, served); !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve = %v, want ErrServerClosed", err)
+	}
+}
+
+func TestStopAPIClosesARequestThatOutlastsTheTimeout(t *testing.T) {
+	finish := make(chan struct{})
+	defer close(finish)
+	api, addr, started, served := serveHeldRequests(t, finish)
+	replied := getBody(addr)
+	testutil.Receive(t, started)
+
+	var logs testutil.SyncBuffer
+	stopped := make(chan error, 1)
+	go func() { stopped <- stopAPI(api, 50*time.Millisecond, slog.New(slog.NewTextHandler(&logs, nil))) }()
+	if err := testutil.Receive(t, stopped); err != nil {
+		t.Errorf("stopAPI: %v", err)
+	}
+	if body := testutil.Receive(t, replied); body == "done" {
+		t.Error("the request that outlasted the timeout was answered, want its connection closed")
+	}
+	if err := testutil.Receive(t, served); !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve = %v, want ErrServerClosed", err)
+	}
+	if !strings.Contains(logs.String(), "control API requests still in flight at shutdown") {
+		t.Errorf("logs = %q, want a warning that requests were closed", logs.String())
 	}
 }

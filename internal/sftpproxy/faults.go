@@ -60,9 +60,10 @@ func (w When) String() string {
 
 // Action is a fault for one request: a Delay, Stall, Fail, Drop, Freeze,
 // EndSession or ListenerDown, for an OPEN, a PartialUpload, PartialDownload,
-// CorruptDownload, CorruptUpload or Timed, for a STAT, LSTAT, FSTAT or READDIR entry, a WrongSize, or for
-// an OPEN, STAT, LSTAT, REMOVE, rename or READDIR entry, a Hide. What else an
-// action holds back depends on the session's ReplyOrder.
+// CorruptDownload, CorruptUpload or Timed, for a STAT, LSTAT, FSTAT or
+// READDIR entry, a WrongSize, or for an OPEN, STAT, LSTAT, REMOVE, rename or
+// READDIR entry, a Hide. What else an action holds back depends on the
+// session's ReplyOrder.
 type Action interface {
 	when() When
 }
@@ -133,11 +134,11 @@ type ListenerDown struct {
 
 // PartialUpload is chosen for an OPEN to cut off uploads through the handle
 // it opens at Cutoff, so that no write on the handle changes a byte at or
-// beyond it. Each write is decided by its offset and length alone. A write below
-// Cutoff goes through. A write that crosses Cutoff is trimmed to the bytes
-// below it and gets Result once the backend has stored them. A write at or
-// beyond Cutoff gets Result without reaching the backend. Result is a Fail,
-// Drop or Freeze, and its When is ignored.
+// beyond it. Each write is decided by its offset and length alone. A write
+// below Cutoff goes through. A write that crosses Cutoff is trimmed to the
+// bytes below it and gets Result once the backend has stored them. A write at
+// or beyond Cutoff gets Result without reaching the backend. Result is a
+// Fail, Drop or Freeze, and its When is ignored.
 //
 // With a Fail, writes below Cutoff still succeed once the cutoff is reached,
 // so a client that sends the whole file stores exactly its first Cutoff
@@ -297,9 +298,9 @@ type Timer struct {
 // WrongSize is chosen for a STAT, LSTAT or FSTAT, or for an entry of a
 // READDIR reply, to misreport the size in the backend's reply: as Size or,
 // if Delta is not zero, as the true size plus Delta, but never below 0 or
-// above the largest uint64. In a READDIR entry, the size in the longname changes
-// too, if the longname shows the true size where ls -l does. The file itself
-// is unchanged.
+// above the largest uint64. In a READDIR entry, the size in the longname
+// changes too, if the longname shows the true size where ls -l does. The file
+// itself is unchanged.
 type WrongSize struct {
 	Size  uint64
 	Delta int64

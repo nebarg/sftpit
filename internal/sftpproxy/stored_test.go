@@ -90,8 +90,9 @@ func TestCorruptUploadStoresOneFileHoweverItIsWritten(t *testing.T) {
 							if shuffled {
 								rand.New(rand.NewChaCha8([32]byte{2})).Shuffle(len(writes), func(i, j int) { writes[i], writes[j] = writes[j], writes[i] })
 							}
-							// Every write is answered with success, in batches
-							// pipelined as a client such as phpseclib sends them.
+							// Every write is answered with success, in
+							// batches pipelined as a client such as phpseclib
+							// sends them.
 							for batch := range slices.Chunk(writes, 32) {
 								p.client.sendTogether(t, batch...)
 								for range batch {

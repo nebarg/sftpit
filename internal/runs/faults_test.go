@@ -13,6 +13,7 @@ import (
 
 	"github.com/nebarg/sftpit/internal/config"
 	"github.com/nebarg/sftpit/internal/faults"
+	"github.com/nebarg/sftpit/internal/sshfront"
 	"github.com/nebarg/sftpit/internal/testutil"
 )
 
@@ -126,6 +127,37 @@ func TestAFaultThatCannotWorkChangesNothing(t *testing.T) {
 	}
 	if f, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); err != nil || f.ID != "deletes-fail-1" {
 		t.Errorf("AddFault after a refused fault = %q, %v; want deletes-fail-1, its number not taken", f.ID, err)
+	}
+}
+
+func TestFaultsCannotChangeOnceTheManagerCloses(t *testing.T) {
+	m := newManager(t, Options{})
+	if _, err := m.AddFault(config.Fault{Preset: "deletes_fail"}); err != nil {
+		t.Fatalf("AddFault: %v", err)
+	}
+	revision := m.Status().Revision
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	changes := map[string]func() error{
+		"AddFault": func() error {
+			_, err := m.AddFault(config.Fault{Preset: "deletes_fail"})
+			return err
+		},
+		"SwitchFault": func() error {
+			_, err := m.SwitchFault("deletes-fail-1", false)
+			return err
+		},
+		"RemoveFault":  func() error { return m.RemoveFault("deletes-fail-1") },
+		"RemoveFaults": m.RemoveFaults,
+	}
+	for name, change := range changes {
+		if err := change(); !errors.Is(err, sshfront.ErrServerClosed) {
+			t.Errorf("%s after Close = %v, want ErrServerClosed", name, err)
+		}
+	}
+	if got := m.Faults(); len(got) != 1 || !got[0].On || m.Status().Revision != revision {
+		t.Errorf("after Close, faults %+v at revision %d, want deletes-fail-1 on at revision %d", got, m.Status().Revision, revision)
 	}
 }
 

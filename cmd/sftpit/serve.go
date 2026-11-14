@@ -219,7 +219,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 			}
 		}
 	}
-	err = errors.Join(err, api.Close(), srv.Close())
+	err = errors.Join(err, stopAPI(api, apiStopTimeout, logger), srv.Close())
 	// Once closed, each server returns that it was closed; any other error
 	// is one it failed with.
 	if sftpServed != nil {
@@ -233,6 +233,24 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 		}
 	}
 	return err
+}
+
+// apiStopTimeout bounds how long stopping waits for the control API's
+// requests in flight, such as a download, to finish.
+const apiStopTimeout = 5 * time.Second
+
+// stopAPI stops api accepting requests and waits for those in flight to
+// finish, for up to timeout, and then closes any that remain, logging that
+// to logger.
+func stopAPI(api *http.Server, timeout time.Duration, logger *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := api.Shutdown(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	logger.Warn("control API requests still in flight at shutdown; closing them", "timeout", timeout)
+	return api.Close()
 }
 
 // announcedListener closes taken once Serve has taken it: at its first

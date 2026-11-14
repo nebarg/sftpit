@@ -15,8 +15,8 @@ import (
 // configuration file: every default filled in, every path absolute, and
 // each scenario's faults with their presets and defaults filled in. Comments
 // say where each secret comes from, without its value. Loading the result
-// gives the same configuration. Unlike Load, Explain reports a missing or empty secret in a
-// comment rather than as an error.
+// gives the same configuration. Unlike Load, Explain reports a missing or
+// empty secret in a comment rather than as an error.
 func Explain(opts Options) ([]byte, error) {
 	r, err := read(opts)
 	if err != nil {

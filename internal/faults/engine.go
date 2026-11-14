@@ -19,10 +19,10 @@ import (
 // revision that is no longer current.
 var ErrStaleRevision = errors.New("stale revision")
 
-// Engine applies fault rules to the requests of one run, which starts when the engine is made. Each rule counts the
-// requests it matches from the start of the run, or from the change that
-// applied it, and draws its random decisions from the run's seed. Its
-// methods are safe for concurrent use.
+// Engine applies fault rules to the requests of one run, which starts when
+// the engine is made. Each rule counts the requests it matches from the start
+// of the run, or from the change that applied it, and draws its random
+// decisions from the run's seed. Its methods are safe for concurrent use.
 type Engine struct {
 	seed   Seed
 	logger *slog.Logger
@@ -204,8 +204,8 @@ func (e *Engine) Timers() []sftpproxy.Timer {
 	return e.timers
 }
 
-// Replace replaces the engine's rules with rules, all at once between two requests, as the next revision, if revision is
-// still the current one.
+// Replace replaces the engine's rules with rules, all at once between two
+// requests, as the next revision, if revision is still the current one.
 //
 // A rule with the ID and the definition of a current rule carries on as it
 // was, with its counts, ordinals and moments. Any other rule starts from

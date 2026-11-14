@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -151,4 +153,63 @@ func fingerprints(banner string) string {
 // could have written before it stopped.
 func goneReadyFile(httpAddr string) string {
 	return `{"sftp_address": "127.0.0.1:1", "http_address": "` + httpAddr + `", "workspace": "/gone", "host_keys": [{"type": "ssh-ed25519", "fingerprint": "SHA256:x"}]}`
+}
+
+// serveHeldRequests serves HTTP on a loopback port with a handler that
+// sends to started as each request arrives and answers done once finish is
+// closed. It returns the server, its address, and a channel that receives
+// what Serve returns.
+func serveHeldRequests(t *testing.T, finish <-chan struct{}) (api *http.Server, addr string, started <-chan struct{}, served <-chan error) {
+	t.Helper()
+	arrived := make(chan struct{}, 1)
+	api = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		arrived <- struct{}{}
+		<-finish
+		fmt.Fprint(w, "done")
+	})}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- api.Serve(ln) }()
+	return api, ln.Addr().String(), arrived, result
+}
+
+// getBody gets / from the HTTP server at addr and sends the body, or the
+// error, to the channel it returns.
+func getBody(addr string) <-chan string {
+	body := make(chan string, 1)
+	go func() {
+		resp, err := http.Get("http://" + addr + "/")
+		if err != nil {
+			body <- err.Error()
+			return
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			body <- err.Error()
+			return
+		}
+		body <- string(data)
+	}()
+	return body
+}
+
+// awaitRefused waits until nothing listens at addr.
+func awaitRefused(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(testutil.WaitTimeout)
+	for {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still accepts connections", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

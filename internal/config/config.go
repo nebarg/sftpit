@@ -276,18 +276,9 @@ func read(opts Options) (*reading, error) {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
-
-	var f fileConfig
-	dir, err := filepath.Abs(filepath.Dir(cmp.Or(opts.ConfigFile, ".")))
+	f, dir, err := readFile(opts.ConfigFile)
 	if err != nil {
-		return nil, fmt.Errorf("config: %w", err)
-	}
-	if opts.ConfigFile != "" {
-		decoded, err := decodeFile(opts.ConfigFile)
-		if err != nil {
-			return nil, err
-		}
-		f = *decoded
+		return nil, err
 	}
 
 	sftpListen, httpListen := opts.Profile.defaultListen()
@@ -296,76 +287,31 @@ func read(opts Options) (*reading, error) {
 		SFTPListen: cmp.Or(opts.SFTPListen, f.Server.SFTPListen, sftpListen),
 		HTTPListen: cmp.Or(opts.HTTPListen, f.Server.HTTPListen, httpListen),
 	}
-	var warnings []string
-	for _, listen := range []struct{ setting, addr string }{{"sftp_listen", cfg.SFTPListen}, {"http_listen", cfg.HTTPListen}} {
-		warning, err := opts.Profile.checkListen(listen.setting, listen.addr)
-		if err != nil {
-			return nil, err
-		}
-		if warning != "" {
-			warnings = append(warnings, warning)
-		}
-	}
-	for _, name := range opts.ControlHosts {
-		if err := checkControlHost(name); err != nil {
-			return nil, err
-		}
-	}
-	cfg.ControlHosts = opts.ControlHosts
-	if f.Server.ReplyOrder != "" {
-		order, ok := replyOrders[f.Server.ReplyOrder]
-		if !ok {
-			return nil, fmt.Errorf("reply_order %q is not request or completion", f.Server.ReplyOrder)
-		}
-		cfg.ReplyOrder = order
-	}
-	if hostKey := f.Server.HostKey; hostKey != "" && hostKey != hostKeyWorkspace {
-		cfg.HostKeyDir = resolvePath(dir, hostKey)
-	}
-	seedDir := opts.SeedDir
-	if seedDir == "" && f.Storage.SeedDir != "" {
-		seedDir = resolvePath(dir, f.Storage.SeedDir)
-	}
-	if seedDir != "" {
-		resolved, err := checkFixtureDir("seed_dir", seedDir)
-		if err != nil {
-			return nil, err
-		}
-		cfg.SeedDir = resolved
-	}
-	dataDir := opts.DataDir
-	if dataDir == "" && f.Storage.DataDir != "" {
-		dataDir = resolvePath(dir, f.Storage.DataDir)
-	}
-	if dataDir != "" {
-		resolved, err := checkDataDir(dataDir, cfg.SeedDir)
-		if err != nil {
-			return nil, err
-		}
-		cfg.DataDir = resolved
-	}
-	if f.Server.HostKey == "" && cfg.DataDir == "" {
-		cfg.HostKeyDir = opts.UserHostKeyDir
-	}
-	limits, err := f.Storage.limits()
+	warnings, err := checkListens(opts.Profile, cfg.SFTPListen, cfg.HTTPListen)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Limits = limits
+	if err := checkControlHosts(opts.ControlHosts); err != nil {
+		return nil, err
+	}
+	cfg.ControlHosts = opts.ControlHosts
+	if cfg.ReplyOrder, err = replyOrder(f.Server.ReplyOrder); err != nil {
+		return nil, err
+	}
+	if cfg.SeedDir, cfg.DataDir, err = storageDirs(opts, f.Storage, dir); err != nil {
+		return nil, err
+	}
+	cfg.HostKeyDir = hostKeyDir(f.Server.HostKey, dir, cfg.DataDir, opts.UserHostKeyDir)
+	if cfg.Limits, err = f.Storage.limits(); err != nil {
+		return nil, err
+	}
 
 	if err := validateUsers(f.Users); err != nil {
 		return nil, err
 	}
-	envFiles := make([]string, 0, len(f.EnvFile)+len(opts.EnvFiles))
-	for _, name := range f.EnvFile {
-		envFiles = append(envFiles, resolvePath(dir, name))
-	}
-	for _, name := range opts.EnvFiles {
-		abs, err := filepath.Abs(name)
-		if err != nil {
-			return nil, fmt.Errorf("config: %w", err)
-		}
-		envFiles = append(envFiles, abs)
+	envFiles, err := envFilePaths(dir, f.EnvFile, opts.EnvFiles)
+	if err != nil {
+		return nil, err
 	}
 	secrets, err := lookupSecrets(referencedSecrets(f.Users), envFiles, lookupEnv)
 	if err != nil {
@@ -373,39 +319,173 @@ func read(opts Options) (*reading, error) {
 	}
 	warnings = append(warnings, secrets.warnings...)
 	cfg.Warnings = warnings
-
-	if len(f.Users) == 0 {
-		cfg.Users = []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}
-		cfg.DefaultCredentials = true
+	if cfg.Users, err = resolveUsers(f.Users, dir, secrets.values); err != nil {
+		return nil, err
 	}
-	for i, u := range f.Users {
-		user, err := u.resolve(dir, secrets.values)
-		if err != nil {
-			return nil, fmt.Errorf("users[%d] (%s): %w", i, u.Name, err)
-		}
-		cfg.Users = append(cfg.Users, user)
-	}
+	cfg.DefaultCredentials = len(f.Users) == 0
 
 	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
 		return nil, err
 	}
+	if cfg.Scenarios, err = openScenarios(opts, f, dir, cfg.Users); err != nil {
+		return nil, err
+	}
+	cfg.Scenario = opts.Scenario
+	return &reading{cfg: cfg, file: f, dir: dir, envFiles: envFiles, secrets: secrets}, nil
+}
+
+// readFile returns the configuration file name as decoded, or an empty one
+// for "", and the directory its relative paths are resolved against.
+func readFile(name string) (fileConfig, string, error) {
+	dir, err := filepath.Abs(filepath.Dir(cmp.Or(name, ".")))
+	if err != nil {
+		return fileConfig{}, "", fmt.Errorf("config: %w", err)
+	}
+	if name == "" {
+		return fileConfig{}, dir, nil
+	}
+	f, err := decodeFile(name)
+	if err != nil {
+		return fileConfig{}, "", err
+	}
+	return *f, dir, nil
+}
+
+// checkListens checks the SFTP and control API listen addresses against
+// profile, and returns its warnings about them.
+func checkListens(profile Profile, sftpListen, httpListen string) ([]string, error) {
+	var warnings []string
+	for _, listen := range []struct{ setting, addr string }{{"sftp_listen", sftpListen}, {"http_listen", httpListen}} {
+		warning, err := profile.checkListen(listen.setting, listen.addr)
+		if err != nil {
+			return nil, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings, nil
+}
+
+// checkControlHosts reports the first of names that the control API cannot
+// answer to.
+func checkControlHosts(names []string) error {
+	for _, name := range names {
+		if err := checkControlHost(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// replyOrder returns the reply order that name, the configured reply_order,
+// names, or the default for "".
+func replyOrder(name string) (sftpproxy.ReplyOrder, error) {
+	if name == "" {
+		return 0, nil
+	}
+	order, ok := replyOrders[name]
+	if !ok {
+		return 0, fmt.Errorf("reply_order %q is not request or completion", name)
+	}
+	return order, nil
+}
+
+// storageDirs returns the seed and workspace directories, each from opts or
+// else from s, resolved against dir, and checked, or "" for those that
+// neither sets.
+func storageDirs(opts Options, s storageConfig, dir string) (seedDir, dataDir string, err error) {
+	seedDir = opts.SeedDir
+	if seedDir == "" && s.SeedDir != "" {
+		seedDir = resolvePath(dir, s.SeedDir)
+	}
+	if seedDir != "" {
+		if seedDir, err = checkFixtureDir("seed_dir", seedDir); err != nil {
+			return "", "", err
+		}
+	}
+	dataDir = opts.DataDir
+	if dataDir == "" && s.DataDir != "" {
+		dataDir = resolvePath(dir, s.DataDir)
+	}
+	if dataDir != "" {
+		if dataDir, err = checkDataDir(dataDir, seedDir); err != nil {
+			return "", "", err
+		}
+	}
+	return seedDir, dataDir, nil
+}
+
+// hostKeyDir returns the directory of the host keys: hostKey, the
+// configured host_key, resolved against dir, or "" for the workspace's
+// own, which is where they are by default when dataDir keeps the
+// workspace, and userDir otherwise.
+func hostKeyDir(hostKey, dir, dataDir, userDir string) string {
+	switch {
+	case hostKey == "" && dataDir == "":
+		return userDir
+	case hostKey == "" || hostKey == hostKeyWorkspace:
+		return ""
+	}
+	return resolvePath(dir, hostKey)
+}
+
+// envFilePaths returns the absolute paths of the env files to read: those
+// of the configuration file, resolved against dir, and then those of the
+// command line.
+func envFilePaths(dir string, configured, given []string) ([]string, error) {
+	paths := make([]string, 0, len(configured)+len(given))
+	for _, name := range configured {
+		paths = append(paths, resolvePath(dir, name))
+	}
+	for _, name := range given {
+		abs, err := filepath.Abs(name)
+		if err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		paths = append(paths, abs)
+	}
+	return paths, nil
+}
+
+// resolveUsers resolves the configured users against dir and secrets, or
+// returns the built-in test user if none are configured.
+func resolveUsers(configured []userConfig, dir string, secrets map[string]string) ([]sshfront.User, error) {
+	if len(configured) == 0 {
+		return []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}, nil
+	}
+	users := make([]sshfront.User, 0, len(configured))
+	for i, u := range configured {
+		user, err := u.resolve(dir, secrets)
+		if err != nil {
+			return nil, fmt.Errorf("users[%d] (%s): %w", i, u.Name, err)
+		}
+		users = append(users, user)
+	}
+	return users, nil
+}
+
+// openScenarios returns the scenarios of f, with those saved as files in
+// its scenarios directory, resolved against dir, and checks that the
+// scenario opts names, if any, is one of them.
+func openScenarios(opts Options, f fileConfig, dir string, users []sshfront.User) (*Scenarios, error) {
 	defaultDir := defaultScenariosDir
 	if opts.ConfigFile == "" {
 		defaultDir = defaultScenariosDirWithoutConfig
 	}
-	if cfg.Scenarios, err = NewScenarios(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), f.Scenarios, cfg.Users); err != nil {
+	scenarios, err := NewScenarios(resolvePath(dir, cmp.Or(f.ScenariosDir, defaultDir)), f.Scenarios, users)
+	if err != nil {
 		return nil, err
 	}
-	if err := cfg.Scenarios.checkFiles(); err != nil {
+	if err := scenarios.checkFiles(); err != nil {
 		return nil, err
 	}
 	if opts.Scenario != "" {
-		if _, err := cfg.Scenarios.Get(opts.Scenario); err != nil {
+		if _, err := scenarios.Get(opts.Scenario); err != nil {
 			return nil, err
 		}
 	}
-	cfg.Scenario = opts.Scenario
-	return &reading{cfg: cfg, file: f, dir: dir, envFiles: envFiles, secrets: secrets}, nil
+	return scenarios, nil
 }
 
 func decodeFile(name string) (*fileConfig, error) {
