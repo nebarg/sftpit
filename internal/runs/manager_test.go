@@ -77,7 +77,9 @@ func TestResetStartsARunWithoutFaultsAndAFreshSeed(t *testing.T) {
 		t.Fatalf("AddFault: %v", err)
 	}
 	set := m.Status()
-	if _, err := changeRules(m, set.Revision, append(m.current.rules.Rules().Rules, deny)); err != nil {
+	// Ahead of the scenario's rules, which would otherwise delay or fail
+	// the stat now and then.
+	if _, err := changeRules(m, set.Revision, append([]faults.Rule{deny}, m.current.rules.Rules().Rules...)); err != nil {
 		t.Fatalf("changeRules: %v", err)
 	}
 	first := m.Status().Run
