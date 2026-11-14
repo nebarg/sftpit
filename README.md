@@ -108,6 +108,7 @@ Every fault can be narrowed:
 - **Files:** one of `folder` (a folder and everything in it), `file` (one path) or `names` (a pattern for the file name in any folder, such as `*.csv`). Without any, it acts on every file.
 - **User:** `user` limits it to one user's requests.
 - **How often:** one of `first` (only the first N times), `only` (only time number N), `percent` (that share of the time, chosen at random) or `minutes` (for the next N minutes). Without any, it acts every time.
+- **Limits:** `seconds` is at most 86400 (a day), `minutes` at most 10080 (a week), `kb` at most 1073741824 (a terabyte), and `first` and `only` at most 1000000.
 
 For `stop_partway`, `corrupt` and `truncate`, `only` counts the uploads or downloads of each file, so `"only": 2` acts on the second upload of each file.
 

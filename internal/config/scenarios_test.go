@@ -65,7 +65,7 @@ func TestLoadRejectsInvalidScenarios(t *testing.T) {
 		{"no faults", "  s: {faults: []}\n", "", "scenarios.s: a scenario needs at least one fault"},
 		{"a bad fault", "  s: {faults: [{preset: deletes_fail}, {steps: [upload], do: refuse}]}\n", "", `scenarios.s: faults[1]: there is no step "upload"`},
 		{"an unknown user", "  s: {faults: [{preset: deletes_fail, user: nobody}]}\n", "", `scenarios.s: faults[0]: user "nobody" is not a configured user`},
-		{"endless seconds", "  s: {faults: [{preset: slow_responses, seconds: .inf}]}\n", "", "scenarios.s: faults[0]: seconds must be at most 9223372036.854775"},
+		{"endless seconds", "  s: {faults: [{preset: slow_responses, seconds: .inf}]}\n", "", "scenarios.s: faults[0]: seconds must be at most 86400"},
 		{"an unknown field", "  s: {faults: [{preset: deletes_fail, percentage: 5}]}\n", "", "field percentage not found"},
 		{"a rule in the engine's old format", "  s: {faults: [{id: r, match: {operation: stat}, action: {type: hide}}]}\n", "", "field id not found"},
 		{"chaos", "  s: {chaos: {preset: light}, faults: [{preset: deletes_fail}]}\n", "", "field chaos not found"},

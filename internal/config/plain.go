@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -505,6 +504,22 @@ func (f Fault) down(_ bool, when sftpproxy.When) (sftpproxy.Action, error) {
 	return sftpproxy.ListenerDown{When: when, Duration: d, CloseExisting: true}, err
 }
 
+// The most a fault's settings can be. Each is well beyond what a test
+// needs, and small enough to be typed into the dashboard exactly.
+const (
+	// maxSeconds is a day.
+	maxSeconds = 24 * 60 * 60
+
+	// maxMinutes is a week.
+	maxMinutes = 7 * 24 * 60
+
+	// maxKB is a terabyte.
+	maxKB = 1 << 30
+
+	// maxTimes is the most first and only can be.
+	maxTimes = 1_000_000
+)
+
 // often narrows r to how often f happens.
 func (f Fault) often(r *faults.Rule) error {
 	if n := countSet(f.First != nil, f.Only != nil, f.Percent != nil, f.Minutes != nil); n > 1 {
@@ -515,13 +530,16 @@ func (f Fault) often(r *faults.Rule) error {
 		if *f.First == 0 {
 			return errors.New("first must be at least 1")
 		}
-		if *f.First > math.MaxInt {
-			return fmt.Errorf("first must be at most %d", math.MaxInt)
+		if *f.First > maxTimes {
+			return fmt.Errorf("first must be at most %d", maxTimes)
 		}
 		r.MaxTriggers = int(*f.First)
 	case f.Only != nil:
 		if *f.Only == 0 {
 			return errors.New("only must be at least 1")
+		}
+		if *f.Only > maxTimes {
+			return fmt.Errorf("only must be at most %d", maxTimes)
 		}
 		// A transfer is decided as its file opens, so its times count the
 		// opens of each file rather than each piece of data.
@@ -536,7 +554,7 @@ func (f Fault) often(r *faults.Rule) error {
 		}
 		r.Probability = new(*f.Percent / 100)
 	case f.Minutes != nil:
-		until, err := duration("minutes", *f.Minutes, time.Minute, "153722867.280912")
+		until, err := duration("minutes", *f.Minutes, time.Minute, maxMinutes)
 		if err != nil {
 			return err
 		}
@@ -565,11 +583,10 @@ func transferStep(steps []string, what string) error {
 	return fmt.Errorf("%s applies to writing file data or reading it; choose one of them", what)
 }
 
-// kbBytes returns kb kilobytes in bytes, or an error if that is more bytes
-// than a file can have.
+// kbBytes returns kb kilobytes in bytes, or an error if kb is above maxKB.
 func kbBytes(kb uint64) (uint64, error) {
-	if kb > math.MaxUint64/1024 {
-		return 0, fmt.Errorf("kb must be at most %d", uint64(math.MaxUint64/1024))
+	if kb > maxKB {
+		return 0, fmt.Errorf("kb must be at most %d", maxKB)
 	}
 	return kb * 1024, nil
 }
@@ -579,21 +596,19 @@ func seconds(s *float64) (time.Duration, error) {
 	if s == nil {
 		return 0, errors.New("seconds must be above 0")
 	}
-	return duration("seconds", *s, time.Second, "9223372036.854775")
+	return duration("seconds", *s, time.Second, maxSeconds)
 }
 
 // duration returns v units as a duration, or an error, naming the setting
-// name, if that is not at least a nanosecond or is longer than a duration
-// can be. most is the largest v, as the error gives it.
-func duration(name string, v float64, unit time.Duration, most string) (time.Duration, error) {
+// name, if that is not at least a nanosecond or v is above most.
+func duration(name string, v float64, unit time.Duration, most int) (time.Duration, error) {
 	n := v * float64(unit)
 	switch {
+	// Written so that a v that is not a number fails it.
 	case !(n >= 1):
 		return 0, fmt.Errorf("%s must be above 0", name)
-	// Go leaves converting a float beyond a duration's range undefined, so
-	// it is checked before the conversion rather than by the result's sign.
-	case n >= 1<<63:
-		return 0, fmt.Errorf("%s must be at most %s", name, most)
+	case v > float64(most):
+		return 0, fmt.Errorf("%s must be at most %d", name, most)
 	}
 	return time.Duration(n), nil
 }
