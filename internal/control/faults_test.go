@@ -106,9 +106,11 @@ func TestTheAPIRefusesFaultsThatCannotWork(t *testing.T) {
 func TestAnInvalidFaultIsRefusedWithWhatIsWrong(t *testing.T) {
 	m, api := start(t, runs.Options{})
 	for body, want := range map[string]string{
-		`{"preset": "oops"}`:                                      `there is no preset "oops"`,
-		`{"steps": ["remove"], "do": "explode"}`:                  `there is nothing to do called "explode"`,
-		`{"steps": ["remove"], "do": "refuse", "user": "nobody"}`: `user "nobody" is not a configured user`,
+		`{"preset": "oops"}`:                                          `there is no preset "oops"`,
+		`{"steps": ["remove"], "do": "explode"}`:                      `there is nothing to do called "explode"`,
+		`{"steps": ["remove"], "do": "refuse", "user": "nobody"}`:     `user "nobody" is not a configured user`,
+		`{"preset": "deletes_fail", "first": 9223372036854775808}`:    "first must be at most 9223372036854775807",
+		`{"preset": "upload_stops_partway", "kb": 18014398509481984}`: "kb must be at most 18014398509481983",
 	} {
 		code, got := call(t, api, "POST", "/api/faults", body)
 		if code != http.StatusBadRequest || !equalJSON(got, map[string]any{"error": want}) {

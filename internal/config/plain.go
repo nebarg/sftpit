@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -437,7 +438,10 @@ func (f Fault) stopPartway(bool, sftpproxy.When) (sftpproxy.Action, error) {
 	if err := transferStep(f.Steps, "stopping partway"); err != nil {
 		return nil, err
 	}
-	cutoff := *f.KB * 1024
+	cutoff, err := kbBytes(*f.KB)
+	if err != nil {
+		return nil, err
+	}
 	var result sftpproxy.Action = sftpproxy.Drop{Reset: f.Abrupt}
 	if f.Error != "" {
 		if f.Abrupt {
@@ -469,10 +473,14 @@ func (f Fault) truncate(bool, sftpproxy.When) (sftpproxy.Action, error) {
 	if err := transferStep(f.Steps, "cutting a file short"); err != nil {
 		return nil, err
 	}
-	if f.Steps[0] == "write" {
-		return sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
+	offset, err := kbBytes(*f.KB)
+	if err != nil {
+		return nil, err
 	}
-	return sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate, Offset: *f.KB * 1024}, nil
+	if f.Steps[0] == "write" {
+		return sftpproxy.CorruptUpload{Corruption: sftpproxy.Truncate, Offset: offset}, nil
+	}
+	return sftpproxy.CorruptDownload{Corruption: sftpproxy.Truncate, Offset: offset}, nil
 }
 
 func (f Fault) wrongSize(bool, sftpproxy.When) (sftpproxy.Action, error) {
@@ -507,6 +515,9 @@ func (f Fault) often(r *faults.Rule) error {
 		if *f.First == 0 {
 			return errors.New("first must be at least 1")
 		}
+		if *f.First > math.MaxInt {
+			return fmt.Errorf("first must be at most %d", math.MaxInt)
+		}
 		r.MaxTriggers = int(*f.First)
 	case f.Only != nil:
 		if *f.Only == 0 {
@@ -520,18 +531,19 @@ func (f Fault) often(r *faults.Rule) error {
 			r.Match.Occurrence = []uint64{*f.Only}
 		}
 	case f.Percent != nil:
-		if *f.Percent <= 0 || *f.Percent > 100 {
+		if !(*f.Percent > 0 && *f.Percent <= 100) {
 			return errors.New("percent must be above 0 and at most 100")
 		}
 		r.Probability = new(*f.Percent / 100)
 	case f.Minutes != nil:
-		if *f.Minutes <= 0 {
-			return errors.New("minutes must be above 0")
+		until, err := duration("minutes", *f.Minutes, time.Minute, "153722867.280912")
+		if err != nil {
+			return err
 		}
 		if r.Trigger != nil {
 			return errors.New("a server that goes down at once can't also last for some minutes; give its seconds instead")
 		}
-		r.Trigger = &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{Until: time.Duration(*f.Minutes * float64(time.Minute))}}
+		r.Trigger = &faults.Trigger{Anchor: faults.Run, Window: &faults.Window{Until: until}}
 	}
 	return nil
 }
@@ -553,10 +565,35 @@ func transferStep(steps []string, what string) error {
 	return fmt.Errorf("%s applies to writing file data or reading it; choose one of them", what)
 }
 
+// kbBytes returns kb kilobytes in bytes, or an error if that is more bytes
+// than a file can have.
+func kbBytes(kb uint64) (uint64, error) {
+	if kb > math.MaxUint64/1024 {
+		return 0, fmt.Errorf("kb must be at most %d", uint64(math.MaxUint64/1024))
+	}
+	return kb * 1024, nil
+}
+
 // seconds returns s seconds as a duration, which must be above 0.
 func seconds(s *float64) (time.Duration, error) {
-	if s == nil || *s <= 0 || time.Duration(*s*float64(time.Second)) <= 0 {
+	if s == nil {
 		return 0, errors.New("seconds must be above 0")
 	}
-	return time.Duration(*s * float64(time.Second)), nil
+	return duration("seconds", *s, time.Second, "9223372036.854775")
+}
+
+// duration returns v units as a duration, or an error, naming the setting
+// name, if that is not at least a nanosecond or is longer than a duration
+// can be. most is the largest v, as the error gives it.
+func duration(name string, v float64, unit time.Duration, most string) (time.Duration, error) {
+	n := v * float64(unit)
+	switch {
+	case !(n >= 1):
+		return 0, fmt.Errorf("%s must be above 0", name)
+	// Go leaves converting a float beyond a duration's range undefined, so
+	// it is checked before the conversion rather than by the result's sign.
+	case n >= 1<<63:
+		return 0, fmt.Errorf("%s must be at most %s", name, most)
+	}
+	return time.Duration(n), nil
 }
