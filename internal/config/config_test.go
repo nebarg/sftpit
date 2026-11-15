@@ -64,6 +64,29 @@ func TestLoadPlacesTheHostKeys(t *testing.T) {
 	}
 }
 
+func TestLoadOffersTheMountedHostKeyDirUnlessHostKeyIsSet(t *testing.T) {
+	const mounted = "/etc/ssh"
+	tests := []struct {
+		name, server, want string
+	}{
+		{name: "no setting", want: mounted},
+		{name: "a directory", server: "host_key: ./keys"},
+		{name: "the workspace", server: "host_key: workspace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nserver: {"+tt.server+"}\n")
+			cfg, err := Load(Options{ConfigFile: config, LookupEnv: noEnv, MountedHostKeyDir: mounted})
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.MountedHostKeyDir != tt.want {
+				t.Errorf("MountedHostKeyDir = %q, want %q", cfg.MountedHostKeyDir, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadReadsEachStorageLimit(t *testing.T) {
 	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), `
 schema_version: 1

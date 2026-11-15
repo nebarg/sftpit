@@ -308,6 +308,8 @@ Files are stored in `fs/` under the names clients give them, so files added ther
 
 sftpit keeps its host keys in `sftpit/hostkeys` in your user config folder (`~/Library/Application Support` on macOS, `~/.config` on Linux), so clients see the same fingerprints every time it starts. A workspace kept with `--data-dir` has keys of its own, and `host_key` in the configuration names another folder, such as one committed with a project. An Ed25519 and an RSA key are created on first use.
 
+In the container profile, when the configuration does not set `host_key`, sftpit serves the keys it finds at `/etc/ssh/ssh_host_ed25519_key` and `/etc/ssh/ssh_host_rsa_key` instead, as the `atmoz/sftp` image does. It serves only the ones present and never writes to `/etc/ssh`. If neither is present, the keys are chosen as described above.
+
 </details>
 
 <details>
@@ -338,6 +340,7 @@ Add the service to the project's `docker-compose.yml`, as [`examples/compose`](e
 - The image listens for SFTP on port 22, as the `atmoz/sftp` image does.
 - A setup written for the `atmoz/sftp` image can keep its `command`, such as `command: foo:pass:1001:100:upload`, and its `SFTP_USERS` variable, since sftpit reads [users on the command line](#running-sftpit) and `SFTP_USERS` in the same form.
 - To run another command in the image, such as `version`, override the entrypoint: `docker run --rm --entrypoint /usr/local/bin/sftpit sftpit:local version`.
+- Host keys mounted at `/etc/ssh/ssh_host_ed25519_key` and `/etc/ssh/ssh_host_rsa_key`, as for the `atmoz/sftp` image, are used when present. Only the ones present are served, and the key files must be readable by the user the container runs as. A key that cannot be read or parsed stops sftpit from starting.
 - `--control-host sftpit` lets the API answer requests addressed to `sftpit`, so any container on the network can turn faults on.
 - `user` runs sftpit as you, so it can create the host keys in `sftpit/hostkeys` on the first start. Commit them so everyone sees the same fingerprints.
 - The workspace is temporary. Mount a folder and pass `--data-dir` to keep it.

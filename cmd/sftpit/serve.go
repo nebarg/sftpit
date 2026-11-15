@@ -76,6 +76,11 @@ profile, one to a line.
 // atmoz/sftp image reads them from.
 const containerUsersFile = "/etc/sftp/users.conf"
 
+// containerHostKeyDir holds host keys in the container profile, where the
+// atmoz/sftp image has them mounted. Tests replace it so that they never
+// read the host's own keys.
+var containerHostKeyDir = "/etc/ssh"
+
 func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -124,6 +129,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts.Users = flags.Args()
 	if opts.Profile == config.Container {
 		opts.UsersFile = containerUsersFile
+		opts.MountedHostKeyDir = containerHostKeyDir
 	}
 	if readyPath != "" {
 		if err := prepareReadyFile(readyPath); err != nil {
@@ -182,7 +188,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 		return err
 	}
 	defer func() { err = errors.Join(err, workspace.Close()) }()
-	hostKeys, err := sshfront.LoadOrCreateHostKeys(cmp.Or(cfg.HostKeyDir, workspace.IdentityDir()))
+	hostKeys, hostKeyDir, err := openHostKeys(cfg, workspace)
 	if err != nil {
 		return err
 	}
@@ -223,7 +229,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 		err = writeReadyFile(readyPath, ready)
 	}
 	if err == nil {
-		printBanner(stdout, sftpLn.Addr().String(), httpLn.Addr().String(), workspace, manager.Status().Run, hostKeys, cfg)
+		printBanner(stdout, sftpLn.Addr().String(), httpLn.Addr().String(), workspace, manager.Status().Run, hostKeys, hostKeyDir, cfg)
 		select {
 		case <-ctx.Done():
 			fmt.Fprintln(stdout, "Stopping.")
@@ -253,6 +259,21 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 		}
 	}
 	return err
+}
+
+// openHostKeys returns the host keys to serve and the directory they come
+// from, "" for the workspace's own. Keys found in the mounted directory are
+// served as they are, and only those; otherwise they are loaded from the
+// configured directory or the workspace, and created there if missing.
+func openHostKeys(cfg *config.Config, workspace *runs.Workspace) ([]ssh.Signer, string, error) {
+	if cfg.MountedHostKeyDir != "" {
+		keys, err := sshfront.LoadHostKeys(cfg.MountedHostKeyDir)
+		if err != nil || len(keys) > 0 {
+			return keys, cfg.MountedHostKeyDir, err
+		}
+	}
+	keys, err := sshfront.LoadOrCreateHostKeys(cmp.Or(cfg.HostKeyDir, workspace.IdentityDir()))
+	return keys, cfg.HostKeyDir, err
 }
 
 // apiStopTimeout bounds how long stopping waits for the control API's
@@ -314,7 +335,7 @@ func listen(profile config.Profile, setting, addr string) (net.Listener, error) 
 	return ln, nil
 }
 
-func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, run runs.Run, hostKeys []ssh.Signer, cfg *config.Config) {
+func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, run runs.Run, hostKeys []ssh.Signer, hostKeyDir string, cfg *config.Config) {
 	fmt.Fprintf(w, "sftpit is serving SFTP on %s\n", addr)
 	fmt.Fprintf(w, "  dashboard: http://%s/\n", apiAddr)
 	fmt.Fprintf(w, "  API: http://%s/api/\n", apiAddr)
@@ -348,8 +369,8 @@ func printBanner(w io.Writer, addr, apiAddr string, workspace *runs.Workspace, r
 		fmt.Fprintf(w, "  read-only: %s\n", strings.Join(paths, ", "))
 	}
 	switch {
-	case cfg.HostKeyDir != "":
-		fmt.Fprintf(w, "  host keys, from %s:\n", cfg.HostKeyDir)
+	case hostKeyDir != "":
+		fmt.Fprintf(w, "  host keys, from %s:\n", hostKeyDir)
 	case workspace.Temporary():
 		fmt.Fprintln(w, "  host keys, new at every start:")
 	default:

@@ -79,6 +79,11 @@ type Config struct {
 	// keys, or "" for the workspace's own.
 	HostKeyDir string
 
+	// MountedHostKeyDir is a directory to take host keys from, as far as
+	// it holds them, in place of the workspace's or the user's own. It is
+	// "" when host_key is set or none was offered.
+	MountedHostKeyDir string
+
 	// ReplyOrder is the order in which each session's replies reach its
 	// client.
 	ReplyOrder sftpproxy.ReplyOrder
@@ -169,6 +174,11 @@ type Options struct {
 	// workspace places them, so that clients see the same fingerprints at
 	// every start. "" leaves them in the temporary workspace, new each time.
 	UserHostKeyDir string
+
+	// MountedHostKeyDir is a directory whose host keys are served, those
+	// that are there, when the configuration does not set host_key, the
+	// way the atmoz/sftp image has them mounted. "" has none.
+	MountedHostKeyDir string
 }
 
 type fileConfig struct {
@@ -314,6 +324,9 @@ func read(opts Options) (*reading, error) {
 		return nil, err
 	}
 	cfg.HostKeyDir = hostKeyDir(f.Server.HostKey, dir, cfg.DataDir, opts.UserHostKeyDir)
+	if f.Server.HostKey == "" {
+		cfg.MountedHostKeyDir = opts.MountedHostKeyDir
+	}
 	if cfg.Limits, err = f.Storage.limits(); err != nil {
 		return nil, err
 	}

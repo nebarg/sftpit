@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -22,7 +25,8 @@ import (
 const startTimeout = 10 * time.Second
 
 // TestMain gives the tests a user config directory of their own, so that
-// serve never touches the user's own host keys.
+// serve never touches the user's own host keys, and a container profile
+// finds none mounted.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "sftpit-cmd-config-")
 	if err != nil {
@@ -30,6 +34,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	userConfigDir = func() (string, error) { return dir, nil }
+	containerHostKeyDir = filepath.Join(dir, "no-mounted-host-keys")
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
@@ -147,6 +152,30 @@ var fingerprintPattern = regexp.MustCompile(`SHA256:\S+`)
 // separated.
 func fingerprints(banner string) string {
 	return strings.Join(fingerprintPattern.FindAllString(banner, -1), " ")
+}
+
+// writeEd25519HostKey writes a new Ed25519 host key as name in dir, as a
+// mount would put it there.
+func writeEd25519HostKey(t *testing.T, dir, name string) {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(dir, name), string(pem.EncodeToMemory(block)))
+}
+
+// withMountedHostKeyDir makes dir the container profile's host key
+// directory for the test.
+func withMountedHostKeyDir(t *testing.T, dir string) {
+	t.Helper()
+	previous := containerHostKeyDir
+	containerHostKeyDir = dir
+	t.Cleanup(func() { containerHostKeyDir = previous })
 }
 
 // goneReadyFile returns a ready file that a serve listening at httpAddr

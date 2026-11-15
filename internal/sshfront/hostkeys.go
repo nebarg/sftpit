@@ -39,15 +39,59 @@ func LoadOrCreateHostKeys(dir string) ([]ssh.Signer, error) {
 		return nil, err
 	}
 
-	algorithmSigner, ok := rsaSigner.(ssh.AlgorithmSigner)
+	rsaSHA2Signer, err := restrictRSASigner(rsaSigner)
+	if err != nil {
+		return nil, err
+	}
+	return []ssh.Signer{ed25519Signer, rsaSHA2Signer}, nil
+}
+
+// LoadHostKeys returns the Ed25519 and RSA host keys that are saved in dir,
+// in that order, and none for a file that is not there. It never creates or
+// changes anything, so dir can be a read-only mount. A key that cannot be
+// read or parsed, or is of the wrong type for its file, is an error. The
+// RSA key signs only with rsa-sha2-512 and rsa-sha2-256, never SHA-1.
+func LoadHostKeys(dir string) ([]ssh.Signer, error) {
+	var signers []ssh.Signer
+	for _, file := range []struct{ name, keyType string }{
+		{ed25519HostKeyFile, ssh.KeyAlgoED25519},
+		{rsaHostKeyFile, ssh.KeyAlgoRSA},
+	} {
+		path := filepath.Join(dir, file.name)
+		pemBytes, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			return nil, fmt.Errorf("sshfront: host key %s: permission denied; the user running sftpit must be able to read it", path)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sshfront: host key %s: %w", path, err)
+		}
+		signer, err := parseHostKey(path, pemBytes, file.keyType)
+		if err != nil {
+			return nil, err
+		}
+		if file.keyType == ssh.KeyAlgoRSA {
+			if signer, err = restrictRSASigner(signer); err != nil {
+				return nil, err
+			}
+		}
+		signers = append(signers, signer)
+	}
+	return signers, nil
+}
+
+func restrictRSASigner(signer ssh.Signer) (ssh.Signer, error) {
+	algorithmSigner, ok := signer.(ssh.AlgorithmSigner)
 	if !ok {
 		return nil, errors.New("sshfront: RSA host key cannot choose signature algorithms")
 	}
-	rsaSHA2Signer, err := ssh.NewSignerWithAlgorithms(algorithmSigner, []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256})
+	restricted, err := ssh.NewSignerWithAlgorithms(algorithmSigner, []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256})
 	if err != nil {
 		return nil, fmt.Errorf("sshfront: restrict RSA host key algorithms: %w", err)
 	}
-	return []ssh.Signer{ed25519Signer, rsaSHA2Signer}, nil
+	return restricted, nil
 }
 
 func loadOrCreateHostKey(path, keyType string, generate func() (crypto.PrivateKey, error)) (ssh.Signer, error) {
@@ -64,6 +108,10 @@ func loadOrCreateHostKey(path, keyType string, generate func() (crypto.PrivateKe
 		return nil, fmt.Errorf("sshfront: host key %s: %w", path, err)
 	}
 
+	return parseHostKey(path, pemBytes, keyType)
+}
+
+func parseHostKey(path string, pemBytes []byte, keyType string) (ssh.Signer, error) {
 	signer, err := ssh.ParsePrivateKey(pemBytes)
 	if err != nil {
 		return nil, fmt.Errorf("sshfront: parse host key %s: %w", path, err)

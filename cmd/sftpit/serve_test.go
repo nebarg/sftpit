@@ -197,6 +197,74 @@ func TestServeKeepsTheUsersHostKeysWithoutASetting(t *testing.T) {
 	}
 }
 
+func TestServeServesTheHostKeysMountedInTheContainerProfile(t *testing.T) {
+	dir := t.TempDir()
+	writeEd25519HostKey(t, dir, "ssh_host_ed25519_key")
+	withMountedHostKeyDir(t, dir)
+
+	first := startServe(t, "--profile", "container")
+	first.stop(t)
+	out := first.stdout.String()
+	if !strings.Contains(out, "host keys, from "+dir+":") || strings.Count(out, "SHA256:") != 1 || !strings.Contains(out, "ssh-ed25519 SHA256:") {
+		t.Errorf("banner should list only the mounted Ed25519 key, from %s:\n%s", dir, out)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+		t.Errorf("directory = %v, %v; want only the key put there", entries, err)
+	}
+
+	second := startServe(t, "--profile", "container")
+	second.stop(t)
+	if a, b := fingerprints(first.stdout.String()), fingerprints(second.stdout.String()); a != b {
+		t.Errorf("mounted host key changed between runs: %v then %v", a, b)
+	}
+}
+
+func TestServeFallsBackWhenNoHostKeyIsMounted(t *testing.T) {
+	withMountedHostKeyDir(t, t.TempDir())
+	s := startServe(t, "--profile", "container")
+	s.stop(t)
+	if out := s.stdout.String(); !strings.Contains(out, "host keys, new at every start:") || strings.Count(out, "SHA256:") != 2 {
+		t.Errorf("banner should list new keys of both types:\n%s", out)
+	}
+}
+
+func TestServeRefusesAMountedHostKeyItCannotUse(t *testing.T) {
+	dir := t.TempDir()
+	path := testutil.WriteFile(t, filepath.Join(dir, "ssh_host_rsa_key"), "not a key")
+	withMountedHostKeyDir(t, dir)
+	var stdout, stderr strings.Builder
+	code := run(commandContext(t), []string{"serve", "--profile", "container", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0"}, &stdout, &stderr)
+	if want := "sftpit serve: sshfront: parse host key " + path + ": "; code != exitFailure || !strings.Contains(stderr.String(), want) {
+		t.Errorf("exit %d, stderr %q; want %d and it to contain %q", code, stderr.String(), exitFailure, want)
+	}
+}
+
+func TestServePrefersAConfiguredHostKeyToMountedOnes(t *testing.T) {
+	mounted := t.TempDir()
+	writeEd25519HostKey(t, mounted, "ssh_host_ed25519_key")
+	withMountedHostKeyDir(t, mounted)
+	dir := t.TempDir()
+	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), "schema_version: 1\nserver:\n  host_key: hostkeys\n")
+
+	s := startServe(t, "--profile", "container", "--config", config)
+	s.stop(t)
+	if out := s.stdout.String(); !strings.Contains(out, "host keys, from "+filepath.Join(dir, "hostkeys")+":") || strings.Count(out, "SHA256:") != 2 {
+		t.Errorf("banner should list the configured directory's keys:\n%s", out)
+	}
+}
+
+func TestServeIgnoresMountedHostKeysInTheLoopbackProfile(t *testing.T) {
+	mounted := t.TempDir()
+	writeEd25519HostKey(t, mounted, "ssh_host_ed25519_key")
+	withMountedHostKeyDir(t, mounted)
+
+	s := startServe(t)
+	s.stop(t)
+	if out := s.stdout.String(); strings.Contains(out, mounted) || strings.Count(out, "SHA256:") != 2 {
+		t.Errorf("banner should not use the mounted directory:\n%s", out)
+	}
+}
+
 func TestUserHostKeyDir(t *testing.T) {
 	found := func() (string, error) { return "/home/me/.config", nil }
 	tests := []struct {
