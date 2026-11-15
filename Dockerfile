@@ -13,5 +13,5 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/sftpit ./cmd/sftpit
 FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/sftpit /usr/local/bin/sftpit
 EXPOSE 2122 8122
-ENTRYPOINT ["/usr/local/bin/sftpit"]
-CMD ["serve", "--profile", "container"]
+# A command then holds only flags and users, which are appended to serve.
+ENTRYPOINT ["/usr/local/bin/sftpit", "serve", "--profile", "container"]

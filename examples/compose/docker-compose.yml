@@ -8,9 +8,6 @@ services:
     # belong to you.
     user: '${SFTPIT_UID:-1000}:${SFTPIT_GID:-1000}'
     command:
-      - serve
-      - '--profile'
-      - container
       - '--control-host'
       - sftpit
       - '--config'

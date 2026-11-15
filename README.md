@@ -323,7 +323,7 @@ Add the service to the project's `docker-compose.yml`, as [`examples/compose`](e
   sftpit:
     image: 'sftpit:local'
     user: '${SFTPIT_UID:-1000}:${SFTPIT_GID:-1000}'
-    command: ['serve', '--profile', 'container', '--control-host', 'sftpit', '--config', '/sftpit/sftpit.yaml']
+    command: ['--control-host', 'sftpit', '--config', '/sftpit/sftpit.yaml']
     ports:
       - '127.0.0.1:${SFTPIT_PORT:-2122}:2122'
       - '127.0.0.1:${SFTPIT_CONTROL_PORT:-8122}:8122'
@@ -332,7 +332,9 @@ Add the service to the project's `docker-compose.yml`, as [`examples/compose`](e
 ```
 
 - Other containers reach SFTP at `sftpit:2122` and the API at `http://sftpit:8122`. The host reaches both on `127.0.0.1` only.
-- `--profile container` listens on every interface in the container. sftpit never chooses it itself, since on a host that would include interfaces other machines can reach.
+- The image runs `sftpit serve --profile container`, which listens on every interface in the container, and `command` adds flags and users to it. sftpit never chooses that profile itself on a host, since on a host that would include interfaces other machines can reach.
+- A setup written for the `atmoz/sftp` image can keep its `command`, such as `command: foo:pass:1001:100:upload`, and its `SFTP_USERS` variable, since sftpit reads [users on the command line](#running-sftpit) and `SFTP_USERS` in the same form.
+- To run another command in the image, such as `version`, override the entrypoint: `docker run --rm --entrypoint /usr/local/bin/sftpit sftpit:local version`.
 - `--control-host sftpit` lets the API answer requests addressed to `sftpit`, so any container on the network can turn faults on.
 - `user` runs sftpit as you, so it can create the host keys in `sftpit/hostkeys` on the first start. Commit them so everyone sees the same fingerprints.
 - The workspace is temporary. Mount a folder and pass `--data-dir` to keep it.
