@@ -34,6 +34,9 @@ type Options struct {
 	// "" for none.
 	SeedDir string
 
+	// Folders are folders to make in every run, as absolute SFTP paths.
+	Folders []string
+
 	// Limits bound each run's files and the handles open on them.
 	Limits backend.Limits
 
@@ -348,6 +351,11 @@ func (m *Manager) begin() (_ *activeRun, err error) {
 	for _, u := range m.opts.Server.Users {
 		if err := embedded.MkdirAll(u.Home); err != nil {
 			return nil, fmt.Errorf("runs: create home %s for %s: %w", u.Home, u.Name, err)
+		}
+	}
+	for _, folder := range m.opts.Folders {
+		if err := embedded.MkdirAll(folder); err != nil {
+			return nil, fmt.Errorf("runs: create folder %s: %w", folder, err)
 		}
 	}
 

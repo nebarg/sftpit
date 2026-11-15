@@ -70,6 +70,25 @@ func TestResetStartsAFreshRunFromTheSeed(t *testing.T) {
 	}
 }
 
+func TestEveryRunStartsWithItsFolders(t *testing.T) {
+	m, addr := startManager(t, Options{Folders: []string{"/upload", "/in/orders"}})
+	for _, run := range []string{"the first run", "the run after a reset"} {
+		c, ended := dialSFTP(t, addr)
+		for _, folder := range []string{"/upload", "/in/orders"} {
+			if info, err := c.Stat(folder); err != nil || !info.IsDir() {
+				t.Errorf("%s has no folder %s (%v)", run, folder, err)
+			}
+		}
+		if err := c.RemoveDirectory("/upload"); err != nil {
+			t.Fatalf("RemoveDirectory: %v", err)
+		}
+		if _, err := m.Reset(t.Context()); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		_ = testutil.Receive(t, ended)
+	}
+}
+
 func TestResetStartsARunWithoutFaultsAndAFreshSeed(t *testing.T) {
 	m, addr := startManager(t, Options{Scenarios: testScenarios(t), Scenario: "unreliable-light"})
 	deny := faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}

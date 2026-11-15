@@ -273,6 +273,24 @@ By default sftpit serves SFTP on `127.0.0.1:2122` and the dashboard and API on `
 sftpit logs to standard error: each connection, login and disconnection, each finished transfer with its path, bytes and duration, and every fault it applies.
 
 <details>
+<summary><b>Users on the command line</b></summary>
+
+Users can be given after the flags, in the form the `atmoz/sftp` image takes, so a setup written for that image declares its users unchanged:
+
+```bash
+./bin/sftpit serve foo:pass:1001:100:upload bar:word
+```
+
+- Each user is `name:password`, optionally followed by `:uid:gid:folder,folder`.
+- The folders are made at the start of every run. A user starts in `/` and sees every folder, since sftpit has one set of files for all users.
+- The `uid` and `gid` are accepted and not used, since files have no owners.
+- An encrypted password, marked with `:e`, is refused: give the password itself.
+- The `SFTP_USERS` environment variable lists users in the same form, separated by spaces. With `--profile container`, so does `/etc/sftp/users.conf`, one to a line.
+- These users are added to those of a configuration file. With any user given, `test` is not accepted.
+
+</details>
+
+<details>
 <summary><b>Starting files and the workspace</b></summary>
 
 With `--seed-dir`, sftpit copies the folder at startup, keeping permissions and modification times. A reset restores that copy, so clients never change the original folder. It may contain only folders and regular files.
@@ -365,7 +383,7 @@ scenarios:
 ```
 
 - Relative paths are resolved from the configuration file's folder. Flags override the file. Unknown fields are errors.
-- **Users:** without `users`, sftpit accepts `test` with the password `test`. Passwords are never written in the file: `password_env` names an environment variable, read from the environment or from the env files that `env_file` and `--env-file` name. sftpit offers key login only if some user has keys, and password login only if some user has a password.
+- **Users:** without `users`, and with no [users on the command line](#running-sftpit), sftpit accepts `test` with the password `test`. Passwords are never written in the file: `password_env` names an environment variable, read from the environment or from the env files that `env_file` and `--env-file` name. sftpit offers key login only if some user has keys, and password login only if some user has a password.
 - **Limits:** a request that would exceed a limit changes nothing and fails with "failure", as a write to a full disk does.
 - **Read-only paths:** clients can list and download there, but every change is refused with "permission denied", whatever faults are on.
 - **Scenarios:** `scenarios:` defines [scenarios](#scenarios) by name, each with a `description` and `faults`.

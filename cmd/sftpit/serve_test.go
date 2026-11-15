@@ -140,6 +140,21 @@ users:
 	}
 }
 
+func TestServeTakesUsersAndTheirFoldersAsArguments(t *testing.T) {
+	s := startServe(t, "foo:s3cret:1001:100:upload", "bar:word")
+	c := s.dial(t, "foo", "s3cret")
+	if info, err := c.Stat("/upload"); err != nil || !info.IsDir() {
+		t.Errorf("the folder given for foo: %v, want /upload", err)
+	}
+	if wd, err := c.Getwd(); err != nil || wd != "/" {
+		t.Errorf("foo starts in %q (%v), want /", wd, err)
+	}
+	s.dial(t, "bar", "word")
+	if strings.Contains(s.stdout.String()+s.stderr.String(), "s3cret") {
+		t.Errorf("the output repeats a password:\n%s%s", s.stdout, s.stderr)
+	}
+}
+
 func TestServeKeepsTheUsersHostKeysWithoutASetting(t *testing.T) {
 	configDir, err := userConfigDir()
 	if err != nil {

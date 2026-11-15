@@ -27,7 +27,7 @@ import (
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
 
-const serveUsage = `Usage: sftpit serve [flags]
+const serveUsage = `Usage: sftpit serve [flags] [user...]
 
 Runs an SFTP server on a loopback address, or in a container on every
 interface, until interrupted, with a control API over HTTP that reports on
@@ -61,7 +61,18 @@ Flags:
                        harness; FILE is removed at exit
   --log-level LEVEL    log at LEVEL: debug, which adds every SFTP request,
                        info (the default), warn or error
+
+Users can be given after the flags, each as name:password or
+name:password:uid:gid:folder,folder, the form the atmoz/sftp image takes.
+The folders are made at the start of every run; the uid and gid are not
+used. The SFTP_USERS environment variable lists users in the same form,
+separated by spaces, and so does /etc/sftp/users.conf in the container
+profile, one to a line.
 `
+
+// containerUsersFile lists users in the container profile, where the
+// atmoz/sftp image reads them from.
+const containerUsersFile = "/etc/sftp/users.conf"
 
 func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -102,9 +113,15 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sftpit serve: %v\n\n%s", err, serveUsage)
 		return exitUsage
 	}
-	if flags.NArg() > 0 {
-		fmt.Fprintf(stderr, "sftpit serve: unexpected arguments %q\n", flags.Args())
+	// An argument that is not a user is a mistake, such as a flag after
+	// the users, which the flags no longer cover.
+	if stray := slices.DeleteFunc(slices.Clone(flags.Args()), func(arg string) bool { return strings.Contains(arg, ":") }); len(stray) > 0 {
+		fmt.Fprintf(stderr, "sftpit serve: unexpected arguments %q\n", stray)
 		return exitUsage
+	}
+	opts.Users = flags.Args()
+	if opts.Profile == config.Container {
+		opts.UsersFile = containerUsersFile
 	}
 	if readyPath != "" {
 		if err := prepareReadyFile(readyPath); err != nil {
@@ -170,6 +187,7 @@ func runServer(ctx context.Context, cfg *config.Config, readyPath string, logLev
 	manager, err := runs.Start(workspace, runs.Options{
 		Server:     sshfront.Config{HostKeys: hostKeys, Users: cfg.Users, Logger: logger},
 		SeedDir:    cfg.SeedDir,
+		Folders:    cfg.Folders,
 		Limits:     cfg.Limits,
 		ReplyOrder: cfg.ReplyOrder,
 		Policy:     cfg.Policy,

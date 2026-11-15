@@ -102,6 +102,10 @@ type Config struct {
 	// because no users were configured.
 	DefaultCredentials bool
 
+	// Folders are the folders every run starts with besides the users'
+	// homes, as absolute SFTP paths.
+	Folders []string
+
 	// Policy is what clients may do, whatever faults a run injects.
 	Policy Policy
 
@@ -149,6 +153,14 @@ type Options struct {
 	// EnvFiles are read after the configuration's env files, so their
 	// values override those.
 	EnvFiles []string
+
+	// Users are users to add to the configuration's, each given as
+	// name:password[:e][:uid[:gid[:folder[,folder]...]]], the form the
+	// atmoz/sftp image takes. UsersFile, if it exists, lists more, one to a
+	// line, and so does the SFTP_USERS environment variable, separated by
+	// spaces.
+	Users     []string
+	UsersFile string
 
 	// LookupEnv reads the process environment. Nil means os.LookupEnv.
 	LookupEnv func(string) (string, bool)
@@ -322,7 +334,17 @@ func read(opts Options) (*reading, error) {
 	if cfg.Users, err = resolveUsers(f.Users, dir, secrets.values); err != nil {
 		return nil, err
 	}
-	cfg.DefaultCredentials = len(f.Users) == 0
+	listed, err := listedUsers(opts.UsersFile, opts.Users, lookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Users, cfg.Folders, err = withListed(cfg.Users, listed); err != nil {
+		return nil, err
+	}
+	if len(cfg.Users) == 0 {
+		cfg.Users = []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}
+		cfg.DefaultCredentials = true
+	}
 
 	if cfg.Policy, err = f.Policy.policy(cfg.Users); err != nil {
 		return nil, err
@@ -448,12 +470,8 @@ func envFilePaths(dir string, configured, given []string) ([]string, error) {
 	return paths, nil
 }
 
-// resolveUsers resolves the configured users against dir and secrets, or
-// returns the built-in test user if none are configured.
+// resolveUsers resolves the configured users against dir and secrets.
 func resolveUsers(configured []userConfig, dir string, secrets map[string]string) ([]sshfront.User, error) {
-	if len(configured) == 0 {
-		return []sshfront.User{{Name: DefaultUser, Password: DefaultPassword, Home: "/"}}, nil
-	}
 	users := make([]sshfront.User, 0, len(configured))
 	for i, u := range configured {
 		user, err := u.resolve(dir, secrets)
