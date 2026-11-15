@@ -66,7 +66,7 @@ type target struct {
 func sftpitTarget(t *testing.T) *target {
 	t.Helper()
 	dir, e := newBackend(t)
-	return &target{name: "sftpit", dir: dir, open: func() io.ReadWriteCloser { return e.Open("/") }}
+	return &target{name: "sftpit", dir: dir, open: func() io.ReadWriteCloser { return e.Open("/", "") }}
 }
 
 // proxiedTarget serves from the embedded backend through the proxy, as
@@ -78,7 +78,7 @@ func proxiedTarget(t *testing.T) *target {
 		client, proxy := net.Pipe()
 		c := &proxiedConn{Conn: client, served: make(chan error, 1)}
 		go func() {
-			c.served <- sftpproxy.Serve(context.Background(), proxy, e.Open("/"), sftpproxy.Options{Logger: slog.New(slog.DiscardHandler)})
+			c.served <- sftpproxy.Serve(context.Background(), proxy, e.Open("/", ""), sftpproxy.Options{Logger: slog.New(slog.DiscardHandler)})
 		}()
 		return c
 	}}

@@ -47,9 +47,14 @@ type User struct {
 	// AuthorizedKeys enables public-key login with any of these keys.
 	AuthorizedKeys []ssh.PublicKey
 
-	// Home is the user's default directory as an absolute virtual path.
-	// Empty means "/".
+	// Home is the user's default directory as an absolute virtual path, in
+	// the user's own view if Root is set. Empty means "/".
 	Home string
+
+	// Root is the directory the user is confined to, as an absolute virtual
+	// path. The user sees it as "/" and reaches nothing outside it. Empty
+	// means the whole tree.
+	Root string
 }
 
 // Handler serves one sftp subsystem channel. ctx is cancelled when the
@@ -208,6 +213,12 @@ func indexUsers(users []User) (map[string]User, error) {
 			return nil, fmt.Errorf("sshfront: user %q home %q is not an absolute path", u.Name, u.Home)
 		}
 		u.Home = path.Clean(u.Home)
+		if u.Root != "" {
+			if !path.IsAbs(u.Root) {
+				return nil, fmt.Errorf("sshfront: user %q root %q is not an absolute path", u.Name, u.Root)
+			}
+			u.Root = path.Clean(u.Root)
+		}
 		byName[u.Name] = u
 	}
 	return byName, nil
@@ -628,7 +639,7 @@ func (s *Server) handshakeConfig(ctx context.Context, conn *Conn) *ssh.ServerCon
 			return
 		}
 		user := s.users[meta.User()]
-		conn.user, conn.home = user.Name, user.Home
+		conn.user, conn.home, conn.root = user.Name, user.Home, user.Root
 		conn.clientVersion = string(meta.ClientVersion())
 		if s.hooks.Authenticate != nil {
 			s.hooks.Authenticate(ctx, conn)

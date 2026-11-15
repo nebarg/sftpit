@@ -89,6 +89,79 @@ func TestEveryRunStartsWithItsFolders(t *testing.T) {
 	}
 }
 
+func TestEachConfinedUserHasHomeAndFoldersOfTheirOwn(t *testing.T) {
+	users := []sshfront.User{
+		{Name: testUser, Password: testPassword, Home: "/"},
+		{Name: "foo", Password: testPassword, Home: "/", Root: "/home/foo"},
+		{Name: "bar", Password: testPassword, Home: "/", Root: "/home/bar"},
+	}
+	m, addr := startManager(t, Options{
+		Server:  sshfront.Config{Users: users},
+		Folders: []string{"/home/foo/upload", "/home/bar/upload", "/home/bar/in/orders"},
+	})
+	for _, run := range []string{"the first run", "the run after a reset"} {
+		foo, fooEnded := dialSFTPAs(t, addr, "foo")
+		bar, barEnded := dialSFTPAs(t, addr, "bar")
+		shared, sharedEnded := dialSFTPAs(t, addr, testUser)
+
+		for _, c := range []*sftp.Client{foo, bar} {
+			if info, err := c.Stat("/upload"); err != nil || !info.IsDir() {
+				t.Errorf("%s: a user has no /upload (%v)", run, err)
+			}
+			if wd, err := c.Getwd(); err != nil || wd != "/" {
+				t.Errorf("%s: Getwd = %q, %v; want /", run, wd, err)
+			}
+		}
+		if _, err := foo.Stat("/in/orders"); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: foo's /in/orders = %v, want it missing", run, err)
+		}
+		if info, err := bar.Stat("/in/orders"); err != nil || !info.IsDir() {
+			t.Errorf("%s: bar has no /in/orders (%v)", run, err)
+		}
+
+		f, err := foo.Create("/upload/a.csv")
+		if err != nil {
+			t.Fatalf("%s: Create: %v", run, err)
+		}
+		f.Close()
+		if _, err := bar.Stat("/upload/a.csv"); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: bar sees foo's file: Stat = %v", run, err)
+		}
+		if _, err := bar.Stat("/home/foo/upload/a.csv"); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: bar reaches foo's home: Stat = %v", run, err)
+		}
+		if _, err := shared.Stat("/home/foo/upload/a.csv"); err != nil {
+			t.Errorf("%s: a user of the whole tree does not see /home/foo/upload/a.csv: %v", run, err)
+		}
+
+		if _, err := m.Reset(t.Context()); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		for _, ended := range []<-chan error{fooEnded, barEnded, sharedEnded} {
+			_ = testutil.Receive(t, ended)
+		}
+	}
+}
+
+func TestConfinedUserWhoseHomeWasRemovedIsRefusedAndLogged(t *testing.T) {
+	users := []sshfront.User{
+		{Name: testUser, Password: testPassword, Home: "/"},
+		{Name: "foo", Password: testPassword, Home: "/", Root: "/home/foo"},
+	}
+	logs := make(messages, 64)
+	_, addr := startManager(t, Options{Server: sshfront.Config{Users: users}, Logger: slog.New(logs)})
+	shared, _ := dialSFTP(t, addr)
+	if err := shared.RemoveDirectory("/home/foo"); err != nil {
+		t.Fatalf("RemoveDirectory: %v", err)
+	}
+
+	conn := dialSSHAs(t, addr, "foo")
+	if _, err := sftp.NewClient(conn); err == nil {
+		t.Fatal("sftp.NewClient succeeded though the user's home is gone")
+	}
+	testutil.ReceiveUntil(t, logs, "sftp handler failed")
+}
+
 func TestResetStartsARunWithoutFaultsAndAFreshSeed(t *testing.T) {
 	m, addr := startManager(t, Options{Scenarios: testScenarios(t), Scenario: "unreliable-light"})
 	deny := faults.Rule{ID: "deny-stats", Match: faults.Match{Operations: []faults.Operation{faults.Stat}}, Action: sftpproxy.Fail{Status: sftpwire.StatusPermissionDenied}}

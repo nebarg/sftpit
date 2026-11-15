@@ -19,6 +19,10 @@ type handler struct {
 	root  *os.Root
 	usage *usage
 
+	// base is where root is in the run's files, as an absolute path. The
+	// usage counts the whole run, so it takes paths from there.
+	base string
+
 	// perm is the permissions the OPEN or MKDIR being served asks for
 	// whatever it creates, which pkg/sftp loses on the way to the handler.
 	// The relay sets it before passing such a request on, and passes one
@@ -78,7 +82,7 @@ func (h *handler) openFile(r *sftp.Request) (*file, error) {
 	if pflags.Write || flag&(os.O_CREATE|os.O_TRUNC) != 0 {
 		defer h.changing(r.Filepath)()
 		if flag&os.O_CREATE != 0 {
-			if limit := h.usage.limitOnCreate(r.Filepath); limit != nil {
+			if limit := h.usage.limitOnCreate(h.shared(r.Filepath)); limit != nil {
 				return nil, h.usage.refuse(r.Filepath, limit)
 			}
 		}
@@ -112,8 +116,14 @@ func (h *handler) open(name string, flag int, perm os.FileMode) (*os.File, error
 // are ignored.
 func (h *handler) changing(names ...string) (done func()) {
 	names = slices.DeleteFunc(names, func(name string) bool { return name == "" })
+	for i, name := range names {
+		names[i] = h.shared(name)
+	}
 	return h.usage.change(names...)
 }
+
+// shared returns the path in the run's files of the virtual path name.
+func (h *handler) shared(name string) string { return path.Join(h.base, name) }
 
 func (h *handler) Filecmd(r *sftp.Request) error {
 	defer h.changing(r.Filepath, r.Target)()
@@ -124,7 +134,7 @@ func (h *handler) Filecmd(r *sftp.Request) error {
 	case "Rename":
 		return h.rename(name, rootName(r.Target))
 	case "Mkdir":
-		if limit := h.usage.limitOnCreate(r.Filepath); limit != nil {
+		if limit := h.usage.limitOnCreate(h.shared(r.Filepath)); limit != nil {
 			return h.usage.refuse(r.Filepath, limit)
 		}
 		return statusError(h.root.Mkdir(name, h.perm))

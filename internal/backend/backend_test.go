@@ -527,7 +527,7 @@ func TestListing(t *testing.T) {
 
 func TestCloseEndsTheSession(t *testing.T) {
 	_, e := newBackend(t)
-	conn := e.Open("/")
+	conn := e.Open("/", "")
 	if err := conn.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -539,7 +539,7 @@ func TestCloseEndsTheSession(t *testing.T) {
 func TestCloseReturnsTheErrorTheSessionEndedWith(t *testing.T) {
 	t.Run("a packet over the limit", func(t *testing.T) {
 		_, e := newBackend(t)
-		conn := e.Open("/")
+		conn := e.Open("/", "")
 		if _, err := conn.Write(binary.BigEndian.AppendUint32(nil, 1<<20)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
@@ -549,7 +549,7 @@ func TestCloseReturnsTheErrorTheSessionEndedWith(t *testing.T) {
 	})
 	t.Run("a request the request server cannot parse", func(t *testing.T) {
 		_, e := newBackend(t)
-		conn := e.Open("/")
+		conn := e.Open("/", "")
 		if _, err := conn.Write(sftpwire.AppendInit(nil, sftpwire.Init{Version: 3})); err != nil {
 			t.Fatalf("Write INIT: %v", err)
 		}

@@ -35,6 +35,9 @@ func parseListedUser(entry string) (listedUser, error) {
 		return listedUser{}, errors.New("a user is given as name:password, optionally followed by :uid:gid:folders")
 	}
 	u := listedUser{name: fields[0], password: fields[1]}
+	if strings.ContainsAny(u.name, "/\x00") || u.name == "." || u.name == ".." {
+		return listedUser{}, fmt.Errorf("user %q: the name must be usable as a directory name under /home", u.name)
+	}
 	rest := fields[2:]
 	if len(rest) > 0 && rest[0] == "e" {
 		return listedUser{}, fmt.Errorf("user %s: an encrypted password can't be checked; give the password itself", u.name)
@@ -122,16 +125,24 @@ func readUsersFile(name string) ([]listedUser, error) {
 	return users, nil
 }
 
-// withListed returns users with each of listed added, whose home is /, and
-// the folders to make for them. It refuses a name given more than once.
+// listedHome returns the directory of the user called name in the run's
+// files, as the atmoz/sftp image lays it out. The user sees it as /.
+func listedHome(name string) string { return path.Join("/home", name) }
+
+// withListed returns users with each of listed added, confined to a home of
+// its own and starting at its /, and the folders to make for them, inside
+// those homes. It refuses a name given more than once.
 func withListed(users []sshfront.User, listed []listedUser) ([]sshfront.User, []string, error) {
 	var folders []string
 	for _, l := range listed {
 		if slices.ContainsFunc(users, func(u sshfront.User) bool { return u.Name == l.name }) {
 			return nil, nil, fmt.Errorf("user %s is given more than once", l.name)
 		}
-		users = append(users, sshfront.User{Name: l.name, Password: l.password, Home: "/"})
-		folders = append(folders, l.folders...)
+		root := listedHome(l.name)
+		users = append(users, sshfront.User{Name: l.name, Password: l.password, Home: "/", Root: root})
+		for _, folder := range l.folders {
+			folders = append(folders, path.Join(root, folder))
+		}
 	}
 	return users, folders, nil
 }

@@ -64,7 +64,9 @@ Flags:
 
 Users can be given after the flags, each as name:password or
 name:password:uid:gid:folder,folder, the form the atmoz/sftp image takes.
-The folders are made at the start of every run; the uid and gid are not
+Each of these users has a home of their own, /home/name in the run's
+files, which they see as /, and cannot reach other users' files. The
+folders are made in it at the start of every run; the uid and gid are not
 used. The SFTP_USERS environment variable lists users in the same form,
 separated by spaces, and so does /etc/sftp/users.conf in the container
 profile, one to a line.

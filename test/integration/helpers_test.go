@@ -158,7 +158,7 @@ func startLimitedServer(tb testing.TB, via route, opts sftpproxy.Options, limits
 	}
 
 	handler := func(_ context.Context, conn *sshfront.Conn, channel io.ReadWriteCloser) error {
-		return embedded.Serve(channel, conn.Home())
+		return embedded.Serve(channel, conn.Home(), conn.Root())
 	}
 	if via == proxied {
 		if opts.Logger == nil {

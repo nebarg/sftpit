@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"strconv"
 	"sync"
 	"time"
@@ -349,8 +350,9 @@ func (m *Manager) begin() (_ *activeRun, err error) {
 		}
 	}
 	for _, u := range m.opts.Server.Users {
-		if err := embedded.MkdirAll(u.Home); err != nil {
-			return nil, fmt.Errorf("runs: create home %s for %s: %w", u.Home, u.Name, err)
+		home := path.Join(u.Root, u.Home)
+		if err := embedded.MkdirAll(home); err != nil {
+			return nil, fmt.Errorf("runs: create home %s for %s: %w", home, u.Name, err)
 		}
 	}
 	for _, folder := range m.opts.Folders {

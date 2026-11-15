@@ -39,6 +39,10 @@ func TestParseListedUserSaysWhatIsWrongWithoutThePassword(t *testing.T) {
 	}{
 		{"no password field", "foo", form},
 		{"no name", ":s3cret", form},
+		{"a name with a slash", "a/b:s3cret", `user "a/b": the name must be usable as a directory name under /home`},
+		{"a name with a NUL", "a\x00b:s3cret", `user "a\x00b": the name must be usable as a directory name under /home`},
+		{"a name of a dot", ".:s3cret", `user ".": the name must be usable as a directory name under /home`},
+		{"a name of two dots", "..:s3cret", `user "..": the name must be usable as a directory name under /home`},
 		{"an empty password", "foo:", "user foo: a password is required"},
 		{"an encrypted password", "foo:s3cret:e", "user foo: an encrypted password can't be checked; give the password itself"},
 		{"an encrypted password with a uid", "foo:s3cret:e:1001", "user foo: an encrypted password can't be checked; give the password itself"},
@@ -71,15 +75,15 @@ func TestLoadAddsListedUsersInTheOrderTheyAreRead(t *testing.T) {
 	}
 	want := []sshfront.User{
 		{Name: "configured", Password: "password", Home: "/configured"},
-		{Name: "filed", Password: "one", Home: "/"},
-		{Name: "argued", Password: "four", Home: "/"},
-		{Name: "first", Password: "two", Home: "/"},
-		{Name: "second", Password: "three", Home: "/"},
+		{Name: "filed", Password: "one", Home: "/", Root: "/home/filed"},
+		{Name: "argued", Password: "four", Home: "/", Root: "/home/argued"},
+		{Name: "first", Password: "two", Home: "/", Root: "/home/first"},
+		{Name: "second", Password: "three", Home: "/", Root: "/home/second"},
 	}
 	if !reflect.DeepEqual(cfg.Users, want) {
 		t.Errorf("Users = %+v, want %+v", cfg.Users, want)
 	}
-	if want := []string{"/filed-in", "/second-in", "/shared"}; !reflect.DeepEqual(cfg.Folders, want) {
+	if want := []string{"/home/filed/filed-in", "/home/second/second-in", "/home/second/shared"}; !reflect.DeepEqual(cfg.Folders, want) {
 		t.Errorf("Folders = %v, want %v", cfg.Folders, want)
 	}
 	if cfg.DefaultCredentials {
@@ -92,7 +96,7 @@ func TestLoadWithOnlyListedUsersHasNoTestUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if want := []sshfront.User{{Name: "foo", Password: "pass", Home: "/"}}; !reflect.DeepEqual(cfg.Users, want) || cfg.DefaultCredentials {
+	if want := []sshfront.User{{Name: "foo", Password: "pass", Home: "/", Root: "/home/foo"}}; !reflect.DeepEqual(cfg.Users, want) || cfg.DefaultCredentials {
 		t.Errorf("Users = %+v, DefaultCredentials = %t; want only %+v", cfg.Users, cfg.DefaultCredentials, want)
 	}
 }
@@ -119,5 +123,28 @@ func TestLoadRejectsListedUsersItCannotUse(t *testing.T) {
 				t.Errorf("Load error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestWithListedGivesEachUserAHomeOfItsOwn(t *testing.T) {
+	listed := []listedUser{
+		{name: "foo", password: "one", folders: []string{"/upload", "/in/orders"}},
+		{name: "bar", password: "two", folders: []string{"/upload", "/outside"}},
+	}
+	users, folders, err := withListed([]sshfront.User{{Name: "configured", Password: "p", Home: "/c"}}, listed)
+	if err != nil {
+		t.Fatalf("withListed: %v", err)
+	}
+	wantUsers := []sshfront.User{
+		{Name: "configured", Password: "p", Home: "/c"},
+		{Name: "foo", Password: "one", Home: "/", Root: "/home/foo"},
+		{Name: "bar", Password: "two", Home: "/", Root: "/home/bar"},
+	}
+	if !reflect.DeepEqual(users, wantUsers) {
+		t.Errorf("users = %+v, want %+v", users, wantUsers)
+	}
+	wantFolders := []string{"/home/foo/upload", "/home/foo/in/orders", "/home/bar/upload", "/home/bar/outside"}
+	if !reflect.DeepEqual(folders, wantFolders) {
+		t.Errorf("folders = %v, want %v", folders, wantFolders)
 	}
 }

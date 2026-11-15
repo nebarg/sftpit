@@ -76,6 +76,13 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 			}},
 			wantErr: "not an absolute path",
 		},
+		{
+			name: "relative root",
+			cfg: sshfront.Config{HostKeys: hostKeys, Handler: handler, Users: []sshfront.User{
+				{Name: "test", Password: testPassword, Root: "home/test"},
+			}},
+			wantErr: "root \"home/test\" is not an absolute path",
+		},
 	}
 
 	for _, tt := range tests {

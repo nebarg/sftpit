@@ -75,15 +75,26 @@ func New(root *os.Root, opts Options) (*Embedded, error) {
 }
 
 // Serve serves one SFTP session on rw until the client ends it or rw fails,
-// resolving relative paths against home. It returns nil when the session
-// ends normally.
+// resolving relative paths against home. If confined is not empty, the
+// session sees that directory as its "/" and reaches nothing outside it, and
+// home is a path in that view. It returns nil when the session ends
+// normally, and an error at once if confined is missing.
 //
 // Requests are processed one at a time, in the order they arrive, as in
 // OpenSSH's sftp-server. pkg/sftp alone would run reads and writes on several
 // workers, so appends could land out of order and a write could race a later
 // request on the same file.
-func (e *Embedded) Serve(rw io.ReadWriter, home string) error {
-	h := &handler{root: e.root, usage: e.usage}
+func (e *Embedded) Serve(rw io.ReadWriter, home, confined string) error {
+	root := e.root
+	if confined != "" {
+		sub, err := e.root.OpenRoot(rootName(confined))
+		if err != nil {
+			return fmt.Errorf("backend: open the directory %s: %w", confined, err)
+		}
+		defer sub.Close()
+		root = sub
+	}
+	h := &handler{root: root, usage: e.usage, base: path.Join("/", confined)}
 	conn, serverEnd := net.Pipe()
 	srv := sftp.NewRequestServer(serverEnd,
 		sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h},
@@ -111,13 +122,14 @@ func isEndOfStream(err error) bool {
 }
 
 // Open starts a session over an in-process pipe and returns the client's end
-// of it. Closing that end ends the session and waits for the backend to
-// finish with it, returning any error the session ended with.
-func (e *Embedded) Open(home string) io.ReadWriteCloser {
+// of it, for a session as Serve describes. Closing that end ends the session
+// and waits for the backend to finish with it, returning any error the
+// session ended with.
+func (e *Embedded) Open(home, confined string) io.ReadWriteCloser {
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- e.Serve(server, home)
+		done <- e.Serve(server, home, confined)
 		server.Close()
 	}()
 	return &session{Conn: client, close: sync.OnceValue(func() error {

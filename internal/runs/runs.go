@@ -24,7 +24,8 @@ import (
 
 // Handler returns an sshfront.Handler that relays each SFTP session
 // through sftpproxy to a new session on embedded, which serves the run's
-// files, starting in the user's home directory. Each session runs with opts,
+// files, starting in the user's home directory and confined to the user's
+// root if it has one. Each session runs with opts,
 // its own connection as opts.Conn, so a Drop or Freeze acts on the client
 // that caused it, and the server that accepted the connection as
 // opts.Listener. Its faults and timers come from rules, for the user and key
@@ -56,6 +57,6 @@ func Handler(embedded *backend.Embedded, rules *faults.Engine, policy config.Pol
 			defer s.End()
 			opts.Faults, opts.Timers, opts.MoreTimers, opts.Released = s.Decide, s.Timers(), s.MoreTimers(), rules.Released
 		}
-		return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home()), opts)
+		return sftpproxy.Serve(ctx, channel, embedded.Open(conn.Home(), conn.Root()), opts)
 	}
 }

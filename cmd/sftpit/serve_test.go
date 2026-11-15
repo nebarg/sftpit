@@ -149,7 +149,27 @@ func TestServeTakesUsersAndTheirFoldersAsArguments(t *testing.T) {
 	if wd, err := c.Getwd(); err != nil || wd != "/" {
 		t.Errorf("foo starts in %q (%v), want /", wd, err)
 	}
-	s.dial(t, "bar", "word")
+	f, err := c.Create("/upload/report.csv")
+	if err != nil {
+		t.Fatalf("foo's upload: %v", err)
+	}
+	if _, err := f.Write([]byte("id,total\n")); err != nil {
+		t.Fatalf("foo's write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("foo's close: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(s.files(), "home", "foo", "upload", "report.csv")); err != nil || string(got) != "id,total\n" {
+		t.Errorf("foo's upload on disk = %q, %v; want it under home/foo/upload/", got, err)
+	}
+
+	other := s.dial(t, "bar", "word")
+	if _, err := other.Stat("/upload/report.csv"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("bar sees foo's upload: Stat = %v", err)
+	}
+	if _, err := other.Stat("/home/foo/upload/report.csv"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("bar reaches foo's home: Stat = %v", err)
+	}
 	if strings.Contains(s.stdout.String()+s.stderr.String(), "s3cret") {
 		t.Errorf("the output repeats a password:\n%s%s", s.stdout, s.stderr)
 	}

@@ -161,7 +161,14 @@ func newHostKey(t *testing.T) ssh.Signer {
 // connection ends.
 func dialSFTP(t *testing.T, addr string) (*sftp.Client, <-chan error) {
 	t.Helper()
-	conn := dialSSH(t, addr)
+	return dialSFTPAs(t, addr, testUser)
+}
+
+// dialSFTPAs is dialSFTP for the user named user, whose password is
+// testPassword.
+func dialSFTPAs(t *testing.T, addr, user string) (*sftp.Client, <-chan error) {
+	t.Helper()
+	conn := dialSSHAs(t, addr, user)
 	ended := make(chan error, 1)
 	go func() { ended <- conn.Wait() }()
 	c, err := sftp.NewClient(conn)
@@ -175,8 +182,15 @@ func dialSFTP(t *testing.T, addr string) (*sftp.Client, <-chan error) {
 // dialSSH logs in to the server at addr as testUser.
 func dialSSH(t *testing.T, addr string) *ssh.Client {
 	t.Helper()
+	return dialSSHAs(t, addr, testUser)
+}
+
+// dialSSHAs logs in to the server at addr as the user named user, whose
+// password is testPassword.
+func dialSSHAs(t *testing.T, addr, user string) *ssh.Client {
+	t.Helper()
 	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            testUser,
+		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.Password(testPassword)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         waitTimeout,

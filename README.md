@@ -282,7 +282,9 @@ Users can be given after the flags, in the form the `atmoz/sftp` image takes, so
 ```
 
 - Each user is `name:password`, optionally followed by `:uid:gid:folder,folder`.
-- The folders are made at the start of every run. A user starts in `/` and sees every folder, since sftpit has one set of files for all users.
+- Each of these users has a home of their own, `/home/<name>` in the run's files, which they see as `/`. The folders are made inside it at the start of every run, so two users who both ask for `upload` get one each. A user cannot reach other users' files.
+- To give such a user starting files, put them under `home/<name>/` in the seed folder.
+- In the Files view and the files API, their files appear under `/home/<name>/`. Faults and read-only paths use the paths the client sends, such as `/upload`.
 - The `uid` and `gid` are accepted and not used, since files have no owners.
 - An encrypted password, marked with `:e`, is refused: give the password itself.
 - The `SFTP_USERS` environment variable lists users in the same form, separated by spaces. With `--profile container`, so does `/etc/sftp/users.conf`, one to a line.
@@ -418,7 +420,7 @@ As on OpenSSH, a standard rename fails when the target exists, and `posix-rename
 - **Linux and macOS only.** On Windows, run it in a container or under WSL2.
 - **Local only.** sftpit listens on loopback addresses, or on a container's interfaces. The API has no authentication beyond the `Sftpit-Control` header and a check that requests are addressed to sftpit itself.
 - **Its own files only.** sftpit cannot sit in front of another SFTP server yet.
-- **One server for every client.** Faults and files are shared by every connected client. Tests that run in parallel need an sftpit each, which port `0` and `--ready-file` make easy.
+- **One server for every client.** Faults are shared by every connected client, and so are the files, except the homes of users given on the command line. Tests that run in parallel need an sftpit each, which port `0` and `--ready-file` make easy.
 - **TCP resets vary.** After a reset, what a client reports and how much of a download it keeps varies from run to run, because the operating system may discard data the client had not read yet.
 - **Tested clients:** OpenSSH's `sftp`, phpseclib 2 and 3, Go's pkg/sftp and curl's libssh2. See [what they did under faults](test/clients/README.md).
 

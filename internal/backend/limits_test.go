@@ -185,7 +185,7 @@ func TestLimitsCountOpenFileHandlesAcrossSessions(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{"a": "data"})
 	e := newBackendIn(t, dir, backend.Options{Limits: tight, Logger: slog.New(slog.DiscardHandler)})
-	conn := e.Open("/")
+	conn := e.Open("/", "")
 	first, err := sftp.NewClientPipe(conn, conn)
 	if err != nil {
 		t.Fatalf("NewClientPipe: %v", err)

@@ -11,12 +11,13 @@ import (
 )
 
 // Conn is a client connection. Its methods are safe for concurrent use. Its
-// user, home and key fingerprint are set once the client has logged in, so
-// a Handler sees them but Hooks.Connect does not.
+// user, home, root and key fingerprint are set once the client has logged
+// in, so a Handler sees them but Hooks.Connect does not.
 type Conn struct {
 	id             uint64
 	user           string
 	home           string
+	root           string
 	keyFingerprint string
 	clientVersion  string
 	authenticated  time.Time
@@ -32,6 +33,10 @@ func (c *Conn) User() string { return c.user }
 
 // Home returns the user's default directory.
 func (c *Conn) Home() string { return c.home }
+
+// Root returns the directory the user is confined to, or "" if the user
+// reaches the whole tree.
+func (c *Conn) Root() string { return c.root }
 
 // KeyFingerprint returns the SHA256 fingerprint of the public key the client
 // authenticated with, or "" if it logged in with a password.

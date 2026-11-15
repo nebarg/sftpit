@@ -44,7 +44,14 @@ func newBackendIn(t *testing.T, dir string, opts backend.Options) *backend.Embed
 
 func newClient(t *testing.T, e *backend.Embedded, home string) *sftp.Client {
 	t.Helper()
-	conn := e.Open(home)
+	return newConfinedClient(t, e, home, "")
+}
+
+// newConfinedClient returns a client of a session confined to the directory
+// confined, which is "" for one that reaches the whole tree.
+func newConfinedClient(t *testing.T, e *backend.Embedded, home, confined string) *sftp.Client {
+	t.Helper()
+	conn := e.Open(home, confined)
 	c, err := sftp.NewClientPipe(conn, conn, sftp.UseConcurrentWrites(true))
 	if err != nil {
 		t.Fatalf("NewClientPipe: %v", err)
@@ -116,7 +123,7 @@ func (s *rawSession) handle(p sftpwire.Packet) string {
 
 func startRaw(t *testing.T, e *backend.Embedded) *rawSession {
 	t.Helper()
-	conn := e.Open("/")
+	conn := e.Open("/", "")
 	t.Cleanup(func() { conn.Close() })
 	s := &rawSession{t: t, conn: conn, in: bufio.NewReader(conn)}
 	if _, err := conn.Write(sftpwire.AppendInit(nil, sftpwire.Init{Version: 3})); err != nil {
