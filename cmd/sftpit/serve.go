@@ -69,7 +69,9 @@ files, which they see as /, and cannot reach other users' files. The
 folders are made in it at the start of every run; the uid and gid are not
 used. The SFTP_USERS environment variable lists users in the same form,
 separated by spaces, and so does /etc/sftp/users.conf in the container
-profile, one to a line.
+profile, one to a line. In the container profile the *.pub files in
+/home/name/.ssh/keys are that user's login keys, and the password may be
+left empty.
 `
 
 // containerUsersFile lists users in the container profile, where the
@@ -80,6 +82,11 @@ const containerUsersFile = "/etc/sftp/users.conf"
 // atmoz/sftp image has them mounted. Tests replace it so that they never
 // read the host's own keys.
 var containerHostKeyDir = "/etc/ssh"
+
+// containerHomeDir holds each listed user's .ssh/keys directory in the
+// container profile, where the atmoz/sftp image has them mounted. Tests
+// replace it so that they never read the host's own /home.
+var containerHomeDir = "/home"
 
 func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -130,6 +137,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if opts.Profile == config.Container {
 		opts.UsersFile = containerUsersFile
 		opts.MountedHostKeyDir = containerHostKeyDir
+		opts.MountedHomeDir = containerHomeDir
 	}
 	if readyPath != "" {
 		if err := prepareReadyFile(readyPath); err != nil {

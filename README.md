@@ -287,6 +287,7 @@ Users can be given after the flags, in the form the `atmoz/sftp` image takes, so
 - In the Files view and the files API, their files appear under `/home/<name>/`. Faults and read-only paths use the paths the client sends, such as `/upload`.
 - The `uid` and `gid` are accepted and not used, since files have no owners.
 - An encrypted password, marked with `:e`, is refused: give the password itself.
+- With `--profile container`, the `*.pub` files mounted at `/home/<name>/.ssh/keys/` are that user's login keys, as for the `atmoz/sftp` image, and the password may then be left empty, as in `foo::1001`. A user with a password and keys can use either. Key options such as `from=` are refused. Without the container profile, a password is required.
 - The `SFTP_USERS` environment variable lists users in the same form, separated by spaces. With `--profile container`, so does `/etc/sftp/users.conf`, one to a line.
 - These users are added to those of a configuration file. With any user given, `test` is not accepted.
 
@@ -339,6 +340,7 @@ Add the service to the project's `docker-compose.yml`, as [`examples/compose`](e
 - The image runs `sftpit serve --profile container`, which listens on every interface in the container, and `command` adds flags and users to it. sftpit never chooses that profile itself on a host, since on a host that would include interfaces other machines can reach.
 - The image listens for SFTP on port 22, as the `atmoz/sftp` image does.
 - A setup written for the `atmoz/sftp` image can keep its `command`, such as `command: foo:pass:1001:100:upload`, and its `SFTP_USERS` variable, since sftpit reads [users on the command line](#running-sftpit) and `SFTP_USERS` in the same form.
+- Public keys mounted as `/home/<name>/.ssh/keys/*.pub` are the login keys of a user given in that form, and the password may be left empty. A file that cannot be read or parsed, or that has key options such as `from=`, stops sftpit from starting.
 - To run another command in the image, such as `version`, override the entrypoint: `docker run --rm --entrypoint /usr/local/bin/sftpit sftpit:local version`.
 - Host keys mounted at `/etc/ssh/ssh_host_ed25519_key` and `/etc/ssh/ssh_host_rsa_key`, as for the `atmoz/sftp` image, are used when present. Only the ones present are served, and the key files must be readable by the user the container runs as. A key that cannot be read or parsed stops sftpit from starting.
 - `--control-host sftpit` lets the API answer requests addressed to `sftpit`, so any container on the network can turn faults on.

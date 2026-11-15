@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/nebarg/sftpit/internal/sshfront"
 	"github.com/nebarg/sftpit/internal/testutil"
 )
@@ -16,6 +18,8 @@ func TestParseListedUserReadsEachForm(t *testing.T) {
 		want  listedUser
 	}{
 		{"foo:pass", listedUser{name: "foo", password: "pass"}},
+		{"foo:", listedUser{name: "foo"}},
+		{"foo::1001", listedUser{name: "foo"}},
 		{"foo:pass:1001", listedUser{name: "foo", password: "pass"}},
 		{"foo:pass:1001:100", listedUser{name: "foo", password: "pass"}},
 		{"foo:pass:1001:100:upload", listedUser{name: "foo", password: "pass", folders: []string{"/upload"}}},
@@ -43,7 +47,6 @@ func TestParseListedUserSaysWhatIsWrongWithoutThePassword(t *testing.T) {
 		{"a name with a NUL", "a\x00b:s3cret", `user "a\x00b": the name must be usable as a directory name under /home`},
 		{"a name of a dot", ".:s3cret", `user ".": the name must be usable as a directory name under /home`},
 		{"a name of two dots", "..:s3cret", `user "..": the name must be usable as a directory name under /home`},
-		{"an empty password", "foo:", "user foo: a password is required"},
 		{"an encrypted password", "foo:s3cret:e", "user foo: an encrypted password can't be checked; give the password itself"},
 		{"an encrypted password with a uid", "foo:s3cret:e:1001", "user foo: an encrypted password can't be checked; give the password itself"},
 		{"a uid that is not a number", "foo:s3cret:upload", `user foo: uid "upload" is not a number`},
@@ -131,7 +134,7 @@ func TestWithListedGivesEachUserAHomeOfItsOwn(t *testing.T) {
 		{name: "foo", password: "one", folders: []string{"/upload", "/in/orders"}},
 		{name: "bar", password: "two", folders: []string{"/upload", "/outside"}},
 	}
-	users, folders, err := withListed([]sshfront.User{{Name: "configured", Password: "p", Home: "/c"}}, listed)
+	users, folders, err := withListed([]sshfront.User{{Name: "configured", Password: "p", Home: "/c"}}, listed, "")
 	if err != nil {
 		t.Fatalf("withListed: %v", err)
 	}
@@ -146,5 +149,133 @@ func TestWithListedGivesEachUserAHomeOfItsOwn(t *testing.T) {
 	wantFolders := []string{"/home/foo/upload", "/home/foo/in/orders", "/home/bar/upload", "/home/bar/outside"}
 	if !reflect.DeepEqual(folders, wantFolders) {
 		t.Errorf("folders = %v, want %v", folders, wantFolders)
+	}
+}
+
+func TestLoadGivesListedUsersTheKeysMountedForThem(t *testing.T) {
+	homes := t.TempDir()
+	first := writeMountedKeys(t, homes, "foo", "a.pub")
+	second := writeMountedKeys(t, homes, "foo", "b.pub")
+	third := writeMountedKeys(t, homes, "foo", "c.pub")
+	opts := Options{Users: []string{"foo::1001"}, MountedHomeDir: homes, LookupEnv: noEnv}
+
+	cfg, err := Load(opts)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []sshfront.User{{Name: "foo", AuthorizedKeys: []ssh.PublicKey{first[0], second[0], third[0]}, Home: "/", Root: "/home/foo"}}
+	if !reflect.DeepEqual(cfg.Users, want) {
+		t.Errorf("Users = %+v, want %+v", cfg.Users, want)
+	}
+}
+
+func TestLoadReadsEveryKeyOfAMountedFile(t *testing.T) {
+	homes := t.TempDir()
+	file := filepath.Join(homes, "foo", ".ssh", "keys", "both.pub")
+	one := writeAuthorizedKeys(t, file, "")
+	other := writeAuthorizedKeys(t, filepath.Join(t.TempDir(), "other.pub"), "")
+	testutil.WriteFile(t, file, string(ssh.MarshalAuthorizedKey(one))+string(ssh.MarshalAuthorizedKey(other)))
+
+	cfg, err := Load(Options{Users: []string{"foo:"}, MountedHomeDir: homes, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []ssh.PublicKey{one, other}; !reflect.DeepEqual(cfg.Users[0].AuthorizedKeys, want) {
+		t.Errorf("AuthorizedKeys = %v, want %v", cfg.Users[0].AuthorizedKeys, want)
+	}
+}
+
+func TestLoadIgnoresMountedFilesThatAreNotKeys(t *testing.T) {
+	homes := t.TempDir()
+	keys := writeMountedKeys(t, homes, "foo", "id.pub")
+	keysDir := filepath.Join(homes, "foo", ".ssh", "keys")
+	testutil.WriteFile(t, filepath.Join(keysDir, "notes.txt"), "not a key")
+	testutil.WriteFile(t, filepath.Join(keysDir, "id_ed25519"), "not a key")
+	testutil.WriteFile(t, filepath.Join(keysDir, "nested.pub", "inner.pub"), "not a key")
+
+	cfg, err := Load(Options{Users: []string{"foo::1001"}, MountedHomeDir: homes, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Users[0].AuthorizedKeys, keys) {
+		t.Errorf("AuthorizedKeys = %v, want %v", cfg.Users[0].AuthorizedKeys, keys)
+	}
+}
+
+func TestLoadTakesAMissingKeysDirectoryAsNoKeys(t *testing.T) {
+	cfg, err := Load(Options{Users: []string{"foo:pass"}, MountedHomeDir: t.TempDir(), LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []sshfront.User{{Name: "foo", Password: "pass", Home: "/", Root: "/home/foo"}}; !reflect.DeepEqual(cfg.Users, want) {
+		t.Errorf("Users = %+v, want %+v", cfg.Users, want)
+	}
+}
+
+func TestLoadRefusesAMountedKeyFileItCannotUse(t *testing.T) {
+	tests := []struct {
+		name, content, want string
+	}{
+		{"not a key", "AAAAC3NzaC1lZDI1NTE5AAAAIsecret-material\n", ":1: ssh: no key found"},
+		{"an empty file", "", ": no keys found"},
+		{"a key with options", "no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOxbLxUlPSDoUjFAHrnh+h4GuV/Xyr3pgQ7LyY2IHrtN\n", `:1: key options such as "no-pty" are not supported`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			homes := t.TempDir()
+			file := testutil.WriteFile(t, filepath.Join(homes, "foo", ".ssh", "keys", "bad.pub"), tt.content)
+			_, err := Load(Options{Users: []string{"foo::1001"}, MountedHomeDir: homes, LookupEnv: noEnv})
+			if want := "user foo: " + file + tt.want; err == nil || err.Error() != want {
+				t.Errorf("Load error = %v, want %q", err, want)
+			}
+			if err != nil && strings.Contains(err.Error(), "secret-material") {
+				t.Errorf("the error %q repeats key material", err)
+			}
+		})
+	}
+}
+
+func TestLoadRefusesAListedUserWithNeitherPasswordNorKey(t *testing.T) {
+	homes := t.TempDir()
+	tests := []struct {
+		name, home, want string
+	}{
+		{"no keys directory in use", "", "user foo: a password is required"},
+		{"a keys directory in use", homes, "user foo: give a password, or mount a public key file ending in .pub in " + filepath.Join(homes, "foo", ".ssh", "keys")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(Options{Users: []string{"foo::1001"}, MountedHomeDir: tt.home, LookupEnv: noEnv})
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("Load error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadKeepsThePasswordOfAListedUserWithKeys(t *testing.T) {
+	homes := t.TempDir()
+	keys := writeMountedKeys(t, homes, "foo", "id.pub")
+
+	cfg, err := Load(Options{Users: []string{"foo:pass"}, MountedHomeDir: homes, LookupEnv: noEnv})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []sshfront.User{{Name: "foo", Password: "pass", AuthorizedKeys: keys, Home: "/", Root: "/home/foo"}}; !reflect.DeepEqual(cfg.Users, want) {
+		t.Errorf("Users = %+v, want %+v", cfg.Users, want)
+	}
+}
+
+func TestLoadLeavesConfiguredUsersToTheirOwnKeys(t *testing.T) {
+	homes := t.TempDir()
+	writeMountedKeys(t, homes, "configured", "id.pub")
+	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nusers:\n  - {name: configured, password_env: P}\n")
+
+	cfg, err := Load(Options{ConfigFile: config, MountedHomeDir: homes, LookupEnv: fakeEnv{"P": "password"}.lookup})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []sshfront.User{{Name: "configured", Password: "password", Home: "/"}}; !reflect.DeepEqual(cfg.Users, want) {
+		t.Errorf("Users = %+v, want %+v", cfg.Users, want)
 	}
 }

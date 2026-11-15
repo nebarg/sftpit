@@ -265,6 +265,35 @@ func TestServeIgnoresMountedHostKeysInTheLoopbackProfile(t *testing.T) {
 	}
 }
 
+func TestServeLogsInAListedUserByTheKeyMountedForThem(t *testing.T) {
+	homes := t.TempDir()
+	withMountedHomeDir(t, homes)
+	key := writeUserKey(t, homes, "foo", "id_ed25519.pub")
+
+	s := startServe(t, "--profile", "container", "foo::1001")
+	if out := s.stdout.String(); !strings.Contains(out, "users: foo (key)") {
+		t.Errorf("banner should say foo logs in by key:\n%s", out)
+	}
+	if wd, err := s.sftpClient(t, "foo", key).Getwd(); err != nil || wd != "/" {
+		t.Errorf("foo starts in %q (%v), want /", wd, err)
+	}
+	if conn, err := s.login("foo", ssh.Password("")); err == nil {
+		conn.Close()
+		t.Error("foo logged in with an empty password")
+	}
+}
+
+func TestServeIgnoresMountedKeysInTheLoopbackProfile(t *testing.T) {
+	homes := t.TempDir()
+	withMountedHomeDir(t, homes)
+	writeUserKey(t, homes, "foo", "id_ed25519.pub")
+	var stdout, stderr strings.Builder
+	code := run(commandContext(t), []string{"serve", "--sftp-listen", "127.0.0.1:0", "--http-listen", "127.0.0.1:0", "foo::1001"}, &stdout, &stderr)
+	if want := "sftpit serve: user foo: a password is required\n"; code != exitUsage || stderr.String() != want {
+		t.Errorf("exit %d, stderr %q; want %d and %q", code, stderr.String(), exitUsage, want)
+	}
+}
+
 func TestUserHostKeyDir(t *testing.T) {
 	found := func() (string, error) { return "/home/me/.config", nil }
 	tests := []struct {

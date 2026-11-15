@@ -57,3 +57,14 @@ func loadScenarios(t *testing.T, dir, scenarios, selected string) (*Config, erro
 	config := testutil.WriteFile(t, filepath.Join(dir, "sftpit.yaml"), withScenarios+scenarios)
 	return Load(Options{ConfigFile: config, Scenario: selected, LookupEnv: fakeEnv{"P": "password"}.lookup})
 }
+
+// writeMountedKeys writes a key as each of names in the keys directory of
+// the user in homes, as a mount would put it there, and returns the keys.
+func writeMountedKeys(t *testing.T, homes, user string, names ...string) []ssh.PublicKey {
+	t.Helper()
+	keys := make([]ssh.PublicKey, 0, len(names))
+	for _, name := range names {
+		keys = append(keys, writeAuthorizedKeys(t, filepath.Join(homes, user, ".ssh", "keys", name), ""))
+	}
+	return keys
+}

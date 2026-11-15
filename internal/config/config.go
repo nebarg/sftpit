@@ -179,6 +179,11 @@ type Options struct {
 	// that are there, when the configuration does not set host_key, the
 	// way the atmoz/sftp image has them mounted. "" has none.
 	MountedHostKeyDir string
+
+	// MountedHomeDir is the directory holding a home for each user given
+	// in the atmoz/sftp form, whose .ssh/keys/*.pub files are that user's
+	// login keys, the way the image has them mounted. "" has none.
+	MountedHomeDir string
 }
 
 type fileConfig struct {
@@ -351,7 +356,7 @@ func read(opts Options) (*reading, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Users, cfg.Folders, err = withListed(cfg.Users, listed); err != nil {
+	if cfg.Users, cfg.Folders, err = withListed(cfg.Users, listed, opts.MountedHomeDir); err != nil {
 		return nil, err
 	}
 	if len(cfg.Users) == 0 {

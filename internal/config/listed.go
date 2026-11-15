@@ -6,8 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/nebarg/sftpit/internal/sshfront"
 )
@@ -41,9 +44,6 @@ func parseListedUser(entry string) (listedUser, error) {
 	rest := fields[2:]
 	if len(rest) > 0 && rest[0] == "e" {
 		return listedUser{}, fmt.Errorf("user %s: an encrypted password can't be checked; give the password itself", u.name)
-	}
-	if u.password == "" {
-		return listedUser{}, fmt.Errorf("user %s: a password is required", u.name)
 	}
 	if len(rest) > 3 {
 		return listedUser{}, fmt.Errorf("user %s: there is nothing to give after the folders", u.name)
@@ -131,18 +131,65 @@ func listedHome(name string) string { return path.Join("/home", name) }
 
 // withListed returns users with each of listed added, confined to a home of
 // its own and starting at its /, and the folders to make for them, inside
-// those homes. It refuses a name given more than once.
-func withListed(users []sshfront.User, listed []listedUser) ([]sshfront.User, []string, error) {
+// those homes. Each user's keys are the *.pub files in
+// keysDir/<name>/.ssh/keys, unless keysDir is "". It refuses a name given
+// more than once and a user who has neither a password nor a key.
+func withListed(users []sshfront.User, listed []listedUser, keysDir string) ([]sshfront.User, []string, error) {
 	var folders []string
 	for _, l := range listed {
 		if slices.ContainsFunc(users, func(u sshfront.User) bool { return u.Name == l.name }) {
 			return nil, nil, fmt.Errorf("user %s is given more than once", l.name)
 		}
+		var keys []ssh.PublicKey
+		if keysDir != "" {
+			var err error
+			if keys, err = readMountedKeys(keysDir, l.name); err != nil {
+				return nil, nil, fmt.Errorf("user %s: %w", l.name, err)
+			}
+		}
+		if l.password == "" && len(keys) == 0 {
+			if keysDir == "" {
+				return nil, nil, fmt.Errorf("user %s: a password is required", l.name)
+			}
+			return nil, nil, fmt.Errorf("user %s: give a password, or mount a public key file ending in .pub in %s", l.name, mountedKeysDir(keysDir, l.name))
+		}
 		root := listedHome(l.name)
-		users = append(users, sshfront.User{Name: l.name, Password: l.password, Home: "/", Root: root})
+		users = append(users, sshfront.User{Name: l.name, Password: l.password, AuthorizedKeys: keys, Home: "/", Root: root})
 		for _, folder := range l.folders {
 			folders = append(folders, path.Join(root, folder))
 		}
 	}
 	return users, folders, nil
+}
+
+// mountedKeysDir returns the directory in which the atmoz/sftp image looks
+// for the keys of the user called name, under the home directory dir.
+func mountedKeysDir(dir, name string) string {
+	return filepath.Join(dir, name, ".ssh", "keys")
+}
+
+// readMountedKeys returns the keys in the *.pub files of the user's keys
+// directory, in the order of their names. A directory that does not exist
+// holds none.
+func readMountedKeys(dir, name string) ([]ssh.PublicKey, error) {
+	keysDir := mountedKeysDir(dir, name)
+	entries, err := os.ReadDir(keysDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	var keys []ssh.PublicKey
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".pub" {
+			continue
+		}
+		fileKeys, err := readAuthorizedKeys(filepath.Join(keysDir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, fileKeys...)
+	}
+	return keys, nil
 }

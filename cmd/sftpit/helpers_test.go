@@ -35,6 +35,7 @@ func TestMain(m *testing.M) {
 	}
 	userConfigDir = func() (string, error) { return dir, nil }
 	containerHostKeyDir = filepath.Join(dir, "no-mounted-host-keys")
+	containerHomeDir = filepath.Join(dir, "no-mounted-homes")
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
@@ -117,12 +118,13 @@ func (s *running) stop(t *testing.T) int {
 	}
 }
 
-func (s *running) dial(t *testing.T, user, password string) *sftp.Client {
-	t.Helper()
+// login opens an SSH connection as user with auth, checking the host key
+// against the banner.
+func (s *running) login(user string, auth ssh.AuthMethod) (*ssh.Client, error) {
 	want := fingerprints(s.stdout.String())
-	conn, err := ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
+	return ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
 		User: user,
-		Auth: []ssh.AuthMethod{ssh.Password(password)},
+		Auth: []ssh.AuthMethod{auth},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			if !strings.Contains(want, ssh.FingerprintSHA256(key)) {
 				return fmt.Errorf("host key %s is not in the banner", ssh.FingerprintSHA256(key))
@@ -131,6 +133,17 @@ func (s *running) dial(t *testing.T, user, password string) *sftp.Client {
 		},
 		Timeout: startTimeout,
 	})
+}
+
+func (s *running) dial(t *testing.T, user, password string) *sftp.Client {
+	t.Helper()
+	return s.sftpClient(t, user, ssh.Password(password))
+}
+
+// sftpClient logs in as user with auth and starts an SFTP session.
+func (s *running) sftpClient(t *testing.T, user string, auth ssh.AuthMethod) *sftp.Client {
+	t.Helper()
+	conn, err := s.login(user, auth)
 	if err != nil {
 		t.Fatalf("ssh.Dial: %v", err)
 	}
@@ -167,6 +180,32 @@ func writeEd25519HostKey(t *testing.T, dir, name string) {
 		t.Fatal(err)
 	}
 	testutil.WriteFile(t, filepath.Join(dir, name), string(pem.EncodeToMemory(block)))
+}
+
+// writeUserKey generates a key pair and writes its public key as name in
+// the keys directory of the user in homes, as a mount would put it there.
+// It returns the auth method that logs in with the private key.
+func writeUserKey(t *testing.T, homes, user, name string) ssh.AuthMethod {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(homes, user, ".ssh", "keys", name), string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	return ssh.PublicKeys(signer)
+}
+
+// withMountedHomeDir makes dir the container profile's home directory for
+// the test.
+func withMountedHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	previous := containerHomeDir
+	containerHomeDir = dir
+	t.Cleanup(func() { containerHomeDir = previous })
 }
 
 // withMountedHostKeyDir makes dir the container profile's host key
