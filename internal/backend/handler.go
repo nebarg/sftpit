@@ -293,10 +293,9 @@ func (h *handler) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
 	return listerAt{info}, nil
 }
 
-// list lists the directory name under the virtual names of its entries,
-// after . and .. as OpenSSH's sftp-server lists them, leaving out any entry
-// whose name sftpit cannot have given it, such as a file copied into the
-// root by hand. The root is its own parent.
+// list lists the directory name, after . and .. as OpenSSH's sftp-server
+// lists them, with every entry it holds, including any put there by hand.
+// The root is its own parent.
 func (h *handler) list(name string) (sftp.ListerAt, error) {
 	dir, err := h.root.Open(name)
 	if err != nil {
@@ -316,12 +315,7 @@ func (h *handler) list(name string) (sftp.ListerAt, error) {
 		return nil, statusError(err)
 	}
 	list := listerAt{namedInfo{FileInfo: self, name: "."}, namedInfo{FileInfo: parent, name: ".."}}
-	for _, e := range entries {
-		if virtual, ok := decodeName(e.Name()); ok {
-			list = append(list, namedInfo{FileInfo: e, name: virtual})
-		}
-	}
-	return list, nil
+	return append(list, entries...), nil
 }
 
 // namedInfo is a FileInfo under another name.

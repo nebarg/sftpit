@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"github.com/nebarg/sftpit/internal/backend"
 	"github.com/nebarg/sftpit/internal/sftpwire"
 )
 
@@ -103,20 +101,14 @@ func TestPathsStayInsideTheRoot(t *testing.T) {
 	assertFile(t, outside, "outside the root")
 }
 
-func TestNamesAreStoredEncoded(t *testing.T) {
+func TestNamesAreStoredAsGiven(t *testing.T) {
 	dir, e := newBackend(t)
 	c := newClient(t, e, "/")
 	mkdirRemote(t, c, "/Incoming")
-	stored := map[string]string{
-		"Orders 2026.CSV": "^orders%202026.^c^s^v",
-		"café.csv":        "caf%c3%a9.csv",
-		"con.txt":         "%63on.txt",
-		"orders.csv.":     "orders.csv%2e",
-		"orders.csv":      "orders.csv",
-	}
-	for name, host := range stored {
+	names := []string{"Orders 2026.CSV", "café.csv", "日本語.txt", "con.txt", "orders.csv.", `back\slash.txt`, "a:b.csv", "%61^b"}
+	for _, name := range names {
 		writeRemote(t, c, "/Incoming/"+name, name)
-		assertFile(t, filepath.Join(dir, "^incoming", host), name)
+		assertFile(t, filepath.Join(dir, "Incoming", name), name)
 	}
 
 	entries, err := c.ReadDir("/Incoming")
@@ -127,21 +119,149 @@ func TestNamesAreStoredEncoded(t *testing.T) {
 	for _, entry := range entries {
 		listed = append(listed, entry.Name())
 	}
-	if want := slices.Sorted(maps.Keys(stored)); !slices.Equal(slices.Sorted(slices.Values(listed)), want) {
+	if want := slices.Sorted(slices.Values(names)); !slices.Equal(slices.Sorted(slices.Values(listed)), want) {
 		t.Errorf("listed %q, want %q", listed, want)
 	}
-	if got := backend.StoredName("/Incoming/Orders 2026.CSV"); got != "^incoming/^orders%202026.^c^s^v" {
-		t.Errorf("StoredName = %q, want the encoded path", got)
+	for _, name := range names {
+		f, err := c.Open("/Incoming/" + name)
+		if err != nil {
+			t.Fatalf("Open %s: %v", name, err)
+		}
+		got, err := io.ReadAll(f)
+		f.Close()
+		if err != nil || string(got) != name {
+			t.Errorf("%s = %q, %v; want its own content", name, got, err)
+		}
 	}
+
 	if err := e.MkdirAll("/Partner-B/In"); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if info, err := os.Stat(filepath.Join(dir, "^partner-^b", "^in")); err != nil || !info.IsDir() {
-		t.Errorf("MkdirAll did not encode the directories' names: %v", err)
+	if info, err := os.Stat(filepath.Join(dir, "Partner-B", "In")); err != nil || !info.IsDir() {
+		t.Errorf("MkdirAll did not create the directories under their own names: %v", err)
 	}
 }
 
+func TestFilesPutInTheDirectoryByHandAreServed(t *testing.T) {
+	dir, e := newBackend(t)
+	writeHostFile(t, filepath.Join(dir, "Copied In", "Notes.TXT"), "by hand")
+	writeHostFile(t, filepath.Join(dir, "%61"), "percent")
+	writeHostFile(t, filepath.Join(dir, "^b"), "caret")
+	c := newClient(t, e, "/")
+
+	entries, err := c.ReadDir("/")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var got []string
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+	}
+	slices.Sort(got)
+	if want := []string{"%61", "Copied In", "^b"}; !slices.Equal(got, want) {
+		t.Errorf("listed %q, want %q", got, want)
+	}
+	info, err := c.Stat("/Copied In/Notes.TXT")
+	if err != nil || info.Size() != 7 || info.Name() != "Notes.TXT" {
+		t.Fatalf("Stat = %v, %v; want the 7-byte file", info, err)
+	}
+	f, err := c.Open("/Copied In/Notes.TXT")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+	if b, err := io.ReadAll(f); err != nil || string(b) != "by hand" {
+		t.Errorf("read %q, %v; want the file's content", b, err)
+	}
+}
+
+func TestSymlinksPutInTheDirectoryByHand(t *testing.T) {
+	dir, e := newBackend(t)
+	writeHostFile(t, filepath.Join(dir, "inside.txt"), "inside")
+	if err := os.Symlink("inside.txt", filepath.Join(dir, "inner")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "outer")); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, e, "/")
+
+	entries, err := c.ReadDir("/")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var got []string
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+	}
+	slices.Sort(got)
+	if want := []string{"inner", "inside.txt", "outer"}; !slices.Equal(got, want) {
+		t.Errorf("listed %q, want %q", got, want)
+	}
+	if info, err := c.Lstat("/inner"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("Lstat(/inner) = %v, %v; want the symlink itself", info, err)
+	}
+	if info, err := c.Stat("/inner"); err != nil || info.Size() != 6 {
+		t.Errorf("Stat(/inner) = %v, %v; want the file it points to inside the root", info, err)
+	}
+	if _, err := c.Stat("/outer"); err == nil {
+		t.Error("Stat followed a symlink out of the root")
+	}
+	if _, err := c.ReadDir("/outer"); err == nil {
+		t.Error("ReadDir followed a symlink out of the root")
+	}
+}
+
+func TestNamesCannotLeaveTheRoot(t *testing.T) {
+	dir, e := newBackend(t)
+	outside := t.TempDir()
+	writeHostFile(t, filepath.Join(outside, "secret.txt"), "outside")
+	c := newClient(t, e, "/")
+	mkdirRemote(t, c, "/a")
+
+	// Dot-dot segments are cleaned away before the backend sees a name, and
+	// a backslash is an ordinary character in one.
+	for name, stored := range map[string]string{
+		"/a/../../up.txt":   "up.txt",
+		"/../../../up2.txt": "up2.txt",
+		"a/../../up3.txt":   "up3.txt",
+		"//a///./b.txt":     "a/b.txt",
+		`/a/..\..\c.txt`:    `a/..\..\c.txt`,
+		`/..\d.txt`:         `..\d.txt`,
+	} {
+		writeRemote(t, c, name, name)
+		assertFile(t, filepath.Join(dir, filepath.FromSlash(stored)), name)
+	}
+
+	// An absolute host path is a path under the root, which does not hold it.
+	_, err := c.Create(filepath.Join(outside, "new.txt"))
+	assertStatus(t, err, sftpwire.StatusNoSuchFile)
+	_, err = c.Open(filepath.Join(outside, "secret.txt"))
+	assertStatus(t, err, sftpwire.StatusNoSuchFile)
+	assertFile(t, filepath.Join(outside, "secret.txt"), "outside")
+	assertMissing(t, filepath.Join(outside, "new.txt"))
+}
+
+func TestNamesWithANULByteAreABadMessage(t *testing.T) {
+	_, e := newBackend(t)
+	s := startRaw(t, e)
+	s.wantStatus(&sftpwire.Open{Path: "/a\x00b", Flags: sftpwire.OpenWrite | sftpwire.OpenCreate}, sftpwire.StatusBadMessage)
+	s.wantStatus(&sftpwire.Mkdir{Path: "/a\x00b"}, sftpwire.StatusBadMessage)
+	s.wantStatus(&sftpwire.Remove{Path: "/a\x00b"}, sftpwire.StatusBadMessage)
+}
+
+func TestNamesOverTheHostLimitAreABadMessage(t *testing.T) {
+	_, e := newBackend(t)
+	c := newClient(t, e, "/")
+	writeRemote(t, c, "/"+strings.Repeat("n", 255), "fits")
+	tooLong := "/" + strings.Repeat("n", 256)
+	_, err := c.Create(tooLong)
+	assertStatus(t, err, sftpwire.StatusBadMessage)
+	assertStatus(t, c.Mkdir(tooLong), sftpwire.StatusBadMessage)
+}
+
 func TestNamesThatDifferOnlyInCaseAreDifferentFiles(t *testing.T) {
+	skipUnlessCaseSensitive(t)
 	_, e := newBackend(t)
 	c := newClient(t, e, "/")
 	writeRemote(t, c, "/orders.csv", "lower")
@@ -169,31 +289,6 @@ func TestNamesThatDifferOnlyInCaseAreDifferentFiles(t *testing.T) {
 	if _, err := c.Stat("/Orders.csv"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Stat of the renamed file = %v, want it gone", err)
 	}
-}
-
-func TestListingsLeaveOutNamesSftpitCannotHaveWritten(t *testing.T) {
-	dir, e := newBackend(t)
-	for _, name := range []string{"plain.txt", "Notes.txt", "%61", "con"} {
-		writeHostFile(t, filepath.Join(dir, name), "copied in by hand")
-	}
-	entries, err := newClient(t, e, "/").ReadDir("/")
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "plain.txt" {
-		t.Errorf("listed %v, want only plain.txt, whose name is its own encoding", entries)
-	}
-}
-
-func TestNamesTooLongToStoreAreABadMessage(t *testing.T) {
-	_, e := newBackend(t)
-	c := newClient(t, e, "/")
-	// A host name holds at most 255 bytes, and a capital takes two of them.
-	writeRemote(t, c, "/"+strings.Repeat("A", 127), "fits")
-	tooLong := "/" + strings.Repeat("A", 128)
-	_, err := c.Create(tooLong)
-	assertStatus(t, err, sftpwire.StatusBadMessage)
-	assertStatus(t, c.Mkdir(tooLong), sftpwire.StatusBadMessage)
 }
 
 func TestStandardRenameRefusesAnExistingTarget(t *testing.T) {

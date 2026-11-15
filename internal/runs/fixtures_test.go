@@ -59,7 +59,7 @@ func TestSnapshotSeedKeepsWhatEachRunStartsWith(t *testing.T) {
 	}
 	makeSeed(t, seed, map[string]string{"outgoing/orders.csv": "changed", "outgoing/new.csv": "new"})
 	files := restore(t, w, s)
-	for name, want := range map[string]string{"outgoing/orders.csv": "id,total\n", "^notes.^t^x^t": "notes"} {
+	for name, want := range map[string]string{"outgoing/orders.csv": "id,total\n", "Notes.TXT": "notes"} {
 		if b, err := os.ReadFile(filepath.Join(files, name)); err != nil || string(b) != want {
 			t.Errorf("the run's %s holds %q (%v), want %q", name, b, err, want)
 		}

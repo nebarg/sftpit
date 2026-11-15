@@ -38,13 +38,6 @@ func TestListDescribesWhatClientsSee(t *testing.T) {
 	if err := c.Chtimes("/readme", mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
-	// Names that sftpit cannot have given are left out, as clients never
-	// see them.
-	for _, name := range []string{"Copied.txt", "%2e%2e"} {
-		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	root := openRoot(t, dir)
 
 	files, err := backend.List(root, "/")
@@ -82,8 +75,45 @@ func TestListDescribesWhatClientsSee(t *testing.T) {
 	if files, err := backend.List(root, "/readme"); err != nil || len(files) != 1 || files[0].Dir {
 		t.Errorf("List of a file = %+v, %v; want the file", files, err)
 	}
+}
+
+func TestListAndOpenTellCasesApart(t *testing.T) {
+	skipUnlessCaseSensitive(t)
+	dir, e := newBackend(t)
+	c := newClient(t, e, "/")
+	mkdirRemote(t, c, "/Incoming")
+	writeRemote(t, c, "/Orders.csv", "id,total\n")
+	root := openRoot(t, dir)
+
 	if _, err := backend.List(root, "/incoming"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("List of a name in the wrong case = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := backend.Open(root, "/orders.csv"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Open of a name in the wrong case = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestListLeavesOutWhatIsNeitherADirectoryNorAFile(t *testing.T) {
+	dir, _ := newBackend(t)
+	writeHostFile(t, filepath.Join(dir, "Copied In", "Notes.TXT"), "by hand")
+	writeHostFile(t, filepath.Join(dir, "%61"), "")
+	if err := os.Symlink("%61", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if err := os.Symlink(".", filepath.Join(dir, "loop")); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := backend.List(openRoot(t, dir), "/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.Path)
+	}
+	if want := []string{"/", "/%61", "/Copied In", "/Copied In/Notes.TXT"}; !slices.Equal(got, want) {
+		t.Errorf("List = %q, want %q", got, want)
 	}
 }
 
@@ -114,7 +144,7 @@ func TestOpenReadsAStoredFile(t *testing.T) {
 	if _, err := backend.Open(root, "/dir"); !errors.Is(err, backend.ErrNotFile) {
 		t.Errorf("Open of a directory = %v, want ErrNotFile", err)
 	}
-	if _, err := backend.Open(root, "/orders.csv"); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := backend.Open(root, "/missing.csv"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Open of a missing file = %v, want fs.ErrNotExist", err)
 	}
 }

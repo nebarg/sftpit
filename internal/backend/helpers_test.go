@@ -206,3 +206,17 @@ func writeTree(t *testing.T, dir string, files map[string]string) {
 		writeHostFile(t, filepath.Join(dir, name), content)
 	}
 }
+
+// skipUnlessCaseSensitive skips the test unless the volume that holds the
+// test's temporary directories tells names that differ only in case apart,
+// as Linux volumes do and macOS volumes usually do not.
+func skipUnlessCaseSensitive(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Probe"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "probe")); err == nil {
+		t.Skip("the host volume ignores case, so names that differ only in case are one file")
+	}
+}

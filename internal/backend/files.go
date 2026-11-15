@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"strings"
 	"time"
 )
 
@@ -26,9 +25,9 @@ type File struct {
 
 // List describes the file or directory at name, a clean absolute path,
 // among the files that root stores as a backend stores them, and, for a
-// directory, everything beneath it, sorted by path. Like the backend, it
-// leaves out names that the backend cannot have given and anything but
-// directories and regular files. A name that root does not hold fails with
+// directory, everything beneath it, sorted by path. It leaves out anything
+// but directories and regular files, such as a symlink put there by hand,
+// and does not descend into one. A name that root does not hold fails with
 // an error wrapping fs.ErrNotExist.
 func List(root *os.Root, name string) ([]File, error) {
 	var files []File
@@ -36,18 +35,14 @@ func List(root *os.Root, name string) ([]File, error) {
 		if err != nil {
 			return err
 		}
-		virtual, ok := virtualPath(stored)
-		if !ok || !d.IsDir() && !d.Type().IsRegular() {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
+		if !d.IsDir() && !d.Type().IsRegular() {
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-		f := File{Path: virtual, Dir: d.IsDir(), Mode: info.Mode().Perm(), ModTime: info.ModTime()}
+		f := File{Path: path.Join("/", stored), Dir: d.IsDir(), Mode: info.Mode().Perm(), ModTime: info.ModTime()}
 		if !f.Dir {
 			f.Size = info.Size()
 		}
@@ -78,22 +73,4 @@ func Open(root *os.Root, name string) (*os.File, error) {
 		return nil, fmt.Errorf("backend: open %s: %w", name, err)
 	}
 	return f, nil
-}
-
-// virtualPath returns the clean absolute path whose stored name is stored,
-// relative to the root, and false if the backend cannot have given it.
-func virtualPath(stored string) (string, bool) {
-	if stored == "." {
-		return "/", true
-	}
-	segments := strings.Split(stored, "/")
-	for i, s := range segments {
-		name, ok := decodeName(s)
-		// A name copied in by hand could decode to one no client can give.
-		if !ok || name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
-			return "", false
-		}
-		segments[i] = name
-	}
-	return path.Join(append([]string{"/"}, segments...)...), true
 }

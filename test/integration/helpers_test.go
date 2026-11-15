@@ -99,10 +99,9 @@ type server struct {
 	wait func()
 }
 
-// path returns where the server stores the file at the virtual path name,
-// whose name the backend encodes.
+// path returns where the server stores the file at the virtual path name.
 func (s *server) path(name string) string {
-	return filepath.Join(s.files, filepath.FromSlash(backend.StoredName(name)))
+	return filepath.Join(s.files, filepath.FromSlash(name))
 }
 
 // waitForSessions waits until the server has finished every session it has
@@ -512,6 +511,20 @@ func openSSHOrSkip(tb testing.TB) string {
 		tb.Skip("OpenSSH sftp client not installed")
 	}
 	return sftpPath
+}
+
+// skipUnlessCaseSensitive skips the test unless the volume that holds the
+// test's temporary directories tells names that differ only in case apart,
+// as Linux volumes do and macOS volumes usually do not.
+func skipUnlessCaseSensitive(tb testing.TB) {
+	tb.Helper()
+	dir := tb.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Probe"), nil, 0o600); err != nil {
+		tb.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "probe")); err == nil {
+		tb.Skip("the host volume ignores case, so names that differ only in case are one file")
+	}
 }
 
 // openSSH runs batch with the OpenSSH sftp client in work, adding options to

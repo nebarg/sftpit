@@ -292,8 +292,6 @@ var scripts = map[string][]step{
 		file(strings.Repeat("n", 255), "longest"),
 		[]step{
 			{"create a name too long for any host", open(strings.Repeat("n", 256), create)},
-			{"mkdir a name of 128 capitals", req(&sftpwire.Mkdir{Path: strings.Repeat("N", 128)})},
-			{"rmdir the name of 128 capitals", req(&sftpwire.Rmdir{Path: strings.Repeat("N", 128)})},
 		},
 	),
 }
@@ -324,10 +322,6 @@ var differences = map[string]string{
 	"paths/stat a file with a trailing slash": "pkg/sftp's request server cleans paths before the backend sees them, so a trailing slash after a file is ignored",
 
 	"paths/stat through a missing directory": "pkg/sftp's request server cleans paths before the backend sees them, so .. after a missing directory is ignored",
-
-	"names/mkdir a name of 128 capitals": "names are encoded on the host, so a name of more than 127 capitals is too long to store",
-
-	"names/rmdir the name of 128 capitals": "names are encoded on the host, so a name of more than 127 capitals is too long to store",
 }
 
 // TestRepliesMatchOpenSSH runs each script against sftpit, directly and

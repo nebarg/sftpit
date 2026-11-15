@@ -297,7 +297,7 @@ With `--seed-dir`, sftpit copies the folder at startup, keeping permissions and 
 
 Files live in a workspace, a temporary folder deleted when sftpit stops. With `--data-dir`, sftpit keeps the workspace instead, with the files of its last five runs in `runs/<run>/fs/`. The folder must be empty or an existing sftpit workspace, and only one sftpit can use it at a time.
 
-Names in `fs/` are encoded so that they behave as on a case-sensitive Linux server on any file system: `Orders 2026.CSV` is stored as `^orders%202026.^c^s^v`. Add files through the seed folder or over SFTP, since sftpit ignores names in `fs/` that it did not encode.
+Files are stored in `fs/` under the names clients give them, so files added there by hand are served over SFTP, and uploads can be read from there. The API's file listing shows only folders and regular files. A file system that ignores case, such as the default one on macOS, makes names that differ only in case the same file; on Linux they stay distinct.
 
 </details>
 
@@ -406,7 +406,7 @@ sftpit speaks SFTP version 3 and follows OpenSSH's `sftp-server` closely. The di
 - paths are cleaned before use, so a trailing slash after a file name, or `..` after a folder that doesn't exist, is ignored where OpenSSH answers "no such file";
 - `posix-rename@openssh.com` doesn't replace an empty folder with another folder;
 - listings show the owner and group as numbers;
-- names are encoded on the host, which shortens the longest name that fits.
+- names are stored as given, so the host's file system decides whether names that differ only in case are the same file.
 
 As on OpenSSH, a standard rename fails when the target exists, and `posix-rename@openssh.com` replaces it. A login ends after six failed attempts, and each key an SSH agent offers counts as one, so log in as a key user with `-i KEY -o IdentitiesOnly=yes`.
 

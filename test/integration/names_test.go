@@ -12,11 +12,12 @@ import (
 )
 
 // TestOpenSSHKeepsEveryName uploads files whose names differ only in case,
-// or that a host volume might refuse or change, and checks that OpenSSH
-// lists and downloads each one as its own file, as from a case-sensitive
-// Linux server, whatever the host's volume is.
+// and checks that OpenSSH lists and downloads each one as its own file, as
+// from a case-sensitive Linux server. It runs only on a host volume that
+// tells such names apart.
 func TestOpenSSHKeepsEveryName(t *testing.T) {
 	sftpPath := openSSHOrSkip(t)
+	skipUnlessCaseSensitive(t)
 	// sftp shows names as the locale says, so the test fixes the locale.
 	t.Setenv("LC_ALL", "C")
 	names := []string{"Orders.csv", "orders.csv", "ORDERS.CSV", "café.csv", "con.txt", "a:b.csv", "trailing."}

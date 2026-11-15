@@ -150,10 +150,6 @@ func (e *Embedded) mkdir(dir string) error {
 	return e.root.Mkdir(rootName(dir), 0o755)
 }
 
-// StoredName returns the name, relative to the root and slash-separated,
-// under which the file at the clean virtual path name is stored.
-func StoredName(name string) string { return rootName(name) }
-
 type session struct {
 	net.Conn
 	close func() error
