@@ -48,7 +48,7 @@ const (
 // The listen addresses in the container profile, when neither the
 // configuration nor the command line sets them: every interface.
 const (
-	ContainerSFTPListen = ":2122"
+	ContainerSFTPListen = ":22"
 	ContainerHTTPListen = ":8122"
 )
 

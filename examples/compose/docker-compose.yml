@@ -13,7 +13,7 @@ services:
       - '--config'
       - /sftpit/sftpit.yaml
     ports:
-      - '127.0.0.1:${SFTPIT_PORT:-2122}:2122'
+      - '127.0.0.1:${SFTPIT_PORT:-2122}:22'
       - '127.0.0.1:${SFTPIT_CONTROL_PORT:-8122}:8122'
     volumes:
       - './sftpit:/sftpit'

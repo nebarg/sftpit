@@ -43,7 +43,7 @@ Flags:
                        one, one in the config or a saved one; a reset
                        turns it off
   --sftp-listen ADDR   listen on ADDR instead of the configured address
-                       (default 127.0.0.1:2122, or :2122 in the container
+                       (default 127.0.0.1:2122, or :22 in the container
                        profile; port 0 picks a free port)
   --http-listen ADDR   serve the control API on ADDR instead of the
                        configured address (default 127.0.0.1:8122, or

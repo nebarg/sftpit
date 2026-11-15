@@ -14,7 +14,7 @@ trap '$compose down --volumes --remove-orphans' EXIT
 
 $compose run --rm client
 
-for port in 2122 8122; do
+for port in 22 8122; do
 	published="$($compose port sftpit "$port")"
 	case "$published" in
 	127.0.0.1:*) echo "ok: port $port is published on $published" ;;

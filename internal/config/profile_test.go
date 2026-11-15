@@ -27,7 +27,7 @@ func TestLoadListensOnEveryInterfaceInTheContainerProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Profile != Container || cfg.SFTPListen != ":2122" || cfg.HTTPListen != ":8122" || len(cfg.Warnings) != 0 {
+	if cfg.Profile != Container || cfg.SFTPListen != ":22" || cfg.HTTPListen != ":8122" || len(cfg.Warnings) != 0 {
 		t.Errorf("Load = %+v, want the container profile's defaults and no warnings", cfg)
 	}
 	config := testutil.WriteFile(t, filepath.Join(t.TempDir(), "sftpit.yaml"), "schema_version: 1\nserver:\n  sftp_listen: \"0.0.0.0:2200\"\n")

@@ -1,13 +1,13 @@
 #!/bin/sh
 # Checks, from a stand-in for an application's container, that it reaches
 # sftpit as the compose service sftpit: the control API on sftpit:8122, and
-# SFTP on sftpit:2122. With the fault "Uploads stop partway" on for the
+# SFTP on sftpit:22. With the fault "Uploads stop partway" on for the
 # first upload, the first upload fails part way and the retry succeeds.
 set -eu
 
 api=http://sftpit:8122/api
 login='--insecure --user test:test'
-url=sftp://sftpit:2122/incoming/orders.csv
+url=sftp://sftpit:22/incoming/orders.csv
 
 ok() { echo "ok: $1"; }
 fail() {

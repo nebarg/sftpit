@@ -14,8 +14,8 @@ test("the loopback profile is reached on this machine", () => {
 });
 
 test("the container profile is reached by its service's name", () => {
-  const server = { sftp_address: ":2122", profile: "container", control_hosts: ["sftpit"], users: [{ name: "partner-b" }] };
-  assert.deepEqual(connectCommands(server), [{ where: "in the compose network", command: "sftp -P 2122 partner-b@sftpit" }]);
+  const server = { sftp_address: ":22", profile: "container", control_hosts: ["sftpit"], users: [{ name: "partner-b" }] };
+  assert.deepEqual(connectCommands(server), [{ where: "in the compose network", command: "sftp -P 22 partner-b@sftpit" }]);
   assert.deepEqual(connectCommands({ ...server, control_hosts: [] }), []);
 });
 
